@@ -25,14 +25,15 @@ commit messages, and AI markers left in code.
   receive-pack indirection before it can bypass the final hook.
 - Require the managed final guards to be present for protected agent Git
   operations on every profile, not only `strict`.
-- Ignore local Git replacement refs in policy, history, CODEOWNERS, and audit
+- Ignore local Git replacement refs in policy, history, authorization, and audit
   reads; treat `git replace` as a policy transition in compound commands.
 - Scan every index stage during unresolved conflicts so a secret on either side
   cannot be missed.
-- Parse CODEOWNERS comments and unsupported patterns consistently with GitHub.
-- Accept an exact-head CODEOWNER approval only from a direct user whose
-  write-equivalent repository permission GitHub confirms; organization-team
-  owners fail closed because the repository workflow token cannot prove membership.
+- Authorize protected-path CI only when the exact workflow-run attempt's actor and
+  triggering actor, including their IDs, match the current personal-repository
+  owner returned by GitHub. Bind that authorization to exact commits, paths,
+  blobs, modes, deletion tombstones, and policy migrations; non-owner changes fail
+  closed with no reviewer fallback.
 - Keep the published local rule-pack schema compatible with strict JSON Schema
   validators.
 - Prove npm version absence and forward dist-tag movement with bounded retries
@@ -71,6 +72,9 @@ commit messages, and AI markers left in code.
   longer fetchable, covering every commit reachable from the replacement head.
 - Allow public PEM certificates in the package manifest while rejecting PEM
   files that contain a private-key header.
+- Publish to npm from a `v*` tag push: the release workflow installs dependencies,
+  runs the test suite, and publishes with npm build provenance authenticated by the
+  `NPM_TOKEN` secret. Use Node 24 and SHA-pinned actions.
 
 ### Overview
 
@@ -135,8 +139,8 @@ commit messages, and AI markers left in code.
   restored on uninstall.
 - Published JSON schemas; machine reports include target policy identity,
   completeness, scan statistics, and commit/object metadata.
-- Release pipeline runs behind an environment, uses SHA-pinned actions, and
-  publishes with npm build provenance.
+- Release pipeline publishes to npm on a `v*` tag push with SHA-pinned actions and
+  npm build provenance.
 
 ### Security
 

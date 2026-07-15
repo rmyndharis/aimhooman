@@ -7,7 +7,7 @@ zero-runtime-dependency Node ESM tool, so most changes are approachable.
 
 - **Node.js 22.8 or newer**
 - **Git 2.28 or newer**
-- **Go** for the pinned `actionlint` release gate
+- **Go 1.25.x** for the pinned `actionlint` release gate
 
 The published runtime has no dependencies. Development tools are locked in
 `package-lock.json`.
@@ -107,25 +107,38 @@ Commits must read as if a human wrote them:
 
 By participating, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Changes to agent instructions and `.aimhooman.json` need a `CODEOWNERS`
-approval on the current PR head. The protected `main` branch must require that
-review and the `tests` workflow; the SHA-bound CI acknowledgment expires after
-another push. The default-branch push check accepts review evidence only from a
-merged PR. A topic-branch push can use an open PR when its approved head is the
-same commit as the push.
+This is a personal, owner-only repository. GitHub branch rules require the `tests`
+workflow but no pull-request approval, code-owner review, last-push approval, or
+other reviewer. The repository has no `CODEOWNERS` fallback.
 
-Use direct `@user` entries for review-required CODEOWNERS paths. The repository-
-scoped Actions token can verify that user's exact-head approval and repository
-permission, but it cannot prove organization-team membership; team owners fail
-closed instead of being treated as equivalent authority.
+Changes to agent instructions or `.aimhooman.json` are protected-path changes. CI
+verifies the pinned repository and owner login plus numeric IDs through the GitHub
+API, then fetches the exact workflow-run attempt. GitHub must attribute the
+attempt's `actor` and `triggering_actor` to that owner's login and numeric ID. CI
+binds that authorization to the exact
+head, transition commit, path, resulting blob and regular-file mode, or deletion
+tombstone. Policy migrations additionally bind the old and new policy objects.
+Another commit, attempt, path result, mode, or migration needs fresh authorization.
+A protected-path change by any non-owner fails closed.
 
-The `release` environment must require a direct-user maintainer review, prevent
-self-review, and disable administrator bypass. The workflow checks that configuration before trusting
-the gate. Set its `NPM_EXCLUSIVE_PUBLISHER` environment variable to `true` only
-after confirming this workflow is the package's sole authorized npm publisher;
-that invariant plus workflow concurrency prevents a second publisher from
-moving `latest` or `next` between the forward check and `npm publish`. Its
-history scan starts at the root commit and binds review-required
-paths to the release commit. For each strict-policy downgrade or deletion, it
-also records the exact transition and each strict parent object. The environment
-approval covers those release bindings; without that gate the scan stops.
+The owner account and its credentials are the repository trust root. These checks
+verify GitHub's actor attribution and bind the resulting objects; they do not prove
+an interactive human action, provide independent review, or protect against a
+compromised owner credential.
+
+Releases publish to npm automatically when a `v*` tag is pushed. The workflow
+installs dependencies, runs the test suite, and publishes with npm build provenance,
+authenticated by the `NPM_TOKEN` secret. To cut a release: bump the version (keep
+`package.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, and
+`.claude-plugin/marketplace.json` in sync), add the `## [version]` CHANGELOG entry
+and the matching README version badge, then tag and push:
+
+```sh
+git tag -a v0.1.0 -m v0.1.0
+git push origin v0.1.0
+```
+
+Protect `v*` tags so only the owner can create them and tag update or deletion is
+blocked. Use a granular, publish-only, package-scoped npm token with 2FA enabled
+and rotate it regularly. Do not run `npm publish` or move dist-tags manually while
+a release job is pending or running.

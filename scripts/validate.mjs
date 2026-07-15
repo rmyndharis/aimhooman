@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { loadRules } from '../src/rules.mjs';
 import { loadProjectPolicy } from '../src/state.mjs';
 import { validateCodexManifest } from '../src/codex-manifest.mjs';
-import { releaseChannel } from '../src/release-channel.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -47,7 +46,7 @@ if (existsSync(join(ROOT, '.git'))) {
     tracked = execFileSync('git', ['ls-files', '-co', '--exclude-standard', '-z'], { cwd: ROOT })
         .toString('utf8')
         .split('\0')
-        .filter(Boolean);
+        .filter((path) => path && existsSync(join(ROOT, path)));
 } else {
     tracked = files();
 }
@@ -88,27 +87,6 @@ if (!readme.includes(`version-v${pkg.version.replace(/-/g, '--')}`) || !readme.i
 }
 if (!changelog.includes(`## [${pkg.version}]`)) {
     throw new Error(`CHANGELOG has no heading for ${pkg.version}`);
-}
-const releaseWorkflow = readFileSync(join(ROOT, '.github/workflows/release.yml'), 'utf8');
-const expectedChannel = releaseChannel(pkg.version);
-const isPrerelease = expectedChannel === 'next';
-for (const required of [
-    'persist-credentials: false',
-    'group: aimhooman-npm-release',
-    'DIST_TAG=$(node scripts/release-channel.mjs channel "$VERSION")',
-    'REGISTRY_STATE=$(node scripts/npm-release-state.mjs "$NAME" "$VERSION" "$REGISTRY")',
-    'npm publish "$TARBALL" --access public --provenance --tag "$DIST_TAG" --registry "$REGISTRY"',
-    'ACTUAL_INTEGRITY=',
-    'dist.attestations.provenance.predicateType',
-    'test "$ACTUAL_DRAFT" = true',
-]) {
-    if (!releaseWorkflow.includes(required)) throw new Error(`release workflow is missing: ${required}`);
-}
-if (releaseWorkflow.includes('npm dist-tag add')) {
-    throw new Error('release workflow must not move a dist-tag while reusing an existing version');
-}
-if (isPrerelease && (expectedChannel !== 'next' || !releaseWorkflow.includes('--prerelease'))) {
-    throw new Error('release workflow does not keep prereleases off npm latest and stable GitHub releases');
 }
 
 const rules = loadRules();

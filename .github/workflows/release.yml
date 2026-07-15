@@ -1,191 +1,34 @@
 name: release
 
-# Publish to npm and create a GitHub release when a version tag is pushed,
-# behind a human-approved environment. Trigger locally with:
-#   git tag v0.1.0 && git push --tags
+# Publish to npm when a version tag is cut. Trigger locally with:
+#   git tag -a v0.1.0 -m v0.1.0 && git push origin v0.1.0
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: read
-
-concurrency:
-  group: aimhooman-npm-release
-  cancel-in-progress: false
+  id-token: write # npm publish --provenance
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      actions: read # inspect the environment protection that approved this job
-      contents: write # gh release create
-      id-token: write # npm provenance
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify release commit comes from main
-        run: |
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
-            echo "tag commit is not reachable from origin/main" >&2
-            exit 1
-          }
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
-      - name: Set up Go for workflow lint
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version: '1.25.x'
-          cache: false
-      - name: Install release-gate tools
+      - name: Install
         run: npm ci --ignore-scripts
-      - name: Verify tag matches package version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          test "$TAG" = "v$VERSION" || {
-            echo "tag $TAG does not match package version $VERSION" >&2
-            exit 1
-          }
+      - name: Test
+        run: npm test
+      - name: Publish to npm
+        run: npm publish --access public --provenance
         env:
-          TAG: ${{ github.ref_name }}
-      - name: Verify protected release environment
-        id: release_environment
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/verify-release-environment.mjs
-      - name: Verify source, tests, package, and installed hooks
-        env:
-          AIMHOOMAN_ARTIFACT_DIR: ${{ runner.temp }}/aimhooman-artifact
-        run: npm run verify
-      - name: Pin verified artifact metadata
-        id: artifact
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/aimhooman-artifact
-        run: |
-          node - "$ARTIFACT_DIR/artifact.json" "$GITHUB_OUTPUT" <<'NODE'
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const [metaPath, outputPath] = process.argv.slice(2);
-          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-          if (meta.schema_version !== 1) throw new Error('unsupported artifact metadata');
-          if (!/^@[a-z0-9._~-]+\/[a-z0-9._~-]+$/.test(meta.name)) throw new Error('invalid package name');
-          if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(meta.version)) throw new Error('invalid package version');
-          if (path.basename(meta.filename) !== meta.filename || !/^[A-Za-z0-9._~-]+\.tgz$/.test(meta.filename)) throw new Error('invalid artifact filename');
-          if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(meta.integrity)) throw new Error('invalid artifact integrity');
-          fs.appendFileSync(outputPath, [
-            `name=${meta.name}`,
-            `version=${meta.version}`,
-            `filename=${meta.filename}`,
-            `integrity=${meta.integrity}`,
-          ].join('\n') + '\n');
-          NODE
-      - name: Scan release history with repository policy
-        env:
-          CI_HISTORY_CONTEXT: release
-          HEAD_SHA: ${{ github.sha }}
-          CURRENT_TAG: ${{ github.ref_name }}
-          PROTECTED_RELEASE_REVIEW: ${{ steps.release_environment.outputs.protected }}
-        run: node scripts/scan-ci-history.mjs
-      - name: Create or validate GitHub release
-        run: |
-          EXPECTED_PRERELEASE=false
-          if [[ "$(node scripts/release-channel.mjs channel "$VERSION")" == next ]]; then
-            EXPECTED_PRERELEASE=true
-          fi
-          if RELEASE=$(gh release view "$TAG" --json isDraft,isPrerelease 2>/dev/null); then
-            ACTUAL_DRAFT=$(node -e "const v=JSON.parse(process.argv[1]);process.stdout.write(String(v.isDraft))" "$RELEASE")
-            ACTUAL_PRERELEASE=$(node -e "const v=JSON.parse(process.argv[1]);process.stdout.write(String(v.isPrerelease))" "$RELEASE")
-            test "$ACTUAL_DRAFT" = true || {
-              echo "existing GitHub release is already published; refusing to reuse it" >&2
-              exit 1
-            }
-            test "$ACTUAL_PRERELEASE" = "$EXPECTED_PRERELEASE" || {
-              echo "existing GitHub release has the wrong prerelease classification" >&2
-              exit 1
-            }
-          elif [[ "$EXPECTED_PRERELEASE" == true ]]; then
-              gh release create "$TAG" --draft --prerelease --generate-notes --title "$TAG"
-          else
-            gh release create "$TAG" --draft --generate-notes --title "$TAG"
-          fi
-        env:
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.artifact.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish to npm (idempotent, with build provenance)
-        run: |
-          REGISTRY=https://registry.npmjs.org/
-          META="$ARTIFACT_DIR/artifact.json"
-          test -f "$META"
-          NAME=$(node -p "require(process.argv[1]).name" "$META")
-          VERSION=$(node -p "require(process.argv[1]).version" "$META")
-          FILENAME=$(node -p "require(process.argv[1]).filename" "$META")
-          EXPECTED_INTEGRITY=$(node -p "require(process.argv[1]).integrity" "$META")
-          test "$NAME" = "$VERIFIED_NAME"
-          test "$VERSION" = "$VERIFIED_VERSION"
-          test "$FILENAME" = "$VERIFIED_FILENAME"
-          test "$EXPECTED_INTEGRITY" = "$VERIFIED_INTEGRITY"
-          TARBALL="$ARTIFACT_DIR/$FILENAME"
-          test -f "$TARBALL"
-          ACTUAL_INTEGRITY=$(node -e "const fs=require('node:fs'),c=require('node:crypto');process.stdout.write('sha512-'+c.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64'))" "$TARBALL")
-          test "$ACTUAL_INTEGRITY" = "$VERIFIED_INTEGRITY" || {
-            echo "verified tarball changed before publish" >&2
-            exit 1
-          }
-          DIST_TAG=$(node scripts/release-channel.mjs channel "$VERSION")
-          REGISTRY_STATE=$(node scripts/npm-release-state.mjs "$NAME" "$VERSION" "$REGISTRY")
-          VERSION_STATE=$(node -e "const v=JSON.parse(process.argv[1]);process.stdout.write(v.version_state)" "$REGISTRY_STATE")
-          if [[ "$VERSION_STATE" == existing ]]; then
-            PUBLISH_STATE=existing
-          elif [[ "$VERSION_STATE" == absent ]]; then
-            npm publish "$TARBALL" --access public --provenance --tag "$DIST_TAG" --registry "$REGISTRY"
-            PUBLISH_STATE=published
-          else
-            echo "unexpected registry version state: $VERSION_STATE" >&2
-            exit 1
-          fi
-          # Registry metadata and attestations can lag after publish, and an
-          # idempotent rerun can hit the same window. Keep each read from
-          # tripping bash -e, then validate all three values after bounded retry.
-          for _ in 1 2 3 4 5; do
-            PUBLISHED_INTEGRITY=$(npm view "$NAME@$VERSION" dist.integrity --registry "$REGISTRY" 2>/dev/null || true)
-            PUBLISHED_TAG=$(npm view "$NAME" "dist-tags.$DIST_TAG" --registry "$REGISTRY" 2>/dev/null || true)
-            PUBLISHED_PREDICATE=$(npm view "$NAME@$VERSION" dist.attestations.provenance.predicateType --registry "$REGISTRY" 2>/dev/null || true)
-            if [[ -n "$PUBLISHED_INTEGRITY" && -n "$PUBLISHED_TAG" && -n "$PUBLISHED_PREDICATE" ]]; then break; fi
-            sleep 3
-          done
-          test "$PUBLISHED_INTEGRITY" = "$EXPECTED_INTEGRITY" || {
-            echo "$NAME@$VERSION exists with different or unavailable package bytes" >&2
-            exit 1
-          }
-          test "$PUBLISHED_TAG" = "$VERSION" || {
-            echo "$DIST_TAG points to $PUBLISHED_TAG; refusing to move it during a rerun" >&2
-            exit 1
-          }
-          test "$PUBLISHED_PREDICATE" = "https://slsa.dev/provenance/v1" || {
-            echo "$NAME@$VERSION published without the expected npm provenance attestation" >&2
-            exit 1
-          }
-          if [[ "$PUBLISH_STATE" == existing ]]; then
-            echo "$NAME@$VERSION is already published with matching integrity, provenance, and tag"
-          fi
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/aimhooman-artifact
-          VERIFIED_NAME: ${{ steps.artifact.outputs.name }}
-          VERIFIED_VERSION: ${{ steps.artifact.outputs.version }}
-          VERIFIED_FILENAME: ${{ steps.artifact.outputs.filename }}
-          VERIFIED_INTEGRITY: ${{ steps.artifact.outputs.integrity }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Finalize GitHub release
-        run: gh release edit "$TAG" --draft=false
-        env:
-          TAG: ${{ github.ref_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

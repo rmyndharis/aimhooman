@@ -3,10 +3,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-    acknowledgeProtectedReleasePaths,
-    acknowledgePushReviewPlan,
-    pushReviewPlan,
-} from './acknowledge-reviewed-paths.mjs';
+    authorizeProtectedPathPlan,
+    protectedPathAuthorizationPlan,
+} from './authorize-owner-paths.mjs';
+import { verifyOwnerWorkflowRun } from './github-owner-authority.mjs';
 import { EMPTY_HISTORY_OID, resolveCommit } from '../src/history-scan.mjs';
 import { gitEnvironment } from '../src/git-environment.mjs';
 
@@ -86,22 +86,47 @@ async function main() {
             console.log('aimhooman: pushed ref contains no commits outside the default branch');
             return 0;
         }
-        const plan = pushReviewPlan(base, head);
+        const plan = protectedPathAuthorizationPlan(base, head);
         if (plan.paths.length) {
-            await acknowledgePushReviewPlan(plan, {
-                repository: requiredEnvironment('GITHUB_REPOSITORY'),
-                token: requiredEnvironment('GITHUB_TOKEN'),
-                refName: requiredEnvironment('REF_NAME'),
-                defaultBranch: requiredEnvironment('DEFAULT_BRANCH'),
+            const refName = requiredEnvironment('REF_NAME');
+            const authority = await verifyOwnerWorkflowRun({
+                expectedEvent: 'push',
+                expectedHead: head,
+                expectedRef: refName,
+                expectedWorkflowPath: '.github/workflows/test.yml',
+                requireWorkflowAtHead: true,
+            });
+            authorizeProtectedPathPlan(plan, authority, {
+                context: `push to ${refName} at ${head}`,
+                event: 'push',
+                refName,
+                workflowPath: '.github/workflows/test.yml',
             });
         }
     } else if (context === 'release') {
         const tag = requiredEnvironment('CURRENT_TAG');
-        if (process.env.PROTECTED_RELEASE_REVIEW !== 'true') {
-            throw new Error('release history scan requires the protected release review gate');
+        if (process.env.RELEASE_ENVIRONMENT_VERIFIED !== 'true') {
+            throw new Error('release history scan requires the owner-only release environment gate');
         }
+        if (requiredEnvironment('GITHUB_REF_TYPE') !== 'tag'
+            || requiredEnvironment('GITHUB_REF') !== `refs/tags/${tag}`) {
+            throw new Error('release history scan requires the exact pushed tag ref');
+        }
+        const authority = await verifyOwnerWorkflowRun({
+            expectedEvent: 'push',
+            expectedHead: head,
+            expectedRef: tag,
+            expectedWorkflowPath: '.github/workflows/release.yml',
+            requireWorkflowAtHead: true,
+        });
         base = selectReleaseBase({ head });
-        acknowledgeProtectedReleasePaths(base, head, tag);
+        const plan = protectedPathAuthorizationPlan(base, head);
+        authorizeProtectedPathPlan(plan, authority, {
+            context: `release tag ${tag} at ${head}`,
+            event: 'push',
+            refName: tag,
+            workflowPath: '.github/workflows/release.yml',
+        });
     } else {
         throw new Error(`unsupported CI_HISTORY_CONTEXT "${context}"`);
     }

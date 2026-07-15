@@ -282,22 +282,21 @@ An individual `check` may escalate to `--profile strict`, but cannot weaken or r
 the team profile. Malformed project policy fails closed with an actionable error;
 personal allow/deny exceptions and local rule packs remain in the common Git directory
 under `aimhooman/`.
-Policy-file changes are review-required. This repository validates the file, requires a
-`CODEOWNERS` approval on the exact PR head, then records each reviewed path, review
-head, staged/commit transition, and resulting blob plus regular-file mode, or a
-deletion tombstone, in strict CI. Editing the path or mode again produces a different
-tuple and invalidates that approval.
-A review owner must be a direct `@user` with write-equivalent repository access;
-organization-team owners fail closed because the repository-scoped workflow token
-cannot prove team membership.
-A strict downgrade or deletion also records the reviewed
-transition, old object, and new object. Default-branch push checks rebuild that evidence only from a
-merged PR; a topic push may use its open PR only while its approved head matches the push.
-The sole bootstrap exception is the repository's first push: exactly one root commit on
-the default branch may record its reviewed paths locally because no prior branch exists
-from which to open a PR. A multi-commit bootstrap and every later push still need PR proof.
-An ordinary path allow cannot approve either transition. For a local staged change, use
-`policy-review` with the same object-bound fields.
+Under `strict`, policy files and agent instructions produce review-required findings.
+The product's `review` and `policy-review` commands record local, object-bound decisions;
+an ordinary path allow cannot satisfy either finding.
+
+This personal repository does not use GitHub approvals, required reviewers, or
+`CODEOWNERS`. For a protected-path change, CI verifies the pinned repository and owner
+login plus numeric IDs through the GitHub API, then inspects the exact workflow-run
+attempt. GitHub must attribute both `actor` and `triggering_actor`, including their
+numeric IDs, to that owner. CI then binds the
+authorization to the exact head, transition commit, path, resulting blob and regular-file
+mode, or deletion tombstone. A strict-policy migration also binds its old and new policy
+objects. A different attempt, commit, path result, mode, or policy transition needs fresh
+authorization. A non-owner change fails closed; there is no reviewer or `CODEOWNERS`
+fallback. The owner account and its credentials are the trust root, so this is owner
+authorization, not independent review.
 
 ## Overrides
 
@@ -447,9 +446,7 @@ aimhooman check --range origin/main...HEAD --profile strict
 ```
 
 On GitHub Actions, configure `actions/checkout` with `fetch-depth: 0` so the
-triple-dot merge base is available. The release workflow scans from the root
-commit because a reachable version-shaped tag alone is not a trusted scan
-checkpoint.
+triple-dot merge base is available.
 
 ## Contributing
 

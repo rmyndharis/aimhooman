@@ -54,16 +54,21 @@ only the latest minor release will receive security fixes.
 - A committed `.aimhooman.json` provides the versioned team profile. Invalid
   project policy fails closed; per-clone allow/deny entries remain local and
   should be governed by team process where compliance requires it.
-- This repository's strict range scan explicitly acknowledges the validated
-  `.aimhooman.json` path; `CODEOWNERS` assigns policy/workflow changes to the
-  maintainer. Review-required paths and the release environment use direct-user
-  reviewers whose write-equivalent repository permission can be checked by the
-  repository workflow token. Organization-team reviewers fail closed. Branch
-  protection must require code-owner review for that approval boundary to be effective.
-- The release pipeline is configured to run behind a protected GitHub environment,
-  pin actions to immutable commit SHAs, and publish with npm build provenance. The
-  environment must set `NPM_EXCLUSIVE_PUBLISHER=true` only after this protected
-  workflow is the package's sole authorized npm publisher. If another token or
-  trusted publisher can publish it, release is blocked: npm dist-tag updates do
-  not provide a compare-and-swap guard. The npm package is not claimed as
-  available until that first release completes.
+- This is a personal, owner-only repository with no GitHub approval, required
+  reviewer, or `CODEOWNERS` gate. For protected-path changes, CI resolves the
+  pinned repository and owner through the GitHub API and fetches the exact
+  workflow-run attempt. GitHub must attribute both the actor and triggering actor
+  to the owner's login and numeric ID. The resulting decision is bound to the exact head,
+  transition commit, path, blob and regular-file mode, or deletion tombstone; a
+  policy migration also binds its old and new objects. Non-owner changes fail
+  closed with no reviewer fallback. The owner is the trust root, not an independent
+  reviewer. These checks verify GitHub attribution, not an interactive human action,
+  and cannot defend against malicious or compromised owner credentials.
+- The release pipeline pins actions to immutable commit SHAs and publishes with npm
+  build provenance. Pushing a `v*` tag runs the workflow: it installs dependencies,
+  runs the test suite, then publishes to npm authenticated by the `NPM_TOKEN` secret
+  (use a granular, publish-only, package-scoped npm token with 2FA enabled; rotate it
+  regularly). Protect `v*` tags so only the owner can create them and tag update or
+  deletion is blocked. Do not publish or move dist-tags manually while a release job
+  is pending or running. The npm package is not claimed as available until the release
+  workflow completes.

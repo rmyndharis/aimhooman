@@ -48,7 +48,7 @@
         "sync:hosts": "node scripts/sync-hosts.mjs",
         "sync:ruleset": "node scripts/sync-ruleset.mjs",
         "test": "node --import ./tests/test-env.mjs --test",
-        "test:coverage": "node --import ./tests/test-env.mjs --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-coverage-include=\"scripts/acknowledge-reviewed-paths.mjs\" --test-coverage-include=\"scripts/npm-release-state.mjs\" --test-coverage-include=\"scripts/package-manifest.mjs\" --test-coverage-include=\"scripts/scan-ci-history.mjs\" --test-coverage-include=\"scripts/verify-release-environment.mjs\" --test-coverage-exclude=\"tests/**\" --test-coverage-lines=75 --test-coverage-branches=60 --test-coverage-functions=85 --test-reporter=spec --test-reporter=./scripts/coverage-threshold.mjs --test-reporter-destination=stdout --test-reporter-destination=stderr --test",
+        "test:coverage": "node --import ./tests/test-env.mjs --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-coverage-include=\"scripts/authorize-owner-paths.mjs\" --test-coverage-include=\"scripts/github-owner-authority.mjs\" --test-coverage-include=\"scripts/package-manifest.mjs\" --test-coverage-include=\"scripts/scan-ci-history.mjs\" --test-coverage-exclude=\"tests/**\" --test-coverage-lines=75 --test-coverage-branches=60 --test-coverage-functions=85 --test-reporter=spec --test-reporter=./scripts/coverage-threshold.mjs --test-reporter-destination=stdout --test-reporter-destination=stderr --test",
         "check:static": "node scripts/static-gates.mjs",
         "verify": "node scripts/verify.mjs"
     },
