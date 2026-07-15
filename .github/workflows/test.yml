@@ -1,0 +1,71 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: '22.8.0'
+          - os: ubuntu-latest
+            node: 24
+          - os: ubuntu-latest
+            node: 26
+          - os: macos-latest
+            node: '22.8.0'
+          - os: macos-latest
+            node: 24
+          - os: windows-latest
+            node: '22.8.0'
+          - os: windows-latest
+            node: 24
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - name: Install release-gate tools
+        run: npm ci --ignore-scripts
+      - name: Verify source, tests, package, and installed hooks
+        run: npm run verify
+      - name: Scan pull-request range with repository policy
+        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.node == 24
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/acknowledge-reviewed-paths.mjs
+          node bin/aimhooman.mjs check \
+            --range "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+            --profile strict \
+            --json
+      - name: Scan pushed history with repository policy
+        if: github.event_name == 'push' && github.event.deleted == false && matrix.os == 'ubuntu-latest' && matrix.node == 24
+        env:
+          CI_HISTORY_CONTEXT: push
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/scan-ci-history.mjs

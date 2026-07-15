@@ -1,0 +1,407 @@
+[
+    {
+        "id": "claude.local-settings",
+        "version": 1,
+        "provider": "claude-code",
+        "category": "local-settings",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".claude/settings.local.json",
+                "**/.claude/settings.local.json"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Personal Claude Code settings are not intended for source control.",
+        "remediation": [
+            "git restore --staged .claude/settings.local.json"
+        ]
+    },
+    {
+        "id": "claude.session-state",
+        "version": 1,
+        "provider": "claude-code",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".claude.json",
+                "**/.claude.json",
+                ".claude/.credentials.json",
+                "**/.claude/.credentials.json",
+                ".claude/session*.json",
+                "**/.claude/session*.json",
+                ".claude/history*",
+                "**/.claude/history*",
+                ".claude/todos/**",
+                "**/.claude/todos/**",
+                ".claude/shell-snapshots/**",
+                "**/.claude/shell-snapshots/**",
+                ".claude/statsig/**",
+                "**/.claude/statsig/**",
+                ".claude/projects/**",
+                "**/.claude/projects/**",
+                ".claude/logs/**",
+                "**/.claude/logs/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Claude Code session and state artifacts are local, not repository content.",
+        "remediation": [
+            "git restore --staged <path>",
+            "add the path to your local git exclude"
+        ]
+    },
+    {
+        "id": "codex.session-state",
+        "version": 1,
+        "provider": "codex",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".codex/sessions/**",
+                "**/.codex/sessions/**",
+                ".codex/history*",
+                "**/.codex/history*",
+                ".codex/log/**",
+                "**/.codex/log/**",
+                ".codex/logs/**",
+                "**/.codex/logs/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Codex session, history, and log artifacts are local, not repository content.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
+    },
+    {
+        "id": "copilot.session-state",
+        "version": 2,
+        "provider": "copilot",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".copilot/**",
+                "**/.copilot/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Copilot local state is not repository content.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
+    },
+    {
+        "id": "cursor.session-state",
+        "version": 1,
+        "provider": "cursor",
+        "category": "ephemeral-state",
+        "confidence": "medium",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".cursor/session*",
+                "**/.cursor/session*",
+                ".cursor/chats/**",
+                "**/.cursor/chats/**",
+                ".cursor/logs/**",
+                "**/.cursor/logs/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Cursor session artifacts are local, not repository content.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
+    },
+    {
+        "id": "aider.history",
+        "version": 2,
+        "provider": "aider",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".aider.*",
+                "**/.aider.*"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Aider dotfiles are local, not repository content.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
+    },
+    {
+        "id": "specstory.history",
+        "version": 1,
+        "provider": "specstory",
+        "category": "ephemeral-state",
+        "confidence": "medium",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".specstory/**",
+                "**/.specstory/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "SpecStory session history is local, not repository content.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
+    },
+    {
+        "id": "continue.sessions",
+        "version": 1,
+        "provider": "continue",
+        "category": "ephemeral-state",
+        "confidence": "medium",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".continue/sessions/**",
+                "**/.continue/sessions/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Continue session artifacts are local, not repository content.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
+    },
+    {
+        "id": "secret.dotenv",
+        "version": 2,
+        "provider": "generic",
+        "category": "secret",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                ".env",
+                "**/.env",
+                ".env.*",
+                "**/.env.*"
+            ],
+            "except": [
+                ".env.example",
+                "**/.env.example",
+                ".env.sample",
+                "**/.env.sample",
+                ".env.template",
+                "**/.env.template",
+                ".env.dist",
+                "**/.env.dist",
+                ".env.defaults",
+                "**/.env.defaults"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Environment files often carry secrets and should not be committed.",
+        "remediation": [
+            "git restore --staged <path>",
+            "commit a .env.example with placeholders instead"
+        ]
+    },
+    {
+        "id": "secret.private-key",
+        "version": 2,
+        "provider": "generic",
+        "category": "secret",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                "**/id_rsa",
+                "**/id_dsa",
+                "**/id_ecdsa",
+                "**/id_ed25519",
+                "**/*.p12",
+                "**/*.pfx"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "Private key material must never be committed.",
+        "remediation": [
+            "git restore --staged <path>",
+            "rotate the key if it was ever exposed"
+        ]
+    },
+    {
+        "id": "secret.aws-credentials",
+        "version": 2,
+        "provider": "generic",
+        "category": "secret",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                ".aws/credentials",
+                "**/.aws/credentials"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "AWS credentials must never be committed.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
+    },
+    {
+        "id": "generic.agent-instructions",
+        "version": 1,
+        "provider": "generic",
+        "category": "ambiguous-instructions",
+        "confidence": "medium",
+        "kind": "path",
+        "match": {
+            "paths": [
+                "AGENTS.md",
+                "**/AGENTS.md",
+                "CLAUDE.md",
+                "**/CLAUDE.md",
+                "GEMINI.md",
+                "**/GEMINI.md",
+                ".github/copilot-instructions.md",
+                "**/.github/copilot-instructions.md"
+            ]
+        },
+        "actions": {
+            "clean": "review",
+            "strict": "block",
+            "compliance": "review"
+        },
+        "reason": "Agent instruction files may be intentional team config. Review before committing.",
+        "remediation": [
+            "aimhooman allow <path> --reason \"shared team config\"",
+            "or unstage if it is personal"
+        ]
+    },
+    {
+        "id": "generic.project-policy",
+        "version": 1,
+        "provider": "aimhooman",
+        "category": "policy-config",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "paths": [
+                ".aimhooman.json",
+                "**/.aimhooman.json"
+            ]
+        },
+        "actions": {
+            "clean": "review",
+            "strict": "block",
+            "compliance": "review"
+        },
+        "reason": "Versioned enforcement policy changes require explicit human review.",
+        "remediation": [
+            "aimhooman allow .aimhooman.json --reason \"reviewed team policy change\"",
+            "or unstage the policy change"
+        ]
+    },
+    {
+        "id": "playwright-mcp.state",
+        "version": 1,
+        "provider": "playwright-mcp",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": { "paths": [".playwright-mcp/**", "**/.playwright-mcp/**"] },
+        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "reason": "Playwright MCP session artifacts are local, not repository content.",
+        "remediation": ["git restore --staged <path>"]
+    },
+    {
+        "id": "remember.state",
+        "version": 1,
+        "provider": "remember",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": { "paths": [".remember/**", "**/.remember/**"] },
+        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "reason": "Remember second-brain data is local, not repository content.",
+        "remediation": ["git restore --staged <path>"]
+    },
+    {
+        "id": "superpowers.state",
+        "version": 1,
+        "provider": "superpowers",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": { "paths": [".superpowers/**", "**/.superpowers/**"] },
+        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "reason": "Superpowers plugin state is local, not repository content.",
+        "remediation": ["git restore --staged <path>"]
+    },
+    {
+        "id": "agent.state",
+        "version": 2,
+        "provider": "generic",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": { "paths": [".agent/**", "**/.agent/**"] },
+        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "reason": "Generic agent state is local, not repository content.",
+        "remediation": ["git restore --staged <path>"]
+    }
+]

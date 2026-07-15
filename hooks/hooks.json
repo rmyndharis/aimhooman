@@ -1,0 +1,29 @@
+{
+    "description": "aimhooman: keep AI session files, secrets, and attribution out of commits",
+    "hooks": {
+        "SessionStart": [
+            {
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/aimhooman.mjs\" hook session-start",
+                        "timeout": 60
+                    }
+                ]
+            }
+        ],
+        "PreToolUse": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/aimhooman.mjs\" hook pre-tool-use",
+                        "timeout": 60
+                    }
+                ]
+            }
+        ]
+    }
+}

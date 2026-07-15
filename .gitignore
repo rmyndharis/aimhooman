@@ -1,0 +1,16 @@
+node_modules/
+
+# Local release-review working papers must never leave the workstation.
+docs/reviews/
+
+*.log
+.DS_Store
+
+# aimhooman eats its own dog food: never track agent session state
+.claude/
+.codex/
+.copilot/
+.cursor/session*
+.aider.*
+.specstory/
+.agent/

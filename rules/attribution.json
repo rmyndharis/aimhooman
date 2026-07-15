@@ -1,0 +1,142 @@
+[
+    {
+        "id": "attribution.claude-coauthor",
+        "version": 1,
+        "provider": "claude-code",
+        "category": "ai-attribution",
+        "confidence": "high",
+        "kind": "message",
+        "match": {
+            "content": [
+                "(?i)^\\s*co-authored-by:\\s*(?:claude|claude code)\\s*<noreply@anthropic\\.com>\\s*$"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "allow"
+        },
+        "reason": "Unwanted AI co-author attribution (Claude).",
+        "autofix": "remove-whole-line",
+        "remediation": [
+            "remove the Co-authored-by line",
+            "or run: aimhooman fix --message <file>"
+        ]
+    },
+    {
+        "id": "attribution.copilot-coauthor",
+        "version": 1,
+        "provider": "copilot",
+        "category": "ai-attribution",
+        "confidence": "high",
+        "kind": "message",
+        "match": {
+            "content": [
+                "(?i)^\\s*co-authored-by:\\s*(?:github\\s+)?copilot(?:\\[bot\\])?\\s*<(?:(?:[0-9]+\\+)?copilot(?:\\[bot\\])?@users\\.noreply\\.github\\.com|copilot@github\\.com)>\\s*$"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "allow"
+        },
+        "reason": "Unwanted AI co-author attribution (Copilot).",
+        "autofix": "remove-whole-line",
+        "remediation": [
+            "remove the Co-authored-by line",
+            "or run: aimhooman fix --message <file>"
+        ]
+    },
+    {
+        "id": "attribution.codex-coauthor",
+        "version": 1,
+        "provider": "codex",
+        "category": "ai-attribution",
+        "confidence": "high",
+        "kind": "message",
+        "match": {
+            "content": [
+                "(?i)^\\s*co-authored-by:\\s*(?:openai\\s+)?codex\\s*<noreply@openai\\.com>\\s*$"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "allow"
+        },
+        "reason": "Unwanted AI co-author attribution (Codex).",
+        "autofix": "remove-whole-line",
+        "remediation": [
+            "remove the Co-authored-by line",
+            "or run: aimhooman fix --message <file>"
+        ]
+    },
+    {
+        "id": "attribution.bot-coauthor",
+        "version": 1,
+        "provider": "generic",
+        "category": "ai-attribution",
+        "confidence": "medium",
+        "kind": "message",
+        "match": {
+            "content": [
+                "(?i)^\\s*co-authored-by:.*(\\[bot\\]|bot@users\\.noreply).*$"
+            ]
+        },
+        "actions": {
+            "clean": "review",
+            "strict": "review",
+            "compliance": "allow"
+        },
+        "reason": "Unwanted bot co-author attribution.",
+        "remediation": [
+            "remove the Co-authored-by line"
+        ]
+    },
+    {
+        "id": "attribution.generated-with",
+        "version": 1,
+        "provider": "generic",
+        "category": "ai-attribution",
+        "confidence": "high",
+        "kind": "message",
+        "match": {
+            "content": [
+                "(?i)^\\s*generated\\s+(?:with|by)\\s+(?:claude(?:\\s+code)?|(?:github\\s+)?copilot|chatgpt|gpt(?:-[0-9]+(?:\\.[0-9]+)?)?|(?:openai\\s+)?codex|cursor)[.!]?\\s*$",
+                "(?i)^\\s*(?:🤖\\s*)?generated\\s+with\\s+\\[claude code\\]\\(https://claude\\.ai/code\\)\\s*$"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "allow"
+        },
+        "reason": "Unwanted AI generation attribution in the message.",
+        "autofix": "remove-whole-line",
+        "remediation": [
+            "remove the generated-with line"
+        ]
+    },
+    {
+        "id": "attribution.ai-noreply",
+        "version": 1,
+        "provider": "generic",
+        "category": "ai-attribution",
+        "confidence": "high",
+        "kind": "message",
+        "match": {
+            "content": [
+                "(?i)^\\s*[a-z-]+-by:\\s*[^<>]+\\s*<noreply@(anthropic|openai)\\.com>\\s*$"
+            ]
+        },
+        "actions": {
+            "clean": "review",
+            "strict": "review",
+            "compliance": "allow"
+        },
+        "reason": "AI service noreply email in the message.",
+        "remediation": [
+            "remove the line referencing the AI service email"
+        ]
+    }
+]

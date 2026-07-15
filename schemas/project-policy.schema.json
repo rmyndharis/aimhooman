@@ -1,0 +1,12 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://github.com/rmyndharis/aimhooman/schemas/project-policy.schema.json",
+    "title": "aimhooman project policy",
+    "type": "object",
+    "required": ["schema_version", "profile"],
+    "properties": {
+        "schema_version": { "const": 1 },
+        "profile": { "enum": ["clean", "strict", "compliance"] }
+    },
+    "additionalProperties": false
+}

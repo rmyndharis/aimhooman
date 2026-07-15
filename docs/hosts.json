@@ -1,0 +1,164 @@
+{
+    "schema_version": 1,
+    "last_checked": "2026-07-15",
+    "hosts": [
+        {
+            "id": "claude-code",
+            "name": "Claude Code",
+            "tier": "plugin",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".claude-plugin/plugin.json",
+                ".claude-plugin/marketplace.json",
+                "hooks/hooks.json",
+                "skills/aimhooman/SKILL.md"
+            ],
+            "canonical_copy": "skills/aimhooman/SKILL.md",
+            "activation": "Install the marketplace plugin; Git hooks still require aimhooman init.",
+            "spec": "https://code.claude.com/docs/en/plugins-reference"
+        },
+        {
+            "id": "codex",
+            "name": "OpenAI Codex",
+            "tier": "plugin",
+            "minimum_version": "0.144.3",
+            "version_checked": "0.144.3 minimum contract",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".codex-plugin/plugin.json",
+                "hooks/hooks.json",
+                "skills/aimhooman/SKILL.md"
+            ],
+            "activation": "Install the plugin, start a new session, then review and trust its hooks with /hooks.",
+            "spec": "https://developers.openai.com/codex/plugins/build"
+        },
+        {
+            "id": "copilot-cli",
+            "name": "GitHub Copilot CLI",
+            "tier": "plugin",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".github/hooks/aimhooman.json"
+            ],
+            "activation": "The repository hook calls aimhooman from PATH and is advisory until Git hooks are installed.",
+            "spec": "https://docs.github.com/en/copilot/reference/hooks-reference"
+        },
+        {
+            "id": "copilot-editor",
+            "name": "GitHub Copilot editor",
+            "tier": "instruction",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".github/copilot-instructions.md"
+            ],
+            "canonical_copy": ".github/copilot-instructions.md",
+            "activation": "Loaded from the repository by supported Copilot editors.",
+            "spec": "https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot"
+        },
+        {
+            "id": "cursor",
+            "name": "Cursor",
+            "tier": "instruction",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".cursor/rules/aimhooman.mdc"
+            ],
+            "canonical_copy": ".cursor/rules/aimhooman.mdc",
+            "activation": "Loaded as an always-on project rule.",
+            "spec": "https://cursor.com/docs/context/rules"
+        },
+        {
+            "id": "cline",
+            "name": "Cline",
+            "tier": "instruction",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".clinerules/aimhooman.md"
+            ],
+            "canonical_copy": ".clinerules/aimhooman.md",
+            "activation": "Loaded from the project clinerules directory.",
+            "spec": "https://docs.cline.bot/features/cline-rules"
+        },
+        {
+            "id": "windsurf",
+            "name": "Windsurf",
+            "tier": "instruction",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".windsurf/rules/aimhooman.md"
+            ],
+            "canonical_copy": ".windsurf/rules/aimhooman.md",
+            "activation": "Loaded through the supported legacy .windsurf/rules workspace fallback; current hosts prefer .devin/rules.",
+            "spec": "https://docs.windsurf.com/windsurf/cascade/memories"
+        },
+        {
+            "id": "kiro",
+            "name": "Kiro",
+            "tier": "instruction",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".kiro/steering/aimhooman.md"
+            ],
+            "canonical_copy": ".kiro/steering/aimhooman.md",
+            "activation": "Loaded as always-included steering by default.",
+            "spec": "https://kiro.dev/docs/steering/"
+        },
+        {
+            "id": "gemini-cli",
+            "name": "Gemini CLI",
+            "tier": "instruction",
+            "version_checked": "0.50.0 source contract",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".gemini/settings.json",
+                "GEMINI.md"
+            ],
+            "canonical_copy": "GEMINI.md",
+            "activation": "The repository setting loads AGENTS.md; GEMINI.md is also shipped as default context.",
+            "spec": "https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/gemini-md.md"
+        },
+        {
+            "id": "gemini-code-assist",
+            "name": "Gemini Code Assist",
+            "tier": "instruction",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                "GEMINI.md"
+            ],
+            "activation": "Loaded as agent-mode context in supported editors.",
+            "spec": "https://developers.google.com/gemini-code-assist/docs/use-agentic-chat-pair-programmer"
+        },
+        {
+            "id": "antigravity",
+            "name": "Google Antigravity",
+            "tier": "instruction",
+            "version_checked": "web spec (unversioned)",
+            "check_level": "static",
+            "last_checked": "2026-07-15",
+            "files": [
+                ".agents/rules/aimhooman.md"
+            ],
+            "canonical_copy": ".agents/rules/aimhooman.md",
+            "activation": "Add the workspace rule in Antigravity and set it to Always On.",
+            "spec": "https://antigravity.google/docs/ide-rules"
+        }
+    ]
+}

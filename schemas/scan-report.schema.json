@@ -1,0 +1,165 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://github.com/rmyndharis/aimhooman/schemas/scan-report.schema.json",
+    "title": "aimhooman scan report",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "tool_version",
+        "target",
+        "profile",
+        "policy_source",
+        "policy_object_id",
+        "complete",
+        "stats",
+        "message_scanned",
+        "findings"
+    ],
+    "properties": {
+        "schema_version": { "const": 1 },
+        "tool_version": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "profile": { "enum": ["clean", "strict", "compliance"] },
+        "policy_source": { "type": "string", "minLength": 1 },
+        "policy_object_id": { "$ref": "#/$defs/nullableObjectId" },
+        "policy_enforced_object_ids": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/objectId" },
+            "uniqueItems": true
+        },
+        "complete": { "type": "boolean" },
+        "stats": { "$ref": "#/$defs/stats" },
+        "message_scanned": { "type": "boolean" },
+        "commit": { "$ref": "#/$defs/objectId" },
+        "range": {
+            "type": "object",
+            "required": ["base", "scan_base", "head", "commits_scanned"],
+            "properties": {
+                "base": { "$ref": "#/$defs/objectId" },
+                "scan_base": { "$ref": "#/$defs/objectId" },
+                "head": { "$ref": "#/$defs/objectId" },
+                "commits_scanned": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+        },
+        "findings": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/finding" }
+        }
+    },
+    "additionalProperties": false,
+    "$defs": {
+        "objectId": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "nullableObjectId": {
+            "anyOf": [
+                { "$ref": "#/$defs/objectId" },
+                { "type": "null" }
+            ]
+        },
+        "stats": {
+            "type": "object",
+            "required": [
+                "entries",
+                "blob_files",
+                "objects_read",
+                "files_scanned",
+                "bytes_scanned",
+                "findings_total",
+                "findings_returned",
+                "skipped"
+            ],
+            "properties": {
+                "entries": { "type": "integer", "minimum": 0 },
+                "blob_files": { "type": "integer", "minimum": 0 },
+                "objects_read": { "type": "integer", "minimum": 0 },
+                "files_scanned": { "type": "integer", "minimum": 0 },
+                "bytes_scanned": { "type": "integer", "minimum": 0 },
+                "findings_total": { "type": "integer", "minimum": 0 },
+                "findings_returned": { "type": "integer", "minimum": 0 },
+                "skipped": {
+                    "type": "object",
+                    "additionalProperties": { "type": "integer", "minimum": 1 }
+                }
+            },
+            "additionalProperties": false
+        },
+        "matchedRule": {
+            "type": "object",
+            "required": [
+                "ruleId", "ruleVersion", "kind", "category", "provider", "confidence",
+                "decision", "reason", "remediation", "source"
+            ],
+            "properties": {
+                "ruleId": { "type": "string", "minLength": 1 },
+                "ruleVersion": { "type": ["integer", "null"], "minimum": 1 },
+                "kind": { "enum": ["path", "message", "code"] },
+                "category": { "type": "string", "minLength": 1 },
+                "provider": { "type": "string", "minLength": 1 },
+                "confidence": { "type": ["string", "null"] },
+                "decision": { "enum": ["allow", "review", "block"] },
+                "reason": { "type": "string", "minLength": 1 },
+                "remediation": { "type": "array", "items": { "type": "string" } },
+                "source": { "enum": ["builtin", "local"] }
+            },
+            "additionalProperties": false
+        },
+        "finding": {
+            "type": "object",
+            "required": [
+                "ruleId", "ruleVersion", "matchedRuleIds", "matchedRules", "kind", "category",
+                "provider", "confidence", "decision", "reason", "remediation", "source",
+                "scanProfile", "policySource", "policyObjectId"
+            ],
+            "properties": {
+                "ruleId": { "type": "string", "minLength": 1 },
+                "ruleVersion": { "type": ["integer", "null"], "minimum": 1 },
+                "matchedRuleIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "minLength": 1 },
+                    "uniqueItems": true
+                },
+                "matchedRules": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/$defs/matchedRule" }
+                },
+                "kind": { "enum": ["path", "message", "code"] },
+                "category": { "type": "string", "minLength": 1 },
+                "provider": { "type": "string", "minLength": 1 },
+                "confidence": { "type": ["string", "null"] },
+                "decision": { "enum": ["block", "review"] },
+                "reason": { "type": "string", "minLength": 1 },
+                "remediation": { "type": "array", "items": { "type": "string" } },
+                "source": { "enum": ["builtin", "local"] },
+                "path": { "type": "string" },
+                "line": { "type": "integer", "minimum": 1 },
+                "text": { "type": "string" },
+                "autofix": { "const": "remove-whole-line" },
+                "commit": { "$ref": "#/$defs/objectId" },
+                "objectId": { "$ref": "#/$defs/objectId" },
+                "parents": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/objectId" },
+                    "uniqueItems": true
+                },
+                "status": { "type": "string" },
+                "statuses": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+                "sourcePath": { "type": "string" },
+                "sourcePaths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+                "scanProfile": { "enum": ["clean", "strict", "compliance"] },
+                "policySource": { "type": "string", "minLength": 1 },
+                "policyObjectId": { "$ref": "#/$defs/nullableObjectId" },
+                "policyEnforcedObjectIds": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/objectId" },
+                    "uniqueItems": true
+                }
+            },
+            "additionalProperties": false
+        }
+    }
+}

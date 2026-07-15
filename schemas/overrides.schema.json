@@ -1,0 +1,134 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://github.com/rmyndharis/aimhooman/schemas/overrides.schema.json",
+    "title": "aimhooman local overrides",
+    "type": "object",
+    "properties": {
+        "schema_version": { "const": 1 },
+        "allow": { "$ref": "#/$defs/allowEntries" },
+        "deny": { "$ref": "#/$defs/denyEntries" }
+    },
+    "$defs": {
+        "ordinaryAllow": {
+            "type": "object",
+            "required": ["target"],
+            "properties": {
+                "target": { "type": "string", "minLength": 1 },
+                "scope": { "enum": ["path", "rule", "secret-path"] },
+                "reason": { "type": "string" },
+                "actor": { "type": "string" },
+                "at": { "type": "string", "format": "date-time" }
+            },
+            "additionalProperties": false
+        },
+        "reviewedAllow": {
+            "type": "object",
+            "required": ["target", "scope", "head", "transition", "newObjectId", "newMode"],
+            "properties": {
+                "target": { "type": "string", "minLength": 1 },
+                "scope": { "enum": ["reviewed-instruction", "reviewed-policy-file"] },
+                "reason": { "type": "string" },
+                "actor": { "type": "string" },
+                "at": { "type": "string", "format": "date-time" },
+                "head": { "$ref": "#/$defs/objectId" },
+                "transition": {
+                    "oneOf": [
+                        { "const": "staged" },
+                        { "$ref": "#/$defs/objectId" }
+                    ]
+                },
+                "newObjectId": { "$ref": "#/$defs/nullableObjectId" },
+                "newMode": { "$ref": "#/$defs/nullableBlobMode" }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "newObjectId": { "type": "null" } } },
+                    "then": { "properties": { "newMode": { "type": "null" } } },
+                    "else": { "properties": { "newMode": { "$ref": "#/$defs/blobMode" } } }
+                }
+            ],
+            "additionalProperties": false
+        },
+        "migrationAllow": {
+            "type": "object",
+            "required": ["target", "scope", "head", "transition", "oldObjectId", "newObjectId", "newMode"],
+            "properties": {
+                "target": { "const": ".aimhooman.json" },
+                "scope": { "const": "policy-migration" },
+                "reason": { "type": "string" },
+                "actor": { "type": "string" },
+                "at": { "type": "string", "format": "date-time" },
+                "head": { "$ref": "#/$defs/objectId" },
+                "transition": {
+                    "anyOf": [
+                        { "const": "staged" },
+                        { "$ref": "#/$defs/objectId" }
+                    ]
+                },
+                "oldObjectId": { "$ref": "#/$defs/objectId" },
+                "newObjectId": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/objectId" },
+                        { "type": "null" }
+                    ]
+                },
+                "newMode": { "$ref": "#/$defs/nullableBlobMode" }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "newObjectId": { "type": "null" } } },
+                    "then": { "properties": { "newMode": { "type": "null" } } },
+                    "else": { "properties": { "newMode": { "$ref": "#/$defs/blobMode" } } }
+                }
+            ],
+            "additionalProperties": false
+        },
+        "allowEntries": {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    { "$ref": "#/$defs/ordinaryAllow" },
+                    { "$ref": "#/$defs/reviewedAllow" },
+                    { "$ref": "#/$defs/migrationAllow" }
+                ]
+            }
+        },
+        "denyEntries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["target"],
+                "properties": {
+                    "target": { "type": "string", "minLength": 1 },
+                    "scope": { "enum": ["path", "rule"] },
+                    "reason": { "type": "string" },
+                    "actor": { "type": "string" },
+                    "at": { "type": "string", "format": "date-time" }
+                },
+                "additionalProperties": false
+            }
+        },
+        "objectId": {
+            "type": "string",
+            "$comment": "Accepts mixed case because overrides.json is user-authored; the loader lowercases head/transition/oldObjectId/newObjectId on read. scan-report.schema.json uses lowercase-only because it validates Git's normalized output.",
+            "pattern": "^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
+        },
+        "nullableObjectId": {
+            "anyOf": [
+                { "$ref": "#/$defs/objectId" },
+                { "type": "null" }
+            ]
+        },
+        "blobMode": {
+            "type": "string",
+            "enum": ["100644", "100755"]
+        },
+        "nullableBlobMode": {
+            "anyOf": [
+                { "$ref": "#/$defs/blobMode" },
+                { "type": "null" }
+            ]
+        }
+    },
+    "additionalProperties": false
+}

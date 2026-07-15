@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "if command -v aimhooman >/dev/null 2>&1; then aimhooman hook session-start; else exit 0; fi",
+        "powershell": "if (Get-Command aimhooman -ErrorAction SilentlyContinue) { & aimhooman hook session-start; exit $LASTEXITCODE } else { exit 0 }",
+        "timeoutSec": 5
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "matcher": ".*",
+        "bash": "if command -v aimhooman >/dev/null 2>&1; then aimhooman hook pre-tool-use; else exit 0; fi",
+        "powershell": "if (Get-Command aimhooman -ErrorAction SilentlyContinue) { & aimhooman hook pre-tool-use; exit $LASTEXITCODE } else { exit 0 }",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

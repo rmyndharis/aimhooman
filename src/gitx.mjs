@@ -1,0 +1,721 @@
+import { execFileSync } from 'node:child_process';
+import {
+    cpSync,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    realpathSync,
+    readdirSync,
+    readlinkSync,
+    renameSync,
+    rmSync,
+    symlinkSync,
+} from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { isAbsolute, join } from 'node:path';
+import { gitEnvironment } from './git-environment.mjs';
+
+export class StateMigrationError extends Error {
+    constructor(detail, { stateDir, legacyStateDirs = [], diagnostics = [], cause } = {}) {
+        super(`repository state: ${detail}`);
+        this.name = 'StateMigrationError';
+        this.stateDir = stateDir;
+        this.legacyStateDirs = legacyStateDirs;
+        this.stateDiagnostics = diagnostics;
+        this.diagnostics = diagnostics;
+        if (cause) this.cause = cause;
+    }
+}
+
+export class GitRevisionError extends Error {
+    constructor(revision, detail, cause) {
+        super(`Git revision "${revision}": ${detail}`);
+        this.name = 'GitRevisionError';
+        this.revision = revision;
+        if (cause) this.cause = cause;
+    }
+}
+
+export class GitTargetReadError extends Error {
+    constructor(target, path, detail, cause) {
+        super(`Git target "${target}" path "${path}": ${detail}`);
+        this.name = 'GitTargetReadError';
+        this.target = target;
+        this.path = path;
+        if (cause) this.cause = cause;
+    }
+}
+
+function gitBuf(args, cwd, input) {
+    return execFileSync('git', args, {
+        cwd,
+        env: gitEnvironment(),
+        encoding: 'buffer',
+        maxBuffer: 64 * 1024 * 1024,
+        // Capture stderr into the thrown error (pipe) instead of letting git's
+        // raw stderr leak to the user's terminal alongside aimhooman's own
+        // diagnostics; stdin is ignored unless input is supplied.
+        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+        ...(input === undefined ? {} : { input }),
+    });
+}
+
+function gitStr(args, cwd) {
+    return gitBuf(args, cwd).toString('utf8').trim();
+}
+
+function nulStrings(buf) {
+    return buf.toString('utf8').split('\0').filter(Boolean);
+}
+
+function assertRevision(revision, label) {
+    if (typeof revision !== 'string' || !revision || revision.startsWith('-')) {
+        throw new TypeError(`${label} must be a non-empty Git revision`);
+    }
+}
+
+function assertOid(oid) {
+    if (typeof oid !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(oid)) {
+        throw new TypeError('oid must be a full Git object ID');
+    }
+}
+
+function typeForMode(mode) {
+    if (mode === '160000') return 'commit';
+    if (mode === '040000') return 'tree';
+    return 'blob';
+}
+
+function objectMetadata(repo, oids) {
+    const unique = [...new Set(oids.filter(Boolean))];
+    if (!unique.length) return new Map();
+    const output = gitBuf(
+        ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'],
+        repo.root,
+        Buffer.from(unique.join('\n') + '\n'),
+    ).toString('utf8').trimEnd().split('\n');
+    const metadata = new Map();
+
+    for (let i = 0; i < unique.length; i++) {
+        const fields = (output[i] || '').split(' ');
+        if (fields[1] === 'missing') {
+            metadata.set(unique[i], { type: null, size: null });
+        } else if (fields.length === 3 && /^\d+$/.test(fields[2])) {
+            metadata.set(unique[i], { type: fields[1], size: Number(fields[2]) });
+        } else {
+            throw new Error('unexpected output from git cat-file --batch-check');
+        }
+    }
+    return metadata;
+}
+
+function enrichEntries(repo, entries) {
+    const metadata = objectMetadata(repo, entries.map((entry) => entry.oid));
+    return entries.map((entry) => {
+        const object = metadata.get(entry.oid) || { type: null, size: null };
+        return {
+            ...entry,
+            type: object.type || entry.type || typeForMode(entry.mode),
+            size: object.size,
+        };
+    });
+}
+
+function diffEntries(repo, args, renameThreshold = null) {
+    const fields = nulStrings(gitBuf([
+        'diff', '--raw', '--no-abbrev',
+        renameThreshold === null ? '--find-renames' : `--find-renames=${renameThreshold}`,
+        '-z', '--diff-filter=ACMRTD', ...args, '--',
+    ], repo.root));
+    const entries = [];
+
+    for (let i = 0; i < fields.length;) {
+        const header = fields[i++];
+        const match = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) ([ACMRTD])(\d*)$/.exec(header);
+        if (!match || i >= fields.length) {
+            throw new Error('unexpected output from git diff --raw');
+        }
+        const sourcePath = fields[i++];
+        let path = sourcePath;
+        if (match[5] === 'R' || match[5] === 'C') {
+            if (i >= fields.length) throw new Error('unexpected rename output from git diff --raw');
+            path = fields[i++];
+        }
+        const deleted = match[5] === 'D';
+        entries.push({
+            path,
+            ...(path === sourcePath ? {} : { sourcePath }),
+            oid: deleted ? null : match[4],
+            mode: deleted ? null : match[2],
+            type: deleted ? 'deleted' : typeForMode(match[2]),
+            status: match[5],
+        });
+    }
+
+    return enrichEntries(repo, entries);
+}
+
+// openRepo resolves the repository containing cwd. Throws if not a repo.
+export function openRepo(cwd = process.cwd()) {
+    const root = gitStr(['rev-parse', '--show-toplevel'], cwd);
+    const gitDir = gitStr(['rev-parse', '--absolute-git-dir'], root);
+    let commonDir = gitStr(['rev-parse', '--git-common-dir'], root);
+    if (!isAbsolute(commonDir)) commonDir = join(root, commonDir);
+    const state = prepareSharedState(commonDir, gitDir);
+    return {
+        root,
+        gitDir,
+        commonDir,
+        stateDir: state.stateDir,
+        legacyStateDirs: state.legacyStateDirs,
+        stateDiagnostics: state.diagnostics,
+        excludeFile: join(commonDir, 'info', 'exclude'),
+    };
+}
+
+function prepareSharedState(commonDir, gitDir) {
+    const stateDir = join(commonDir, 'aimhooman');
+    const legacyStateDirs = findLegacyStateDirs(commonDir, gitDir, stateDir);
+    const diagnostics = [];
+    if (!legacyStateDirs.length) return { stateDir, legacyStateDirs, diagnostics };
+
+    const currentExists = pathExists(stateDir);
+    let fingerprints;
+    try {
+        fingerprints = legacyStateDirs.map((path) => ({ path, fingerprint: stateFingerprint(path) }));
+        if (currentExists) {
+            const currentFingerprint = stateFingerprint(stateDir);
+            const conflicts = fingerprints.filter((entry) => entry.fingerprint !== currentFingerprint);
+            if (conflicts.length) {
+                throw stateConflict(stateDir, legacyStateDirs, conflicts.map((entry) => entry.path));
+            }
+            archiveLegacyStates(fingerprints, stateDir, diagnostics);
+            return { stateDir, legacyStateDirs, diagnostics };
+        }
+
+        const first = fingerprints[0];
+        const conflicts = fingerprints.filter((entry) => entry.fingerprint !== first.fingerprint);
+        if (conflicts.length) {
+            throw stateConflict(stateDir, legacyStateDirs, conflicts.map((entry) => entry.path));
+        }
+        try {
+            copyStateAtomically(first.path, stateDir, first.fingerprint);
+        } catch (error) {
+            if (!pathExists(stateDir)) throw error;
+            const currentFingerprint = stateFingerprint(stateDir);
+            const conflicts = fingerprints.filter((entry) => entry.fingerprint !== currentFingerprint);
+            if (conflicts.length) {
+                throw stateConflict(stateDir, legacyStateDirs, conflicts.map((entry) => entry.path));
+            }
+            diagnostics.push({
+                level: 'info',
+                code: 'legacy-state-migrated-concurrently',
+                path: first.path,
+                stateDir,
+                message: `shared state at "${stateDir}" was created by another process`,
+            });
+            archiveLegacyStates(fingerprints, stateDir, diagnostics);
+            return { stateDir, legacyStateDirs, diagnostics };
+        }
+        diagnostics.push({
+            level: 'info',
+            code: 'legacy-state-migrated',
+            path: first.path,
+            stateDir,
+            message: `copied legacy state from "${first.path}" to shared state "${stateDir}"`,
+        });
+        archiveLegacyStates(fingerprints, stateDir, diagnostics);
+        return { stateDir, legacyStateDirs, diagnostics };
+    } catch (error) {
+        if (error instanceof StateMigrationError) throw error;
+        throw new StateMigrationError(`cannot inspect or migrate legacy state: ${error.message}`, {
+            stateDir,
+            legacyStateDirs,
+            diagnostics,
+            cause: error,
+        });
+    }
+}
+
+function findLegacyStateDirs(commonDir, gitDir, stateDir) {
+    const found = new Set();
+    const adminDir = join(commonDir, 'worktrees');
+    let entries = [];
+    try {
+        entries = readdirSync(adminDir, { withFileTypes: true });
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            throw new StateMigrationError(`cannot list linked worktrees: ${error.message}`, {
+                stateDir,
+                cause: error,
+            });
+        }
+    }
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = join(adminDir, entry.name, 'aimhooman');
+        if (pathExists(candidate) && !isCompatibilityLink(candidate, stateDir)) found.add(candidate);
+    }
+    const currentLegacy = join(gitDir, 'aimhooman');
+    if (currentLegacy !== stateDir
+        && pathExists(currentLegacy)
+        && !isCompatibilityLink(currentLegacy, stateDir)) {
+        found.add(currentLegacy);
+    }
+    return [...found].sort();
+}
+
+function isCompatibilityLink(path, stateDir) {
+    try {
+        if (!lstatSync(path).isSymbolicLink()) return false;
+        return realpathSync(path) === realpathSync(stateDir);
+    } catch (error) {
+        if (error?.code === 'ENOENT') return false;
+        throw error;
+    }
+}
+
+function pathExists(path) {
+    try {
+        lstatSync(path);
+        return true;
+    } catch (error) {
+        if (error?.code === 'ENOENT') return false;
+        throw error;
+    }
+}
+
+function stateFingerprint(root) {
+    const hash = createHash('sha256');
+    function visit(path, relative) {
+        const stat = lstatSync(path);
+        hash.update(relative);
+        hash.update('\0');
+        hash.update(String(stat.mode & 0o777));
+        hash.update('\0');
+        if (stat.isDirectory()) {
+            hash.update('directory\0');
+            for (const name of readdirSync(path).sort()) {
+                visit(join(path, name), relative ? join(relative, name) : name);
+            }
+            return;
+        }
+        if (stat.isFile()) {
+            hash.update('file\0');
+            hash.update(readFileSync(path));
+            hash.update('\0');
+            return;
+        }
+        if (stat.isSymbolicLink()) {
+            hash.update('symlink\0');
+            hash.update(readlinkSync(path));
+            hash.update('\0');
+            return;
+        }
+        throw new Error(`unsupported state entry "${path}"`);
+    }
+    visit(root, '');
+    return hash.digest('hex');
+}
+
+function copyStateAtomically(source, destination, expectedFingerprint) {
+    const temporary = `${destination}.migrate-${process.pid}-${randomUUID()}`;
+    try {
+        cpSync(source, temporary, {
+            recursive: true,
+            dereference: false,
+            errorOnExist: true,
+            force: false,
+            preserveTimestamps: true,
+        });
+        if (stateFingerprint(temporary) !== expectedFingerprint) {
+            throw new Error(`legacy state changed while it was copied from "${source}"`);
+        }
+        renameSync(temporary, destination);
+    } catch (error) {
+        try {
+            rmSync(temporary, { recursive: true, force: true });
+        } catch {
+            // Keep the migration error when cleanup is unavailable.
+        }
+        throw error;
+    }
+}
+
+export function archiveLegacyStates(entries, stateDir, diagnostics) {
+    for (const entry of entries) {
+        // A concurrent process may have already archived this legacy state and
+        // replaced entry.path with a compatibility symlink to stateDir. Renaming
+        // that symlink would then fingerprint stateDir (mismatching the legacy
+        // fingerprint taken before the race) and spuriously fail migration. Treat
+        // an already-symlinked entry as archived-concurrently and move on.
+        if (isCompatibilityLink(entry.path, stateDir)) {
+            diagnostics.push({
+                level: 'info',
+                code: 'legacy-state-archived-concurrently',
+                path: entry.path,
+                stateDir,
+                message: `legacy state at "${entry.path}" was archived by another process`,
+            });
+            continue;
+        }
+        const archivedPath = `${entry.path}.migrated-${randomUUID()}`;
+        let renamed = false;
+        try {
+            renameSync(entry.path, archivedPath);
+            renamed = true;
+            if (stateFingerprint(archivedPath) !== entry.fingerprint) {
+                throw new Error(`legacy state changed while it was archived from "${entry.path}"`);
+            }
+            symlinkSync(stateDir, entry.path, process.platform === 'win32' ? 'junction' : 'dir');
+        } catch (error) {
+            if (!renamed && error?.code === 'ENOENT' && !pathExists(entry.path)) {
+                diagnostics.push({
+                    level: 'info',
+                    code: 'legacy-state-archived-concurrently',
+                    path: entry.path,
+                    stateDir,
+                    message: `legacy state at "${entry.path}" was archived by another process`,
+                });
+                continue;
+            }
+            try {
+                if (isCompatibilityLink(entry.path, stateDir)) rmSync(entry.path, { force: true });
+                if (!pathExists(entry.path) && pathExists(archivedPath)) renameSync(archivedPath, entry.path);
+            } catch {
+                // Keep the migration error; both locations are named in it.
+            }
+            throw error;
+        }
+        diagnostics.push({
+            level: 'info',
+            code: 'legacy-state-archived',
+            path: entry.path,
+            archivedPath,
+            stateDir,
+            message: `archived legacy state at "${archivedPath}" and linked its old path to "${stateDir}"`,
+        });
+    }
+}
+
+function stateConflict(stateDir, legacyStateDirs, conflictingPaths) {
+    const diagnostics = conflictingPaths.map((path) => ({
+        level: 'error',
+        code: 'legacy-state-conflict',
+        path,
+        stateDir,
+        message: `legacy state at "${path}" conflicts with another per-clone state`,
+    }));
+    return new StateMigrationError(
+        `conflicting legacy state found; select which state to keep at "${stateDir}"`,
+        { stateDir, legacyStateDirs, diagnostics },
+    );
+}
+
+// stagedEntries snapshots index changes, including deletion metadata. Rename
+// and copy entries use the destination path; object IDs keep blob reads stable.
+export function stagedEntries(repo) {
+    return diffEntries(repo, ['--cached']);
+}
+
+// stagedPaths is the path-only view of staged index changes. It reads names
+// directly (git diff --name-only) so it neither spends a cat-file --batch-check
+// round-trip nor throws on an object git cannot resolve — path rules only need
+// the path. Rename/copy entries report their destination, matching stagedEntries.
+export function stagedPaths(repo) {
+    return nulStrings(gitBuf([
+        'diff', '--cached', '--name-only', '--find-renames', '-z', '--diff-filter=ACMRTD', '--',
+    ], repo.root));
+}
+
+// Unmerged index entries have only stages 1-3 and are omitted by the ordinary
+// cached diff. Expose their paths so callers cannot mistake a conflicted index
+// for a complete, clean staged snapshot.
+export function unmergedPaths(repo) {
+    const paths = new Set();
+    for (const record of nulStrings(gitBuf(['ls-files', '--unmerged', '-z'], repo.root))) {
+        const tab = record.indexOf('\t');
+        const metadata = tab < 0 ? '' : record.slice(0, tab);
+        const path = tab < 0 ? '' : record.slice(tab + 1);
+        if (!/^\d+ [0-9a-f]+ [1-3]$/.test(metadata) || !path) {
+            throw new Error('unexpected unmerged index entry');
+        }
+        paths.add(path);
+    }
+    return [...paths];
+}
+
+// stagedRenameSources identifies low-similarity rename sources for selected
+// destinations. Git does not record a rename in the index, so this conservative
+// second pass prevents clean-mode repair from leaving only the deletion staged.
+export function stagedRenameSources(repo, destinations) {
+    const selected = new Set(destinations);
+    if (!selected.size) return [];
+    const entries = diffEntries(repo, ['--cached'], 1);
+    const sources = new Set(entries
+        .filter((entry) => entry.status === 'R' && selected.has(entry.path) && entry.sourcePath)
+        .map((entry) => entry.sourcePath));
+
+    // Git stores no rename relation in the index. A zero-similarity rename is
+    // indistinguishable from one staged add plus one or more staged deletes, so
+    // there is no exact source to recover. When a blocked destination remains an
+    // add even at the lowest similarity threshold, conservatively restore every
+    // staged deletion. This may unstage an unrelated deletion, but it never lets
+    // automatic repair silently commit half of a possible rename.
+    if (entries.some((entry) => entry.status === 'A' && selected.has(entry.path))) {
+        for (const entry of entries) {
+            if (entry.status === 'D') sources.add(entry.path);
+        }
+    }
+    return [...sources];
+}
+
+// readStagedPath distinguishes an absent index path from an unreadable index or
+// object. The returned object ID pins the bytes used by policy resolution.
+export function readStagedPath(repo, path) {
+    assertGitPath(path);
+    const target = 'staged';
+    let records;
+    try {
+        records = nulStrings(gitBuf([
+            'ls-files', '--stage', '-z', '--', `:(top,literal)${path}`,
+        ], repo.root));
+    } catch (error) {
+        throw new GitTargetReadError(target, path, gitErrorDetail(error), error);
+    }
+    if (!records.length) return missingPath(target, path);
+
+    let selected = null;
+    let unmerged = false;
+    for (const record of records) {
+        const tab = record.indexOf('\t');
+        const match = /^(\d+) ([0-9a-f]+) ([0-3])$/.exec(record.slice(0, tab));
+        if (tab < 0 || !match || record.slice(tab + 1) !== path) {
+            throw new GitTargetReadError(target, path, 'unexpected index entry');
+        }
+        if (match[3] === '0') selected = { mode: match[1], oid: match[2] };
+        else unmerged = true;
+    }
+    if (unmerged || !selected) {
+        throw new GitTargetReadError(target, path, 'path has unmerged index stages');
+    }
+    return presentPath(repo, target, path, selected);
+}
+
+// readCommitPath resolves revision to a commit first. Only a missing path is a
+// normal fallback; an invalid revision or an object read error is reported.
+export function readCommitPath(repo, revision, path) {
+    assertGitPath(path);
+    let oid;
+    try {
+        assertRevision(revision, 'revision');
+        oid = gitBuf([
+            'rev-parse', '--verify', '--quiet', '--end-of-options', `${revision}^{commit}`,
+        ], repo.root).toString('utf8').trim();
+    } catch (error) {
+        if (error instanceof TypeError || error?.status === 1) {
+            throw new GitRevisionError(revision, 'does not resolve to a commit', error);
+        }
+        throw new GitTargetReadError(`commit:${revision}`, path, gitErrorDetail(error), error);
+    }
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(oid)) {
+        throw new GitTargetReadError(`commit:${revision}`, path, 'Git returned an invalid commit object ID');
+    }
+    const target = `commit:${oid}`;
+    let records;
+    try {
+        records = nulStrings(gitBuf([
+            'ls-tree', '--full-tree', '-z', oid, '--', `:(top,literal)${path}`,
+        ], repo.root));
+    } catch (error) {
+        throw new GitTargetReadError(target, path, gitErrorDetail(error), error);
+    }
+    if (!records.length) return missingPath(target, path);
+    if (records.length !== 1) {
+        throw new GitTargetReadError(target, path, 'Git returned more than one tree entry');
+    }
+    const tab = records[0].indexOf('\t');
+    const match = /^(\d+) (\w+) ([0-9a-f]+)$/.exec(records[0].slice(0, tab));
+    if (tab < 0 || !match || records[0].slice(tab + 1) !== path) {
+        throw new GitTargetReadError(target, path, 'unexpected tree entry');
+    }
+    if (match[2] !== 'blob') {
+        throw new GitTargetReadError(target, path, `expected a blob, found ${match[2]}`);
+    }
+    return presentPath(repo, target, path, { mode: match[1], oid: match[3] });
+}
+
+export function hashBlob(repo, content) {
+    let oid;
+    try {
+        oid = gitBuf(['hash-object', '--stdin'], repo.root, content).toString('utf8').trim();
+        assertOid(oid);
+    } catch (error) {
+        throw new GitTargetReadError('worktree', '.aimhooman.json', gitErrorDetail(error), error);
+    }
+    return oid;
+}
+
+function assertGitPath(path) {
+    if (typeof path !== 'string' || !path || path.includes('\0')) {
+        throw new TypeError('path must be a non-empty Git path');
+    }
+}
+
+function missingPath(target, path) {
+    return { status: 'missing', target, path, oid: null, content: null };
+}
+
+function presentPath(repo, target, path, entry) {
+    let content;
+    try {
+        content = gitBuf(['cat-file', 'blob', entry.oid], repo.root);
+    } catch (error) {
+        throw new GitTargetReadError(target, path, gitErrorDetail(error), error);
+    }
+    return {
+        status: 'present',
+        target,
+        path,
+        oid: entry.oid,
+        mode: entry.mode,
+        content,
+    };
+}
+
+function gitErrorDetail(error) {
+    const stderr = Buffer.isBuffer(error?.stderr)
+        ? error.stderr.toString('utf8').trim()
+        : String(error?.stderr || '').trim();
+    return stderr || error?.message || 'Git read failed';
+}
+
+// trackedEntries snapshots every index entry. A resolved path has one stage-zero
+// entry; an unresolved path keeps all stage 1/2/3 candidates so content scanning
+// cannot miss a blob that exists only on one side of a conflict.
+export function trackedEntries(repo) {
+    const records = nulStrings(gitBuf(['ls-files', '--stage', '-z'], repo.root));
+    const entries = [];
+    for (const record of records) {
+        const tab = record.indexOf('\t');
+        const match = /^(\d+) ([0-9a-f]+) ([0-3])$/.exec(record.slice(0, tab));
+        if (tab < 0 || !match) throw new Error('unexpected output from git ls-files --stage');
+        entries.push({
+            path: record.slice(tab + 1),
+            oid: match[2],
+            mode: match[1],
+            type: typeForMode(match[1]),
+            stage: Number(match[3]),
+        });
+    }
+    return enrichEntries(repo, entries);
+}
+
+// hasStagedChanges checks the complete index delta, including deletions that
+// are intentionally excluded from content scanning.
+export function hasStagedChanges(repo) {
+    try {
+        gitBuf(['diff', '--cached', '--quiet', '--'], repo.root);
+        return false;
+    } catch (error) {
+        if (error?.status === 1) return true;
+        throw error;
+    }
+}
+
+// withIndexFromTree exposes an immutable tree through Git's staged-index APIs.
+// It is used by commit-msg after the dispatcher snapshots the would-be commit
+// tree, so a chained hook cannot switch the policy by mutating the live index.
+export function withIndexFromTree(repo, treeOid, fn) {
+    assertOid(treeOid);
+    if (typeof fn !== 'function') throw new TypeError('fn must be a function');
+    const type = gitStr(['cat-file', '-t', treeOid], repo.root);
+    if (type !== 'tree') throw new TypeError('treeOid must identify a Git tree');
+
+    mkdirSync(repo.stateDir, { recursive: true });
+    const temporary = mkdtempSync(join(repo.stateDir, '.commit-tree-index-'));
+    const index = join(temporary, 'index');
+    const previous = process.env.GIT_INDEX_FILE;
+    process.env.GIT_INDEX_FILE = index;
+    try {
+        gitBuf(['read-tree', treeOid], repo.root);
+        return fn();
+    } finally {
+        if (previous === undefined) delete process.env.GIT_INDEX_FILE;
+        else process.env.GIT_INDEX_FILE = previous;
+        rmSync(temporary, { recursive: true, force: true });
+    }
+}
+
+// introducedCommits returns each commit added by a proposed branch update,
+// independent of reachability through other refs. Using `--not --all` here
+// would let an ignored tag/remote ref pre-poison reachability and suppress the
+// final scan. A newly created branch has no trusted old tip, so its full ancestry
+// is checked; ordinary updates scan exactly old..new.
+export function introducedCommits(repo, updates) {
+    const commits = [];
+    const seen = new Set();
+    for (const update of updates) {
+        const oldObjectId = update?.oldObjectId;
+        const newObjectId = update?.newObjectId;
+        assertOid(oldObjectId);
+        assertOid(newObjectId);
+        const revisions = /^0+$/.test(oldObjectId)
+            ? [newObjectId]
+            : [newObjectId, `^${oldObjectId}`];
+        const resolved = gitBuf(['rev-list', '--reverse', ...revisions], repo.root)
+            .toString('utf8')
+            .trim()
+            .split('\n')
+            .filter(Boolean);
+        for (const commit of resolved) {
+            if (!seen.has(commit)) {
+                seen.add(commit);
+                commits.push(commit);
+            }
+        }
+    }
+    return commits;
+}
+
+// gitConfig returns a git config value, or '' if unset.
+export function gitConfig(root, key) {
+    try {
+        return gitStr(['config', '--get', key], root);
+    } catch {
+        return '';
+    }
+}
+
+// unstagePaths removes the given paths from the index (non-blocking).
+// HEAD-safe: `git restore --staged` needs HEAD, so on the initial commit
+// (no HEAD yet) it falls back to `git rm --cached`.
+export function unstagePaths(repo, paths) {
+    if (!paths.length) return [];
+    const pathspecs = Buffer.from(paths.join('\0') + '\0');
+    const opts = {
+        cwd: repo.root,
+        env: gitEnvironment(),
+        input: pathspecs,
+        stdio: ['pipe', 'ignore', 'pipe'],
+    };
+    let hasHead = true;
+    try {
+        execFileSync('git', ['rev-parse', '--verify', 'HEAD'], opts);
+    } catch {
+        hasHead = false;
+    }
+    if (hasHead) {
+        execFileSync('git', [
+            '--literal-pathspecs', 'restore', '--staged',
+            '--pathspec-from-file=-', '--pathspec-file-nul',
+        ], opts);
+    } else {
+        execFileSync('git', [
+            '--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch',
+            '--pathspec-from-file=-', '--pathspec-file-nul',
+        ], opts);
+    }
+    return paths;
+}

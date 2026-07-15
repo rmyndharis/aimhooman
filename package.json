@@ -1,0 +1,77 @@
+{
+    "name": "@rmyndharis/aimhooman",
+    "version": "0.1.0",
+    "description": "AI works. Hoomans ship. Keep AI session files, secrets, and attribution out of your commits.",
+    "homepage": "https://github.com/rmyndharis/aimhooman#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/rmyndharis/aimhooman.git"
+    },
+    "bugs": {
+        "url": "https://github.com/rmyndharis/aimhooman/issues"
+    },
+    "type": "module",
+    "bin": {
+        "aimhooman": "bin/aimhooman.mjs"
+    },
+    "files": [
+        "bin/",
+        "src/",
+        "rules/",
+        "hooks/",
+        "schemas/",
+        "docs/hosts.json",
+        "docs/design/",
+        "docs/logo/",
+        ".claude-plugin/",
+        ".codex-plugin/",
+        ".cursor/rules/",
+        ".clinerules/",
+        ".windsurf/",
+        ".kiro/",
+        ".agents/",
+        ".gemini/",
+        ".github/hooks/",
+        ".github/copilot-instructions.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        "skills/",
+        "CHANGELOG.md",
+        "CODE_OF_CONDUCT.md",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "README.md",
+        "SECURITY.md"
+    ],
+    "scripts": {
+        "check": "node scripts/validate.mjs",
+        "sync:hosts": "node scripts/sync-hosts.mjs",
+        "sync:ruleset": "node scripts/sync-ruleset.mjs",
+        "test": "node --import ./tests/test-env.mjs --test",
+        "test:coverage": "node --import ./tests/test-env.mjs --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-coverage-include=\"scripts/acknowledge-reviewed-paths.mjs\" --test-coverage-include=\"scripts/npm-release-state.mjs\" --test-coverage-include=\"scripts/package-manifest.mjs\" --test-coverage-include=\"scripts/scan-ci-history.mjs\" --test-coverage-include=\"scripts/verify-release-environment.mjs\" --test-coverage-exclude=\"tests/**\" --test-coverage-lines=75 --test-coverage-branches=60 --test-coverage-functions=85 --test-reporter=spec --test-reporter=./scripts/coverage-threshold.mjs --test-reporter-destination=stdout --test-reporter-destination=stderr --test",
+        "check:static": "node scripts/static-gates.mjs",
+        "verify": "node scripts/verify.mjs"
+    },
+    "devDependencies": {
+        "ajv": "8.20.0",
+        "ajv-formats": "3.0.1",
+        "knip": "5.88.1"
+    },
+    "engines": {
+        "node": ">=22.8.0"
+    },
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+    },
+    "license": "MIT",
+    "keywords": [
+        "ai-agents",
+        "git-hooks",
+        "claude-code",
+        "codex",
+        "copilot",
+        "developer-tools",
+        "pre-commit"
+    ]
+}

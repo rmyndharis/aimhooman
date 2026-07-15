@@ -1,0 +1,135 @@
+# aimhooman: Repair-First, Layered Enforcement
+
+This document describes aimhooman's enforcement model. aimhooman is designed to
+prevent known AI-tool residue from leaking into Git history **without editing
+`.gitignore`, and with repair before rejection on the default ordinary commit path.**
+Plugin startup provides best-effort prevention without `init`; complete Git-boundary
+enforcement requires local or global hook setup.
+
+## Goals
+
+- **Zero-activation for Claude Code:** the plugin is active every session
+  (SessionStart), no `init`.
+- **No `.gitignore` burden:** known AI artifacts are auto-excluded via
+  `.git/info/exclude` (local, never committed, never the user's `.gitignore`).
+- **Repair-first for hygiene by default:** AI artifacts are excluded before
+  staging or unstaged at commit. If a block cannot be repaired, remains in the
+  pinned tree, or cannot be scanned completely, the operation stops.
+- **Broad, community-updatable rule catalog:** covers many AI tools; extendable
+  via PR (core) and local rules (personal).
+- **Block remains available as opt-in** (`strict` profile) for teams that want
+  hard enforcement.
+
+## Non-goals
+
+- Rewriting existing git history (out of scope; this prevents future leaks only).
+- Catching truly novel AI tools that have no rule yet (coverage is
+  rule-dependent; cannot be 100%).
+- A live community registry fetched over the network (rejected: breaks offline /
+  zero-dependency ethos, introduces supply-chain risk).
+
+## Constraints (honest)
+
+1. **Git has no universal "guard every repo" hook.** `npm install -g` only places a
+   binary on PATH. Auto-activation is achieved via (a) the Claude Code plugin
+   (SessionStart, zero-init) and (b) an optional one-time `aimhooman init --global`
+   that sets `core.hooksPath` for eligible non-bare repositories without a local
+   or worktree-scoped override.
+2. **"Prevent leak without blocking" requires exclusion, not just warning.**
+   Either exclude before staging (`.git/info/exclude`) or unstage at commit
+   (`pre-commit` hook). Pure warnings do not prevent leaks.
+3. **PreToolUse cannot unstage.** It runs before the tool executes; at `git add X`,
+   X is not staged yet. So unstage is a git-tier (`pre-commit`) capability; the
+   plugin tier does prevention (excludes) plus advisory (warn).
+4. **`.gitignore` stays clean** because aimhooman writes `.git/info/exclude`
+   (local, not committed, not `.gitignore`).
+
+## Design
+
+### Layered enforcement (default ordinary path = repair-first)
+
+| Layer | Mechanism | Tier | Blocking? |
+| --- | --- | --- | --- |
+| 0. Prevention | Auto-write `.git/info/exclude` from unambiguous residue rules | plugin SessionStart + init/agent hook refresh | none (best effort) |
+| 1. Catch-all | `pre-commit` hook unstages AI artifacts from the index | git hook | proceeds after repair; stops if repair fails |
+| 2. Agent guard | PreToolUse reports paths and rejects unprovable protected Git mutations | plugin | advisory for paths; fail-closed for boundary bypass |
+| 3. Strict policy | `strict` profile blocks instead of repairing (exit 10) | both | block |
+| 4. Pinned tree | `commit-msg` checks the exact would-be tree and message | git hook | blocks a remaining violation or incomplete scan |
+| 5. Final ref check | prepared `reference-transaction` full-scans every commit introduced to `HEAD` or a branch | git hook | blocks a violation or incomplete scan |
+
+Default profile `clean` uses layers 0, 1, 2, 4, and 5. Successful repair keeps the
+ordinary path low-friction. The pinned-tree and final-ref scans deliberately stop if
+a block remains, including a pre-existing tracked block that was not part of the
+current diff, or if any scan is incomplete.
+Git 2.54 also emits an earlier `preparing` reference-transaction callback. The
+hook checks dispatcher integrity there without scanning unresolved references,
+then keeps the full-scan veto at `prepared`, after Git has locked them.
+
+### Components
+
+1. **Rule catalog** — `rules/paths.json`, `rules/attribution.json`,
+   `rules/markers.json`, `rules/secrets.json`. Covers Claude, Codex, Copilot, Cursor, Aider, SpecStory,
+   Continue, Playwright MCP, Remember, Superpowers, and a generic agent dir.
+   Community extends via PR (core); personal extensions via
+   `<common-git-dir>/aimhooman/rules/*.json` (local, shared by linked worktrees,
+   loaded after core, and only able to add restrictions).
+2. **Auto-exclude** — `applyExclude` writes patterns derived from unambiguous
+   `ephemeral-state` and `local-settings` rules to `.git/info/exclude` from
+   SessionStart, init, and the agent guard. Secrets and review paths remain visible.
+3. **Git boundary** — the `pre-commit` hook scans staged paths; for any AI
+   artifact it removes it from the index, then lets the commit proceed only when
+   that repair succeeds. `commit-msg` removes complete exact high-confidence attribution lines
+   (on `clean`), keeps them (on `compliance`), or blocks (on `strict`). An unterminated
+   exact final line stops unchanged; broader attribution candidates remain review notices.
+   `commit-msg` evaluates the message and full snapshot against a pinned would-be
+   tree. The `reference-transaction` hook checks guard integrity during Git
+   2.54's early `preparing` callback, then independently scans every introduced
+   commit at `prepared` before Git changes `HEAD` or a branch ref; it does not trust
+   an attestation from an earlier hook. This covers ordinary commits, sequencers,
+   fetch/worktree branch creation, and direct ref commands.
+4. **Auto-activation** — the plugin's SessionStart ensures excludes + injects the
+   ruleset (no `init`). `aimhooman init --global` sets `core.hooksPath` once for
+   terminal git.
+5. **Strict policy** — the `strict` profile blocks findings instead of attempting
+   the clean/compliance repairs.
+6. **Team baseline** — an optional, versioned `.aimhooman.json` selects the
+   repository profile and takes precedence over per-clone defaults. Invalid
+   project policy fails closed; local exceptions remain in Git state.
+
+### Local rule loading
+
+`loadRules(stateDir?)` reads `<stateDir>/rules/*.json` using the published local-pack
+schema, the stricter regex subset, and a bounded path-glob matcher when a repo context
+exists, merged after core packs. Core-first ordering
+means local rules only add restrictions and can never override a core block.
+
+## Implementation notes
+
+- **Category-aware failure.** On `clean`, a malformed local rule pack is skipped
+  with a warning because built-in rules remain active. Corrupt override state,
+  unreadable Git inputs, and incomplete staged-content scans stop every profile.
+  Any automatic unstage failure stops; allowing it through would only defer the
+  same block to the pinned-tree or final-ref scan. `strict` also vetoes policy
+  findings and reviews.
+- **`init --global` refuses to clobber.** It will not overwrite a pre-existing
+  global `core.hooksPath`, and `aimhooman uninstall --global` reverses it. A
+  repository-local/worktree override takes precedence; local `init` refuses a
+  shared or external effective hook directory. Global reference dispatchers are
+  transparent in unsupported bare repositories.
+- **HEAD-safe unstage.** `git restore --staged` needs HEAD; on a repository's
+  initial commit it falls back to `git rm --cached --ignore-unmatch`.
+- **Anchored attribution rules.** The AI-noreply rule is anchored to trailer
+  lines (`*-by:`) so it never strips a prose line that merely mentions the email.
+- **`compliance` keeps disclosure.** AI-attribution rules resolve to `allow`
+  under `compliance`, so nothing is stripped and the disclosure is preserved.
+
+## Testing
+
+`npm run verify` is the release-equivalent local gate. It validates generated
+artifacts and JSON, compiles every published schema, lints workflows, checks for
+dead code, runs coverage (including release-critical scripts), verifies the
+packed manifest, and exercises installed hooks. The tests cover profiles,
+overrides, commit-message repair, strict `--no-verify` rejection, local rules,
+rename/type-change detection, staged/commit/range/tracked targets, linked
+worktrees, hook ownership and chaining, sequencer/direct-ref flows, and initial
+commits.
