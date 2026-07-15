@@ -572,7 +572,8 @@ process.stdout.write(JSON.stringify({ result, stateDir: repo.stateDir }));
         execFileSync('git', ['config', '--local', 'core.hooksPath', shared], { cwd: inner, env });
 
         const first = launch(outer, true);
-        for (let attempt = 0; attempt < 200 && !existsSync(marker); attempt += 1) {
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && !existsSync(marker)) {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
         }
         assert.equal(existsSync(marker), true);

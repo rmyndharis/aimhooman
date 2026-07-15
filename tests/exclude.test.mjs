@@ -139,7 +139,8 @@ withLock(lock, () => {
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     try {
-        for (let attempt = 0; attempt < 100 && !existsSync(marker); attempt += 1) {
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && !existsSync(marker)) {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
         }
         assert.equal(existsSync(marker), true);

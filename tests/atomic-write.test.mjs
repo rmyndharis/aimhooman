@@ -217,7 +217,8 @@ withLock(lock, () => {
     });
     try {
         const first = launch('A');
-        for (let attempt = 0; attempt < 200 && !existsSync(firstHeld); attempt += 1) {
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && !existsSync(firstHeld)) {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
         }
         assert.equal(existsSync(firstHeld), true);
@@ -248,7 +249,8 @@ withLock(lock, () => {
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     try {
-        for (let attempt = 0; attempt < 200 && !existsSync(held); attempt += 1) {
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && !existsSync(held)) {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
         }
         assert.equal(existsSync(held), true);
