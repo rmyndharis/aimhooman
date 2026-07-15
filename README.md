@@ -286,17 +286,15 @@ Under `strict`, policy files and agent instructions produce review-required find
 The product's `review` and `policy-review` commands record local, object-bound decisions;
 an ordinary path allow cannot satisfy either finding.
 
-This personal repository does not use GitHub approvals, required reviewers, or
-`CODEOWNERS`. For a protected-path change, CI verifies the pinned repository and owner
-login plus numeric IDs through the GitHub API, then inspects the exact workflow-run
-attempt. GitHub must attribute both `actor` and `triggering_actor`, including their
-numeric IDs, to that owner. CI then binds the
-authorization to the exact head, transition commit, path, resulting blob and regular-file
-mode, or deletion tombstone. A strict-policy migration also binds its old and new policy
-objects. A different attempt, commit, path result, mode, or policy transition needs fresh
-authorization. A non-owner change fails closed; there is no reviewer or `CODEOWNERS`
-fallback. The owner account and its credentials are the trust root, so this is owner
-authorization, not independent review.
+For a protected-path change, CI verifies the pinned repository and owner login plus
+numeric IDs through the GitHub API, then inspects the exact workflow-run attempt.
+GitHub must attribute both `actor` and `triggering_actor`, including their numeric IDs,
+to that owner. CI then binds the authorization to the exact head, transition commit,
+path, resulting blob and regular-file mode, or deletion tombstone. A strict-policy
+migration also binds its old and new policy objects. A different attempt, commit, path
+result, mode, or policy transition needs fresh authorization. A change not attributed to
+the owner fails closed. This is owner authorization verified through GitHub attribution,
+not independent review.
 
 ## Overrides
 

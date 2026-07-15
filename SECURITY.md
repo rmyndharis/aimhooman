@@ -54,16 +54,14 @@ only the latest minor release will receive security fixes.
 - A committed `.aimhooman.json` provides the versioned team profile. Invalid
   project policy fails closed; per-clone allow/deny entries remain local and
   should be governed by team process where compliance requires it.
-- This is a personal, owner-only repository with no GitHub approval, required
-  reviewer, or `CODEOWNERS` gate. For protected-path changes, CI resolves the
-  pinned repository and owner through the GitHub API and fetches the exact
-  workflow-run attempt. GitHub must attribute both the actor and triggering actor
-  to the owner's login and numeric ID. The resulting decision is bound to the exact head,
-  transition commit, path, blob and regular-file mode, or deletion tombstone; a
-  policy migration also binds its old and new objects. Non-owner changes fail
-  closed with no reviewer fallback. The owner is the trust root, not an independent
-  reviewer. These checks verify GitHub attribution, not an interactive human action,
-  and cannot defend against malicious or compromised owner credentials.
+- For protected-path changes (agent instruction files, `.aimhooman.json`), CI resolves
+  the repository and owner through the GitHub API and fetches the exact workflow-run
+  attempt. GitHub must attribute both the actor and triggering actor to the owner's
+  login and numeric ID. The resulting decision is bound to the exact head, transition
+  commit, path, blob, and regular-file mode (or deletion tombstone); a policy migration
+  also binds its old and new objects. Changes not attributed to the owner fail closed.
+  These checks verify GitHub actor attribution, not an interactive human action, and
+  cannot defend against a compromised owner credential.
 - The release pipeline pins actions to immutable commit SHAs and publishes with npm
   build provenance. Pushing a `v*` tag runs the workflow: it installs dependencies,
   runs the test suite, then publishes to npm authenticated by the `NPM_TOKEN` secret

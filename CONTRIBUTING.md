@@ -107,38 +107,18 @@ Commits must read as if a human wrote them:
 
 By participating, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-This is a personal, owner-only repository. GitHub branch rules require the `tests`
-workflow but no pull-request approval, code-owner review, last-push approval, or
-other reviewer. The repository has no `CODEOWNERS` fallback.
-
-Changes to agent instructions or `.aimhooman.json` are protected-path changes. CI
-verifies the pinned repository and owner login plus numeric IDs through the GitHub
-API, then fetches the exact workflow-run attempt. GitHub must attribute the
-attempt's `actor` and `triggering_actor` to that owner's login and numeric ID. CI
-binds that authorization to the exact
-head, transition commit, path, resulting blob and regular-file mode, or deletion
-tombstone. Policy migrations additionally bind the old and new policy objects.
-Another commit, attempt, path result, mode, or migration needs fresh authorization.
-A protected-path change by any non-owner fails closed.
-
-The owner account and its credentials are the repository trust root. These checks
-verify GitHub's actor attribution and bind the resulting objects; they do not prove
-an interactive human action, provide independent review, or protect against a
-compromised owner credential.
+## Releases
 
 Releases publish to npm automatically when a `v*` tag is pushed. The workflow
-installs dependencies, runs the test suite, and publishes with npm build provenance,
-authenticated by the `NPM_TOKEN` secret. To cut a release: bump the version (keep
-`package.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, and
-`.claude-plugin/marketplace.json` in sync), add the `## [version]` CHANGELOG entry
-and the matching README version badge, then tag and push:
+installs dependencies, runs the test suite, and publishes with npm build provenance.
+To cut a release, bump the version (keep `package.json`, `.claude-plugin/plugin.json`,
+`.codex-plugin/plugin.json`, and `.claude-plugin/marketplace.json` in sync), add the
+`## [version]` CHANGELOG entry and the matching README version badge, then:
 
 ```sh
 git tag -a v0.1.0 -m v0.1.0
 git push origin v0.1.0
 ```
 
-Protect `v*` tags so only the owner can create them and tag update or deletion is
-blocked. Use a granular, publish-only, package-scoped npm token with 2FA enabled
-and rotate it regularly. Do not run `npm publish` or move dist-tags manually while
-a release job is pending or running.
+Use a granular, publish-only npm token with 2FA enabled, and avoid publishing or
+moving dist-tags manually while a release job is running.

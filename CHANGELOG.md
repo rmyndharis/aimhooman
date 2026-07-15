@@ -30,10 +30,9 @@ commit messages, and AI markers left in code.
 - Scan every index stage during unresolved conflicts so a secret on either side
   cannot be missed.
 - Authorize protected-path CI only when the exact workflow-run attempt's actor and
-  triggering actor, including their IDs, match the current personal-repository
-  owner returned by GitHub. Bind that authorization to exact commits, paths,
-  blobs, modes, deletion tombstones, and policy migrations; non-owner changes fail
-  closed with no reviewer fallback.
+  triggering actor, including their IDs, match the repository owner returned by
+  GitHub. Bind that authorization to exact commits, paths, blobs, modes, deletion
+  tombstones, and policy migrations; changes not attributed to the owner fail closed.
 - Keep the published local rule-pack schema compatible with strict JSON Schema
   validators.
 - Prove npm version absence and forward dist-tag movement with bounded retries

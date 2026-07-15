@@ -762,7 +762,11 @@ test('lifecycle queue serializes init/init, init/uninstall, and failed/successfu
         }
     };
     const waitForCandidate = (lock, child) => {
-        for (let attempt = 0; attempt < 5000 && !candidateForPid(lock, child.pid); attempt += 1) {
+        // Wall-clock budget: child startup (Node boot + module load + ticket
+        // publication) varies across Node versions and under CI load, so a fixed
+        // poll count flakes on the slowest supported runner (Node 22.8.0).
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline && !candidateForPid(lock, child.pid)) {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
         }
         const candidate = candidateForPid(lock, child.pid);
