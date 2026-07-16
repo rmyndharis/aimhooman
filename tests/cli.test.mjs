@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1198,5 +1198,54 @@ test('local uninstall warns when an inherited global core.hooksPath remains acti
     } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test('uninstall never reports success while its own dispatchers remain', () => {
+    // The rule this locks: after uninstall exits 0, nothing aimhooman installed
+    // is left on disk. A refusal that only produced a warning used to be printed
+    // under an "uninstalled" headline with exit 0, which is the one lie a guard
+    // must never tell — the user walks away believing they are free.
+    const dir = makeRepo('clean');
+    const hooks = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'hooks'], {
+        cwd: dir, encoding: 'utf8',
+    }).trim();
+    try {
+        const out = result('uninstall', [], dir);
+        const left = ['pre-commit', 'commit-msg', 'pre-merge-commit', 'reference-transaction']
+            .filter((name) => existsSync(join(hooks, name)));
+
+        if (out.status === 0) {
+            assert.deepEqual(left, [], 'exit 0 must mean the hooks directory is clean');
+            assert.match(out.stdout, /uninstalled/);
+        } else {
+            assert.deepEqual(out.stdout.match(/^aimhooman: uninstalled$/m), null,
+                'a partial uninstall must not print the success headline');
+        }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('uninstall lets a renamed repository go', () => {
+    // Renaming a directory is ordinary work. It used to freeze the repository and
+    // uninstall answered "uninstalled" + exit 0 while leaving all four
+    // dispatchers blocking every commit.
+    const dir = makeRepo('clean');
+    const moved = `${dir}-moved`;
+    try {
+        renameSync(dir, moved);
+        const out = result('uninstall', [], moved);
+        assert.equal(out.status, 0, out.stdout + out.stderr);
+        const hooks = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'hooks'], {
+            cwd: moved, encoding: 'utf8',
+        }).trim();
+        for (const name of ['pre-commit', 'commit-msg', 'pre-merge-commit', 'reference-transaction']) {
+            assert.equal(existsSync(join(hooks, name)), false, name);
+        }
+        writeFileSync(join(moved, 'work.txt'), 'ordinary\n');
+        execFileSync('git', ['add', 'work.txt'], { cwd: moved });
+        execFileSync('git', ['commit', '-q', '-m', 'ordinary work'], { cwd: moved });
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(moved, { recursive: true, force: true });
     }
 });

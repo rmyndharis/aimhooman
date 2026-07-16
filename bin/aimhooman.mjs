@@ -19,7 +19,7 @@ import {
 } from '../src/gitx.mjs';
 import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, saveConfig, saveOverrides } from '../src/state.mjs';
 import { applyExclude, inspectExclude, patternsForRules, removeExclude } from '../src/exclude.mjs';
-import { hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
+import { hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
@@ -1541,11 +1541,20 @@ function cmdUninstall(args) {
     return withLock(join(repo.commonDir, 'aimhooman-lifecycle.lock'), () => {
     const rep = uninstallHooks(repo);
     removeExclude(repo.excludeFile);
-    console.log('aimhooman: uninstalled');
+    // Trust the directory, not the report. Every refusal below leaves a working
+    // dispatcher behind, and one printed under "uninstalled" reads as done.
+    const remaining = remainingDispatchers(repo);
+    if (remaining.length) {
+        console.error('aimhooman: NOT uninstalled; leaving dispatchers in place:');
+        for (const path of remaining) console.error(`  ${path}`);
+        console.error('  These still guard every commit. Remove them by hand to finish uninstalling.');
+    } else {
+        console.log('aimhooman: uninstalled');
+    }
     if (rep.removed.length) console.log(`  hooks removed:  ${rep.removed.join(', ')}`);
     if (rep.restored.length) console.log(`  hooks restored: ${rep.restored.join(', ')}`);
     for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
-    for (const f of rep.failures || []) console.log(`  warning: ${f}`);
+    for (const f of rep.failures || []) console.error(`  failure: ${f}`);
     const unrestored = purge ? unrestoredChainedBackups(repo) : [];
     if (purge) {
         // Never wipe stateDir while a predecessor hook backup is still on disk:
@@ -1580,7 +1589,7 @@ function cmdUninstall(args) {
         console.log('  eligible non-bare repositories that inherit core.hooksPath are still guarded.');
         console.log('  run `aimhooman uninstall --global` to remove it.');
     }
-    return rep.failures?.length || unrestored.length ? 30 : 0;
+    return remaining.length || rep.failures?.length || unrestored.length ? 30 : 0;
     }, LIFECYCLE_LOCK_OPTIONS);
 }
 

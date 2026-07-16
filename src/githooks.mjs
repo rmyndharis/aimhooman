@@ -66,16 +66,28 @@ function hooksDir(repo) {
     };
 }
 
+function pathContains(root, candidate) {
+    const rel = relative(root, candidate);
+    return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
+}
+
 function repositoryOwnsPath(repo, path) {
     const candidate = canonicalPath(path);
     return [repo.root, repo.commonDir, repo.gitDir]
         .filter(Boolean)
         .map(canonicalPath)
-        .some((root) => {
-            const rel = relative(root, candidate);
-            return rel === '' || (!rel.startsWith(`..${sep}`)
-                && rel !== '..' && !isAbsolute(rel));
-        });
+        .some((root) => pathContains(root, candidate));
+}
+
+// insideGitDir is the part of repositoryOwnsPath that cannot be shared. A .git
+// belongs to exactly one repository, while a directory in the worktree can be
+// the core.hooksPath of a second one.
+function insideGitDir(repo, path) {
+    const candidate = canonicalPath(path);
+    return [repo.commonDir, repo.gitDir]
+        .filter(Boolean)
+        .map(canonicalPath)
+        .some((root) => pathContains(root, candidate));
 }
 
 // trackedPath reports whether Git tracks anything under path. A Git that cannot
@@ -328,7 +340,7 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
             continue;
         }
         if (current && ownedHook(readFileSync(dest, 'utf8'), name)
-            && !ownedForChain(readFileSync(dest, 'utf8'), name, chainedPath)) {
+            && !ownedByRepo(repo, dir, readFileSync(dest, 'utf8'), name, chainedPath)) {
             warnings.push(`${name} is managed for another repository; refusing to overwrite it`);
             unsafe = true;
         }
@@ -402,13 +414,18 @@ function uninstallHooksLocked(repo, dir, warnings) {
             const chained = join(chainedDir, name);
             const content = readFileSync(dest, 'utf8');
             if (!ownedHook(content, name)) continue;
-            if (!ownedForChain(content, name, chained)) {
-                warnings.push(`${name} is managed for another repository; refusing to remove it`);
+            if (!ownedByRepo(repo, dir, content, name, chained)) {
+                failures.push(`${name}: managed for another repository; left in place at ${dest}`);
                 continue;
             }
             const predecessor = entry(chained);
             if (predecessor?.isSymbolicLink()) {
-                warnings.push(`${name} chained backup is a symlink; refusing to restore it`);
+                // Never read or copy through the symlink, but do let go of the
+                // dispatcher: holding the repository hostage over a backup we
+                // refuse to touch helps nobody.
+                warnings.push(`${name} chained backup is a symlink; ${chained} left in place and your original hook was not restored`);
+                unlinkSync(dest);
+                removed.push(name);
                 continue;
             }
             if (predecessor) {
@@ -428,6 +445,29 @@ function uninstallHooksLocked(repo, dir, warnings) {
     return { removed: removed.sort(), restored: restored.sort(), warnings, failures };
 }
 
+// remainingDispatchers lists aimhooman dispatchers still on disk. uninstall
+// checks the directory rather than trusting its own report: a refusal that only
+// produced a warning would otherwise be printed under a success headline, and
+// "uninstalled" while four dispatchers still block every commit is the one lie
+// a guard must never tell. The global directory is excluded because it has its
+// own command; a local uninstall was never responsible for it.
+export function remainingDispatchers(repo) {
+    const { dir } = hooksDir(repo);
+    if (canonicalPath(dir) === canonicalPath(globalHooksDir())) return [];
+    return Object.keys(MANAGED).sort().flatMap((name) => {
+        const path = join(dir, name);
+        try {
+            const stat = entry(path);
+            if (!stat || stat.isSymbolicLink()) return [];
+            return ownedHook(readFileSync(path, 'utf8'), name) ? [path] : [];
+        } catch {
+            // Unreadable: cannot prove it is gone, so report it rather than
+            // claim a clean removal.
+            return [path];
+        }
+    });
+}
+
 // hookDiagnostics reports both dispatcher integrity and whether its configured
 // command can be reached from the current environment.
 export function hookDiagnostics(repo) {
@@ -435,8 +475,12 @@ export function hookDiagnostics(repo) {
     // Global hooks (installGlobalHooks) keep chained backups in the hooks dir
     // itself; local hooks keep them in repo state via chainDir. Diagnose the
     // path the dispatcher actually embeds, not the repo-relative default.
+    // canonicalPath, not resolve: a HOME behind a symlink (Fedora Silverblue
+    // ships /home -> /var/home; NFS and autofs homes are everywhere) makes the
+    // two spellings differ, and every global dispatcher would then be diagnosed
+    // as belonging to another repository.
     const globalDir = globalHooksDir();
-    const chained = resolve(dir) === resolve(globalDir)
+    const chained = canonicalPath(dir) === canonicalPath(globalDir)
         ? join(globalDir, 'chained')
         : chainDir(repo);
     return Object.keys(MANAGED).sort().map((name) => {
@@ -479,7 +523,7 @@ export function hookDiagnostics(repo) {
                 reason: inspected.reason,
             };
         }
-        if (!ownedForChain(content, name, base.chainedPath)) {
+        if (!ownedByRepo(repo, dir, content, name, base.chainedPath)) {
             return {
                 ...base,
                 managed: false,
@@ -723,8 +767,16 @@ function ownedHook(content, name) {
     return inspected.valid || legacyHook(content, name);
 }
 
-function ownedForChain(content, name, chainedPath) {
+// ownedByRepo decides whether this repository may rewrite or remove a dispatcher.
+// Inside our own .git the fingerprint settles it: we wrote the file, and no
+// second repository can own anything there. The baked chained path only earns a
+// vote where the hooks directory can genuinely be shared — two repositories may
+// point core.hooksPath at one directory, and then it is the only way to tell the
+// installs apart. Comparing paths everywhere means a renamed repository stops
+// recognising the guard it installed itself, with no way to re-pin or remove it.
+function ownedByRepo(repo, dir, content, name, chainedPath) {
     if (!ownedHook(content, name)) return false;
+    if (insideGitDir(repo, dir)) return true;
     return assignmentValue(content, 'CHAINED') === String(chainedPath);
 }
 

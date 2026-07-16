@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Renaming or moving a repository no longer freezes it. The dispatcher bakes
+  absolute paths, so a move changes the `CHAINED` value it carries, and ownership
+  was decided by comparing that string — overruling the SHA-256 fingerprint on the
+  line above, which had already proved the file was ours. Every commit, every
+  `--no-verify`, and every branch creation then failed; `status` reported the guard
+  as belonging to another repository; `aimhooman init`, the remedy each message
+  named, refused too. Ownership inside the repository's own `.git` is now settled
+  by the fingerprint alone, because no second repository can own a file there. The
+  baked path keeps its vote only where a hooks directory can genuinely be shared —
+  two repositories pointing `core.hooksPath` at one place — which is the case it
+  was written for.
+- `uninstall` no longer reports success while leaving its own dispatchers behind.
+  Refusals were recorded as warnings, the exit code only consulted failures, and
+  the "uninstalled" headline printed before either was known, so a moved
+  repository was told it was free while four dispatchers still blocked every
+  commit. uninstall now checks the hooks directory instead of trusting its own
+  report: anything of ours still on disk is named with its full path, the headline
+  is withheld, and the exit code is 30. A chained backup that is a symlink is
+  still never read or copied through, but the dispatcher above it is now removed
+  rather than held as collateral, and the report says the original hook was not
+  restored.
+- A `HOME` behind a symlink no longer makes every global dispatcher look foreign.
+  `hookDiagnostics` compared the effective hooks directory to the global one with
+  `resolve`, which does not follow symlinks, while Git reports the realpath — so
+  on a distribution that ships `/home` as a link, or an NFS or autofs home, the
+  two spellings differed and every global hook was diagnosed as managed for
+  another repository.
+
 - A local rule pack that cannot load no longer produces a report claiming a
   complete scan. `strict` already failed closed, but `clean` and `compliance`
   turned the load error into a stderr warning and left the accumulator untouched,

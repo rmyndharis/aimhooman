@@ -9,6 +9,7 @@ import {
     mkdtempSync,
     mkdirSync,
     readFileSync,
+    renameSync,
     rmSync,
     symlinkSync,
     statSync,
@@ -241,6 +242,42 @@ test('install/uninstall honors a local-scope core.hooksPath', () => {
             const uninstalled = uninstallHooks(openRepo(root));
             assert.deepEqual(uninstalled.removed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction']);
             assert.equal(existsSync(join(custom, 'pre-commit')), false);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+const MANAGED_NAMES = ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction'];
+
+test('a renamed repository still owns the dispatchers inside its own .git', () => {
+    // The dispatcher bakes absolute paths, so moving the repository changes the
+    // baked CHAINED value. The SHA-256 fingerprint still proves the file is ours,
+    // and no second repository can own a file under this .git, so a stale path
+    // string must not overrule it. Renaming a directory is ordinary work.
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-moved-repo-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            installHooks(openRepo(root), CLI);
+            const moved = join(base, 'moved');
+            renameSync(root, moved);
+
+            const repo = openRepo(moved);
+            assert.deepEqual(installedHooks(repo), MANAGED_NAMES, 'a moved repo still recognises its own guard');
+
+            // init must be able to re-pin: it is the remedy every message names.
+            const reinstalled = installHooks(openRepo(moved), CLI);
+            assert.deepEqual(reinstalled.installed, MANAGED_NAMES);
+            assert.deepEqual(reinstalled.warnings, []);
+
+            const rep = uninstallHooks(openRepo(moved));
+            assert.deepEqual(rep.removed, MANAGED_NAMES, 'a moved repo can still let itself out');
+            assert.deepEqual(rep.warnings, []);
+            const hooks = git(moved, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            for (const name of MANAGED_NAMES) {
+                assert.equal(existsSync(join(hooks, name)), false, name);
+            }
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
