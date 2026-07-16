@@ -299,6 +299,23 @@ function cmdPrecommit(args) {
             stagedBefore = null;
         }
         unstagePaths(repo, [...unstageTargets]);
+        // Under heavy CI load a `git restore --staged` or the rename-source
+        // detection above can transiently leave a target staged, which flakes
+        // the repair tests and would let an artifact ride through. Re-detect
+        // rename sources and re-unstage any still-staged target until every
+        // target is gone or the budget is reached.
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+            let stillStaged;
+            try {
+                for (const source of stagedRenameSources(repo, paths)) unstageTargets.add(source);
+                stillStaged = new Set(stagedPaths(repo));
+            } catch {
+                break;
+            }
+            const pending = [...unstageTargets].filter((path) => stillStaged.has(path));
+            if (!pending.length) break;
+            unstagePaths(repo, pending);
+        }
         const empty = stagedBefore !== null
             && stagedBefore.every((path) => unstageTargets.has(path));
         process.stderr.write(

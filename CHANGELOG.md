@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uninstall`). The dispatcher used to exit 127 and abort every commit; it now
   warns once and allows the operation without protection, so a half-removed
   install degrades gracefully instead of breaking Git.
+- The clean-profile repair now verifies it cleared every target and re-runs the
+  unstage when a transient git operation under heavy CI load left a path staged,
+  so the repair no longer reports success while an artifact rides through and
+  the repair tests stop flaking on the slowest runners.
 
 ### Changed
 
