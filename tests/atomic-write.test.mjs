@@ -37,17 +37,22 @@ test('atomicWrite preserves the original and removes its temp after ENOSPC', () 
     }
 });
 
-function onWin32(fn) {
-    // The retry is Windows-only, so force the branch to keep the contract under
-    // test on every runner instead of only on the platform that flakes.
+// The retry is Windows-only, so pin the platform for both branches: forcing
+// win32 keeps the retry contract under test on every runner, and forcing a
+// POSIX value keeps the no-retry contract honest on a real Windows runner,
+// where the host value would otherwise satisfy the wrong branch.
+function onPlatform(value, fn) {
     const original = Object.getOwnPropertyDescriptor(process, 'platform');
-    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    Object.defineProperty(process, 'platform', { value, configurable: true });
     try {
         return fn();
     } finally {
         Object.defineProperty(process, 'platform', original);
     }
 }
+
+const onWin32 = (fn) => onPlatform('win32', fn);
+const onPosix = (fn) => onPlatform('linux', fn);
 
 test('atomicWrite retries a transient Windows rename and lands the complete file', () => {
     // Windows fails a rename with EPERM while an antivirus or indexer holds a
@@ -126,14 +131,14 @@ test('atomicWrite never retries a non-transient rename or a POSIX failure', () =
         // handle, so it must not be retried either.
         let posixAttempts = 0;
         assert.throws(
-            () => atomicWrite(file, 'replacement\n', {
+            () => onPosix(() => atomicWrite(file, 'replacement\n', {
                 operations: {
                     rename() {
                         posixAttempts += 1;
                         throw Object.assign(new Error('denied'), { code: 'EPERM' });
                     },
                 },
-            }),
+            })),
             (error) => error.code === 'EPERM',
         );
         assert.equal(posixAttempts, 1);
