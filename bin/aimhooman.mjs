@@ -37,8 +37,7 @@ const LIFECYCLE_LOCK_OPTIONS = { retries: 1000 };
 function tryRepo() {
     try {
         return openRepo();
-    } catch (error) {
-        if (error?.name === 'StateMigrationError') throw error;
+    } catch {
         return null;
     }
 }
@@ -860,7 +859,6 @@ function cmdStatus(args) {
     console.log(`overrides: ${overrides.allow.length} allow, ${overrides.deny.length} deny`);
     console.log(`excludes: ${excludeError ? `unknown (malformed markers: ${excludeError}; run: aimhooman init)` : excludes.current ? 'current' : excludes.installed ? 'out of date (run: aimhooman init)' : 'not installed (run: aimhooman init)'}`);
     for (const error of errors) console.log(`warning:  ${error.message}`);
-    for (const diagnostic of repo.stateDiagnostics || []) console.log(`${diagnostic.level || 'info'}: ${diagnostic.message}`);
     const localHooks = gitConfigAtScope(repo.root, '--local', 'core.hooksPath');
     const globalHooks = gitConfigAtScope(repo.root, '--global', 'core.hooksPath');
     console.log(`hooks path: local=${localHooks || 'unset'}, global=${globalHooks || 'unset'}`);
@@ -1426,10 +1424,6 @@ function cmdDoctor(args) {
         ok = false;
     } else {
         console.log(`ok host adapters present (${adapters.present}/${adapters.total})`);
-    }
-    for (const diagnostic of repo.stateDiagnostics || []) {
-        console.log(`${diagnostic.level === 'error' ? 'x' : '!'} state: ${diagnostic.message}`);
-        if (diagnostic.level === 'error') ok = false;
     }
     const gitRuntime = supportedGitVersion();
     if (gitRuntime.supported) {

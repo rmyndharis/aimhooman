@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import {
     GitRevisionError,
     GitTargetReadError,
-    archiveLegacyStates,
     introducedCommits,
     openRepo,
     readCommitPath,
@@ -15,7 +14,6 @@ import {
     stagedEntries,
     stagedPaths,
     trackedEntries,
-    StateMigrationError,
     unmergedPaths,
     unstagePaths,
 } from '../src/gitx.mjs';
@@ -67,7 +65,6 @@ test('main and linked worktrees share per-clone state', () => {
         assert.equal(linkedRepo.stateDir, join(mainRepo.commonDir, 'aimhooman'));
         assert.equal(loadConfig(linkedRepo.stateDir).profile, 'strict');
         assert.deepEqual(loadOverrides(linkedRepo.stateDir).allow.map((entry) => entry.target), ['README.md']);
-        assert.deepEqual(linkedRepo.legacyStateDirs, []);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -107,107 +104,6 @@ test('a submodule has independent state from its superproject', () => {
     } finally {
         rmSync(parent, { recursive: true, force: true });
         rmSync(source, { recursive: true, force: true });
-    }
-});
-
-test('a single linked-worktree state is copied to the common state directory', () => {
-    const dir = freshRepo();
-    try {
-        const linked = addWorktree(dir, 'legacy-linked');
-        const linkedGitDir = absoluteGitDir(linked);
-        const legacyState = join(linkedGitDir, 'aimhooman');
-        saveConfig(legacyState, { profile: 'strict' });
-        saveOverrides(legacyState, { allow: [], deny: [{ target: '.env' }] });
-
-        const repo = openRepo(dir);
-        assert.equal(repo.stateDir, join(repo.commonDir, 'aimhooman'));
-        assert.equal(loadConfig(repo.stateDir).profile, 'strict');
-        assert.deepEqual(loadOverrides(repo.stateDir).deny.map((entry) => entry.target), ['.env']);
-        assert.equal(existsSync(legacyState), true);
-        assert.equal(realpathSync(legacyState), realpathSync(repo.stateDir));
-        assert.equal(
-            readdirSync(linkedGitDir).filter((name) => name.startsWith('aimhooman.migrated-')).length,
-            1,
-        );
-        assert.deepEqual(repo.legacyStateDirs, [legacyState]);
-        assert.equal(repo.stateDiagnostics[0].code, 'legacy-state-migrated');
-
-        saveConfig(repo.stateDir, { profile: 'clean' });
-        assert.equal(loadConfig(legacyState).profile, 'clean');
-        const reopened = openRepo(linked);
-        assert.equal(loadConfig(reopened.stateDir).profile, 'clean');
-        assert.deepEqual(reopened.legacyStateDirs, []);
-    } finally {
-        rmSync(dir, { recursive: true, force: true });
-    }
-});
-
-test('conflicting linked-worktree state stops common-state selection', () => {
-    const dir = freshRepo();
-    try {
-        const first = addWorktree(dir, 'legacy-one');
-        const second = addWorktree(dir, 'legacy-two');
-        saveConfig(join(absoluteGitDir(first), 'aimhooman'), { profile: 'clean' });
-        saveConfig(join(absoluteGitDir(second), 'aimhooman'), { profile: 'strict' });
-        const commonState = join(absoluteGitDir(dir), 'aimhooman');
-
-        assert.throws(
-            () => openRepo(dir),
-            (error) => {
-                assert.ok(error instanceof StateMigrationError);
-                assert.equal(error.stateDir, commonState);
-                assert.equal(error.legacyStateDirs.length, 2);
-                assert.equal(error.stateDiagnostics[0].code, 'legacy-state-conflict');
-                return true;
-            },
-        );
-        assert.equal(existsSync(commonState), false);
-    } finally {
-        rmSync(dir, { recursive: true, force: true });
-    }
-});
-
-test('a conflicting legacy state never replaces existing main-worktree state', () => {
-    const dir = freshRepo();
-    try {
-        const linked = addWorktree(dir, 'legacy-conflict');
-        const commonState = join(absoluteGitDir(dir), 'aimhooman');
-        const legacyState = join(absoluteGitDir(linked), 'aimhooman');
-        saveConfig(commonState, { profile: 'strict' });
-        saveConfig(legacyState, { profile: 'clean' });
-
-        assert.throws(() => openRepo(linked), StateMigrationError);
-        assert.equal(loadConfig(commonState).profile, 'strict');
-        assert.equal(loadConfig(legacyState).profile, 'clean');
-    } finally {
-        rmSync(dir, { recursive: true, force: true });
-    }
-});
-
-test('a legacy state already archived by a concurrent process does not spuriously fail migration', () => {
-    const dir = freshRepo();
-    try {
-        const linked = addWorktree(dir, 'race-linked');
-        const legacyState = join(absoluteGitDir(linked), 'aimhooman');
-        const commonState = join(absoluteGitDir(dir), 'aimhooman');
-        saveConfig(legacyState, { profile: 'strict' });
-        saveConfig(commonState, { profile: 'strict' });
-
-        // Simulate the winner having finished archiving: replace the legacy dir
-        // with a compatibility symlink to the common state.
-        rmSync(legacyState, { recursive: true, force: true });
-        symlinkSync(commonState, legacyState, process.platform === 'win32' ? 'junction' : 'dir');
-
-        // The loser computed its fingerprint before the race and now sees the
-        // symlink. It must treat this as archived-concurrently, not rename the
-        // symlink (which would fingerprint the common state and mismatch).
-        const diagnostics = [];
-        archiveLegacyStates([{ path: legacyState, fingerprint: 'stale-pre-race' }], commonState, diagnostics);
-        assert.equal(diagnostics.length, 1);
-        assert.equal(diagnostics[0].code, 'legacy-state-archived-concurrently');
-        assert.equal(realpathSync(legacyState), realpathSync(commonState));
-    } finally {
-        rmSync(dir, { recursive: true, force: true });
     }
 });
 
