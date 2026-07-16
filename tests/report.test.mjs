@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { human, jsonReport } from '../src/report.mjs';
+import { human, jsonReport, exitCode } from '../src/report.mjs';
 import { openRepo } from '../src/gitx.mjs';
 import { scanMessage } from '../src/scan-target.mjs';
 
@@ -98,6 +98,40 @@ function assertSchemaValue(rawSchema, value, root, path = '$') {
         }
     }
 }
+
+test('exitCode: a block wins over an incomplete scan and over review', () => {
+    const block = { decision: 'block' };
+    const review = { decision: 'review' };
+    assert.equal(exitCode([block], 'clean', false), 10);
+    assert.equal(exitCode([block], 'strict', false), 10);
+    assert.equal(exitCode([block, review], 'strict', true), 10);
+    assert.equal(exitCode([block, review], 'clean', false), 10);
+});
+
+test('exitCode: an incomplete scan without a block stops at 31', () => {
+    const review = { decision: 'review' };
+    assert.equal(exitCode([], 'clean', false), 31);
+    assert.equal(exitCode([], 'strict', false), 31);
+    assert.equal(exitCode([review], 'clean', false), 31);
+    assert.equal(exitCode([review], 'strict', false), 31);
+});
+
+test('exitCode: review becomes 11 only off clean and only when the scan is complete', () => {
+    const review = { decision: 'review' };
+    assert.equal(exitCode([review], 'strict', true), 11);
+    assert.equal(exitCode([review], 'compliance', true), 11);
+    assert.equal(exitCode([review], 'clean', true), 0);
+    // A finding's own scanProfile stricter than the report profile still surfaces.
+    assert.equal(exitCode([{ decision: 'review', scanProfile: 'strict' }], 'clean', true), 11);
+    // A finding whose scanProfile is clean does not escalate under a strict report.
+    assert.equal(exitCode([{ decision: 'review', scanProfile: 'clean' }], 'strict', true), 0);
+});
+
+test('exitCode: a clean scan exits 0 on every profile', () => {
+    assert.equal(exitCode([], 'clean', true), 0);
+    assert.equal(exitCode([], 'strict', true), 0);
+    assert.equal(exitCode([], 'compliance', true), 0);
+});
 
 test('human report includes content line numbers and redacts secret text', () => {
     const report = human([secretFinding], 'professional');

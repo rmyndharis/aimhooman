@@ -125,13 +125,14 @@ test('push workflow scans history; release workflow cuts a tag into a direct npm
     assert.match(testsWorkflow, /persist-credentials:\s*false/);
     assert.match(testsWorkflow, /npm ci --ignore-scripts/);
 
-    // The release workflow cuts a version tag into a direct npm publish with provenance.
+    // The release workflow cuts a version tag into a direct npm publish with
+    // provenance, gated by the same verification the push workflow runs.
     assert.match(releaseWorkflow, /tags:\s*\["v\*"\]/);
     assert.match(releaseWorkflow, /id-token:\s*write/);
     assert.match(releaseWorkflow, /node-version:\s*24/);
     assert.match(releaseWorkflow, /registry-url:\s*https:\/\/registry\.npmjs\.org/);
     assert.match(releaseWorkflow, /npm ci --ignore-scripts/);
-    assert.match(releaseWorkflow, /run:\s*npm test/);
+    assert.match(releaseWorkflow, /run:\s*npm run verify/);
     assert.match(releaseWorkflow, /npm publish --access public --provenance/);
     assert.match(releaseWorkflow, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.NPM_TOKEN \}\}/);
 });

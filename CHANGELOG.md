@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Detect secrets renamed to a neutral path. A path-only secret such as `.env`
+  was missed when moved to a name the destination scan does not match, because its
+  content carries no PEM, AWS, or token shape; the rename-source review now retains
+  secret-category findings and reports them on the destination path where the bytes
+  live, so clean-profile repair unstages the blob that carries the secret. Deleting
+  a secret path remains a non-finding.
+
+### Changed
+
+- The release workflow runs `npm run verify` before publish instead of `npm test`,
+  so the tarball-manifest check and the installed-hook smoke test gate the published
+  tag, matching the push workflow.
+
 ## [0.1.0] - 2026-07-15
 
 First public release. aimhooman keeps AI coding-agent residue out of Git history
