@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the repair no longer reports success while an artifact rides through and
   the repair tests stop flaking on the slowest runners.
 
+- Retry the atomic rename that commits a state write when Windows reports a
+  transient `EPERM`, `EACCES`, or `EBUSY`. An antivirus or indexer holding a
+  handle on the file aimhooman had just written could kill a lock contender at
+  its ticket publication, which surfaced as unrelated CI failures (a
+  lifecycle-queue timeout, or a repair that appeared not to run). A persistent
+  failure, any other error code, and every non-Windows platform still fail
+  immediately, and the original file is never left partially written.
+
 ### Changed
 
 - The release workflow runs `npm run verify` before publish instead of `npm test`,

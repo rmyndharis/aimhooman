@@ -39,7 +39,7 @@ export function atomicWrite(file, data, options = {}) {
         operations.sync(descriptor);
         operations.close(descriptor);
         descriptor = undefined;
-        operations.rename(temporary, file);
+        renameWithRetry(operations, temporary, file, options.renameRetries);
         try {
             syncDirectory(directory, operations);
         } catch (error) {
@@ -54,6 +54,30 @@ export function atomicWrite(file, data, options = {}) {
         }
         try { operations.remove(temporary, { force: true }); } catch { /* keep the write error */ }
         throw error;
+    }
+}
+
+// Windows fails a rename with EPERM/EACCES/EBUSY while another handle is open on
+// either path — an antivirus or indexer scanning the file aimhooman just wrote is
+// enough, and it clears within milliseconds. Observed on CI as a lock contender
+// dying at its ticket publication, which then read as a lifecycle-queue timeout.
+// The rename is the atomic commit point, so a retry either lands the complete
+// file or leaves the original untouched; it can never publish a partial write.
+// A non-transient error (and every code on other platforms) still throws at once.
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+function renameWithRetry(operations, temporary, file, retries = 20) {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            operations.rename(temporary, file);
+            return;
+        } catch (error) {
+            const retryable = process.platform === 'win32'
+                && TRANSIENT_RENAME_CODES.has(error?.code)
+                && attempt + 1 < retries;
+            if (!retryable) throw error;
+            waitForLock(5);
+        }
     }
 }
 
