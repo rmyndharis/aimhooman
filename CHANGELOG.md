@@ -7,40 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-16
+
 ### Fixed
 
+- Git hooks no longer trap the repository when the aimhooman CLI or Node is
+  missing (for example after the package was removed without `aimhooman
+  uninstall`). The dispatcher used to exit 127 and abort every commit; it now
+  warns once and allows the operation without protection, so a half-removed
+  install degrades gracefully instead of breaking Git.
+- The `PreToolUse` guard no longer denies ordinary read-only pipelines. Any pipe
+  made the parsed command uncertain, and the clean and compliance profiles read
+  that uncertainty as a possibly hidden commit, so everyday lines such as
+  `gh issue view 1 | tail -5` were blocked. A pipeline now passes when every
+  segment is a known read-only command and the line carries no opaque shell
+  syntax; everything else stays denied, including pipe-to-shell, subshells,
+  `eval`, and readers that execute their own input. `strict` is unchanged.
+- A bare `allow <path>` for a path that matches a secret rule (for example
+  `.env.minimal`) no longer reports success while leaving the block in place.
+  It now fails closed and directs to `--scope secret-path`, the only scope that
+  can silence a secret, so a local override cannot hide a possible leaked key.
 - Detect secrets renamed to a neutral path. A path-only secret such as `.env`
   was missed when moved to a name the destination scan does not match, because its
   content carries no PEM, AWS, or token shape; the rename-source review now retains
   secret-category findings and reports them on the destination path where the bytes
   live, so clean-profile repair unstages the blob that carries the secret. Deleting
   a secret path remains a non-finding.
-- Derive the post-repair empty-commit hint from the staged paths captured
-  before repair instead of a second git read after `git restore --staged`. That
-  read followed an index write and could transiently report the wrong state
-  under heavy CI load, which flaked the repair test on the slowest Node 22.8.0
-  runners; the derivation is deterministic.
-- A bare `allow <path>` for a path that matches a secret rule (for example
-  `.env.minimal`) no longer reports success while leaving the block in place.
-  It now fails closed and directs to `--scope secret-path`, the only scope that
-  can silence a secret, so a local override cannot hide a possible leaked key.
-- Git hooks no longer trap the repository when the aimhooman CLI or Node is
-  missing (for example after the package was removed without `aimhooman
-  uninstall`). The dispatcher used to exit 127 and abort every commit; it now
-  warns once and allows the operation without protection, so a half-removed
-  install degrades gracefully instead of breaking Git.
-- The clean-profile repair now verifies it cleared every target and re-runs the
-  unstage when a transient git operation under heavy CI load left a path staged,
-  so the repair no longer reports success while an artifact rides through and
-  the repair tests stop flaking on the slowest runners.
-
 - Retry the atomic rename that commits a state write when Windows reports a
   transient `EPERM`, `EACCES`, or `EBUSY`. An antivirus or indexer holding a
   handle on the file aimhooman had just written could kill a lock contender at
-  its ticket publication, which surfaced as unrelated CI failures (a
-  lifecycle-queue timeout, or a repair that appeared not to run). A persistent
-  failure, any other error code, and every non-Windows platform still fail
-  immediately, and the original file is never left partially written.
+  its ticket publication, which surfaced as unrelated failures (a lifecycle-queue
+  timeout, or a repair that appeared not to run). A persistent failure, any other
+  error code, and every non-Windows platform still fail immediately, and the
+  original file is never left partially written.
+- The clean-profile repair now verifies it cleared every target and re-runs the
+  unstage when a transient git operation under heavy load left a path staged, so
+  the repair no longer reports success while an artifact rides through.
+- Derive the post-repair empty-commit hint from the staged paths captured
+  before repair instead of a second git read after `git restore --staged`. That
+  read followed an index write and could transiently report the wrong state
+  under heavy load; the derivation is deterministic.
 
 ### Changed
 
