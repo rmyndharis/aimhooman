@@ -899,6 +899,19 @@ function cmdOverride(args, allow) {
             `secret rules cannot be allowed at --scope rule (that would suppress every matching secret path under every profile); use --scope secret-path <path> to allow a specific secret path`,
         );
     }
+    // A path that matches a secret rule cannot be silenced by a path (or rule)
+    // allow: only --scope secret-path suppresses secret findings, deliberately,
+    // so a local override cannot hide a possible leaked key. Without this check
+    // a bare `allow .env.minimal` would report success but leave the block in
+    // place, which reads as a broken allow.
+    if (allow && scope !== 'secret-path'
+        && engine.checkPaths([target]).some((finding) => finding.category === 'secret')) {
+        throw new ArgumentError(
+            `"${target}" matches a secret rule, so a ${scope} allow cannot silence it `
+            + '(a local override must not hide a possible leaked key); '
+            + 'use --scope secret-path to explicitly allow this specific path',
+        );
+    }
     if (scope === 'secret-path' && !allow) {
         throw new ArgumentError('--scope secret-path is only valid with allow');
     }
