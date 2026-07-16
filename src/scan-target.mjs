@@ -363,27 +363,38 @@ function scanEntryGroup(repo, engine, entries, policy, accumulator, options = {}
 
 function scanReviewPathChanges(engine, entries, policy, accumulator, options = {}) {
     for (const entry of entries) {
-        const paths = [];
-        if (entry.status === 'D' || entry.type === 'deleted') paths.push(entry.path);
-        if (entry.status === 'R' && entry.sourcePath && entry.sourcePath !== entry.path) {
-            paths.push(entry.sourcePath);
-        }
-        for (const path of paths) {
-            const context = {
-                objectId: null,
-                mode: null,
-                transition: options.transition ?? entry.commit,
-                ...(options.allowMissingPolicy && path === '.aimhooman.json'
-                    ? { transientAllowRules: new Set(['generic.project-policy']) }
-                    : {}),
-            };
-            const findings = engine.checkPaths([path], context).filter((finding) => (
-                finding.matchedRuleIds?.some((ruleId) => (
-                    ruleId === 'generic.agent-instructions' || ruleId === 'generic.project-policy'
-                ))
-            ));
-            accumulator.add(findings.map((finding) => decorate(finding, entry, policy)));
-        }
+        // A deleted path is gone, so only structural policy rules (agent
+        // instructions, project policy) can still matter: deleting a secret or a
+        // session file is hygiene, not a violation. A renamed-away path is
+        // different — its content survives under a new name, so a path-only
+        // secret (e.g. .env) must still fire or a `git mv` to a neutral name
+        // would slip past the destination scan, which only catches content-shaped
+        // secrets. That finding is reported on the destination path (where the
+        // bytes now live) so clean-profile repair unstages the blob that carries
+        // the secret rather than the old name.
+        const deleted = entry.status === 'D' || entry.type === 'deleted';
+        const renamed = entry.status === 'R' && entry.sourcePath && entry.sourcePath !== entry.path;
+        if (!deleted && !renamed) continue;
+        const sourcePath = deleted ? entry.path : entry.sourcePath;
+        const context = {
+            objectId: null,
+            mode: null,
+            transition: options.transition ?? entry.commit,
+            ...(options.allowMissingPolicy && sourcePath === '.aimhooman.json'
+                ? { transientAllowRules: new Set(['generic.project-policy']) }
+                : {}),
+        };
+        const findings = engine.checkPaths([sourcePath], context).filter((finding) => {
+            if (finding.matchedRuleIds?.some((ruleId) => (
+                ruleId === 'generic.agent-instructions' || ruleId === 'generic.project-policy'
+            ))) return true;
+            return renamed && finding.category === 'secret';
+        });
+        accumulator.add(findings.map((finding) => decorate(
+            renamed && finding.category === 'secret' ? { ...finding, path: entry.path } : finding,
+            entry,
+            policy,
+        )));
     }
 }
 

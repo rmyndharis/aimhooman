@@ -370,6 +370,69 @@ test('clean precommit preserves both index sides of a renamed file with secret c
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('strict staged check flags a secret renamed to a neutral path', () => {
+    // Path-only secrets (e.g. .env) are detected by filename. A `git mv` to a
+    // neutral name must not smuggle them past the destination scan, which only
+    // catches content-shaped secrets. The finding is reported on the destination
+    // (where the bytes now live) with the rename source preserved.
+    const dir = makeRepo('strict');
+    try {
+        writeFileSync(join(dir, '.env'), 'DB_PASSWORD=hunter2\n');
+        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'track env'], { cwd: dir });
+        execFileSync('git', ['mv', '.env', 'config'], { cwd: dir });
+
+        const out = result('check', ['--staged', '--json'], dir);
+        assert.equal(out.status, 10, out.stderr);
+        const findings = JSON.parse(out.stdout).findings;
+        assert.ok(findings.some((finding) => (
+            finding.ruleId === 'secret.dotenv'
+            && finding.decision === 'block'
+            && finding.path === 'config'
+            && finding.status === 'R'
+            && finding.sourcePath === '.env'
+        )), `expected a reattributed rename-secret finding, got ${JSON.stringify(findings)}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('clean precommit removes a secret renamed to a neutral path', () => {
+    // The finding must point at the destination so clean repair unstages the blob
+    // carrying the secret. A source-path finding would unstage the old name and
+    // leave the secret staged under the new one.
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(join(dir, '.env'), 'DB_PASSWORD=hunter2\n');
+        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'track env'], { cwd: dir });
+        execFileSync('git', ['mv', '.env', 'config'], { cwd: dir });
+
+        const out = result('precommit', [], dir);
+        assert.equal(out.status, 0, out.stderr);
+        const staged = execFileSync('git', ['diff', '--cached', '--name-status'], {
+            cwd: dir,
+            encoding: 'utf8',
+        }).trim();
+        assert.equal(staged, '');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deleting a secret path is not itself a finding', () => {
+    // Removing a forbidden path is hygiene, not a violation: the delete branch of
+    // the rename/delete review scan must keep suppressing secret findings.
+    const dir = makeRepo('strict');
+    try {
+        writeFileSync(join(dir, '.env'), 'DB_PASSWORD=hunter2\n');
+        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'track env'], { cwd: dir });
+        execFileSync('git', ['rm', '-q', '.env'], { cwd: dir });
+
+        const out = result('check', ['--staged', '--json'], dir);
+        assert.equal(out.status, 0, out.stderr);
+        const findings = JSON.parse(out.stdout).findings;
+        assert.ok(!findings.some((finding) => finding.matchedRuleIds?.includes('secret.dotenv')));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('staged check safely skips oversized files instead of hitting child-process maxBuffer', () => {
     const dir = makeRepo('strict');
     try {
