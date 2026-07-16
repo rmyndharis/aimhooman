@@ -761,16 +761,36 @@ test('lifecycle queue serializes init/init, init/uninstall, and failed/successfu
             throw error;
         }
     };
-    const waitForCandidate = (lock, child) => {
+    const waitForCandidate = async (lock, child) => {
         // Wall-clock budget: child startup (Node boot + module load + ticket
         // publication) varies across Node versions and under CI load, so a fixed
         // poll count flakes on the slowest supported runner (Node 22.8.0).
+        //
+        // Stop as soon as the child exits: a candidate can only appear while it
+        // is alive, so waiting out the budget after it is gone reports a bare
+        // timeout that hides the real fault (a crash or an early error exit
+        // looks exactly like a slow start). Report the child's fate instead.
+        //
+        // The poll must yield to the event loop: child.exitCode and the stderr
+        // listeners are only updated while it runs, so a blocking wait would
+        // pin both at their initial values and make every failure look alike.
         const deadline = Date.now() + 30000;
-        while (Date.now() < deadline && !candidateForPid(lock, child.pid)) {
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
+        const started = Date.now();
+        let candidate = candidateForPid(lock, child.pid);
+        while (!candidate && Date.now() < deadline) {
+            if (child.exitCode !== null || child.signalCode !== null) {
+                // Re-check once: the child may have published and exited between
+                // the last poll and this liveness check.
+                candidate = candidateForPid(lock, child.pid);
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 2));
+            candidate = candidateForPid(lock, child.pid);
         }
-        const candidate = candidateForPid(lock, child.pid);
-        assert.ok(candidate, `timed out waiting for lifecycle candidate from PID ${child.pid}`);
+        assert.ok(candidate, `no lifecycle candidate from PID ${child.pid} after ${Date.now() - started}ms `
+            + `(exit=${child.exitCode} signal=${child.signalCode}); `
+            + 'a candidate appears only while the process is alive, so a non-null exit here means it '
+            + `failed before publishing its ticket. Child stderr: ${JSON.stringify(child.capturedStderr || '')}`);
         return candidate;
     };
     const holdLifecycle = (repo) => {
@@ -778,11 +798,18 @@ test('lifecycle queue serializes init/init, init/uninstall, and failed/successfu
         writeFileSync(lock, 'legacy holder\n');
         return lock;
     };
-    const launch = (repo, args) => spawn(process.execPath, [CLI, ...args], {
+    // Keep every child's output on the process object so a failed wait can name
+    // what the child said before it died, instead of only that it never showed up.
+    const recordOutput = (child) => {
+        child.capturedStderr = '';
+        child.stderr.on('data', (chunk) => { child.capturedStderr += chunk; });
+        return child;
+    };
+    const launch = (repo, args) => recordOutput(spawn(process.execPath, [CLI, ...args], {
         cwd: repo.root,
         env: repo.env,
         stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    }));
     const launchFixer = (repo, lock, exclude) => {
         const script = join(repo.home, 'fix-exclude.mjs');
         writeFileSync(script, `
@@ -791,11 +818,11 @@ import { withLock } from ${JSON.stringify(new URL('../src/atomic-write.mjs', imp
 const [lock, exclude] = process.argv.slice(2);
 withLock(lock, () => writeFileSync(exclude, 'user pattern\\n'), { retries: 1000 });
 `);
-        return spawn(process.execPath, [script, lock, exclude], {
+        return recordOutput(spawn(process.execPath, [script, lock, exclude], {
             cwd: repo.root,
             env: repo.env,
             stdio: ['ignore', 'pipe', 'pipe'],
-        });
+        }));
     };
     const outcome = (child) => new Promise((resolve) => {
         let stdout = '';
@@ -829,10 +856,10 @@ withLock(lock, () => writeFileSync(exclude, 'user pattern\\n'), { retries: 1000 
         try {
             first = launch(repo, ['init', '--profile', 'strict']);
             firstOutcome = outcome(first);
-            const firstCandidate = waitForCandidate(lock, first);
+            const firstCandidate = await waitForCandidate(lock, first);
             second = launch(repo, ['init', '--profile', 'strict']);
             secondOutcome = outcome(second);
-            const secondCandidate = waitForCandidate(lock, second);
+            const secondCandidate = await waitForCandidate(lock, second);
             assert.ok(firstCandidate.ticket < secondCandidate.ticket);
             assert.ok(candidateForPid(lock, first.pid), 'first init must still be queued');
             assert.ok(candidateForPid(lock, second.pid), 'second init must still be queued');
@@ -857,10 +884,10 @@ withLock(lock, () => writeFileSync(exclude, 'user pattern\\n'), { retries: 1000 
         try {
             initializing = launch(repo, ['init', '--profile', 'clean']);
             initOutcome = outcome(initializing);
-            const initCandidate = waitForCandidate(lock, initializing);
+            const initCandidate = await waitForCandidate(lock, initializing);
             uninstalling = launch(repo, ['uninstall']);
             uninstallOutcome = outcome(uninstalling);
-            const uninstallCandidate = waitForCandidate(lock, uninstalling);
+            const uninstallCandidate = await waitForCandidate(lock, uninstalling);
             assert.ok(initCandidate.ticket < uninstallCandidate.ticket);
             assert.ok(candidateForPid(lock, initializing.pid), 'init must still be queued');
             assert.ok(candidateForPid(lock, uninstalling.pid), 'uninstall must still be queued');
@@ -898,13 +925,13 @@ withLock(lock, () => writeFileSync(exclude, 'user pattern\\n'), { retries: 1000 
             writeFileSync(exclude, '# >>> aimhooman managed excludes (do not edit by hand)\nmissing end\n');
             first = launch(repo, ['init', '--profile', 'strict']);
             firstOutcome = outcome(first);
-            const firstCandidate = waitForCandidate(lock, first);
+            const firstCandidate = await waitForCandidate(lock, first);
             fixer = launchFixer(repo, lock, exclude);
             fixerOutcome = outcome(fixer);
-            const fixerCandidate = waitForCandidate(lock, fixer);
+            const fixerCandidate = await waitForCandidate(lock, fixer);
             second = launch(repo, ['init', '--profile', 'strict']);
             secondOutcome = outcome(second);
-            const secondCandidate = waitForCandidate(lock, second);
+            const secondCandidate = await waitForCandidate(lock, second);
             assert.ok(firstCandidate.ticket < fixerCandidate.ticket);
             assert.ok(fixerCandidate.ticket < secondCandidate.ticket);
             assert.ok(candidateForPid(lock, first.pid), 'failing init must still be queued');
