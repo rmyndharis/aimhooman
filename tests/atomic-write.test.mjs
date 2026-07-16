@@ -7,6 +7,7 @@ import {
     mkdtempSync,
     readFileSync,
     readdirSync,
+    renameSync,
     rmSync,
     writeFileSync,
 } from 'node:fs';
@@ -31,6 +32,117 @@ test('atomicWrite preserves the original and removes its temp after ENOSPC', () 
         );
         assert.equal(readFileSync(file, 'utf8'), 'original\n');
         assert.deepEqual(readdirSync(dir), ['state.json']);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The retry is Windows-only, so pin the platform for both branches: forcing
+// win32 keeps the retry contract under test on every runner, and forcing a
+// POSIX value keeps the no-retry contract honest on a real Windows runner,
+// where the host value would otherwise satisfy the wrong branch.
+function onPlatform(value, fn) {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value, configurable: true });
+    try {
+        return fn();
+    } finally {
+        Object.defineProperty(process, 'platform', original);
+    }
+}
+
+const onWin32 = (fn) => onPlatform('win32', fn);
+const onPosix = (fn) => onPlatform('linux', fn);
+
+test('atomicWrite retries a transient Windows rename and lands the complete file', () => {
+    // Windows fails a rename with EPERM while an antivirus or indexer holds a
+    // handle on the file just written. It clears in milliseconds, so the commit
+    // point retries rather than losing the write.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-atomic-eperm-'));
+    const file = join(dir, 'state.json');
+    writeFileSync(file, 'original\n');
+    try {
+        let attempts = 0;
+        onWin32(() => atomicWrite(file, 'replacement\n', {
+            operations: {
+                rename(from, to) {
+                    attempts += 1;
+                    if (attempts < 3) throw Object.assign(new Error('busy'), { code: 'EPERM' });
+                    renameSync(from, to);
+                },
+            },
+        }));
+        assert.equal(attempts, 3);
+        assert.equal(readFileSync(file, 'utf8'), 'replacement\n');
+        assert.deepEqual(readdirSync(dir), ['state.json']);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('atomicWrite gives up on a persistent rename failure and keeps the original', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aim-atomic-eperm-persistent-'));
+    const file = join(dir, 'state.json');
+    writeFileSync(file, 'original\n');
+    try {
+        let attempts = 0;
+        assert.throws(
+            () => onWin32(() => atomicWrite(file, 'replacement\n', {
+                renameRetries: 3,
+                operations: {
+                    rename() {
+                        attempts += 1;
+                        throw Object.assign(new Error('busy'), { code: 'EPERM' });
+                    },
+                },
+            })),
+            (error) => error.code === 'EPERM',
+        );
+        assert.equal(attempts, 3);
+        assert.equal(readFileSync(file, 'utf8'), 'original\n');
+        assert.deepEqual(readdirSync(dir), ['state.json']);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('atomicWrite never retries a non-transient rename or a POSIX failure', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aim-atomic-rename-once-'));
+    const file = join(dir, 'state.json');
+    writeFileSync(file, 'original\n');
+    try {
+        // A code that is not a transient lock (ENOSPC) must surface at once,
+        // even on Windows: retrying cannot make disk space appear.
+        let windowsAttempts = 0;
+        assert.throws(
+            () => onWin32(() => atomicWrite(file, 'replacement\n', {
+                operations: {
+                    rename() {
+                        windowsAttempts += 1;
+                        throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+                    },
+                },
+            })),
+            (error) => error.code === 'ENOSPC',
+        );
+        assert.equal(windowsAttempts, 1);
+
+        // EPERM off Windows is a real permission error, not a scanner holding a
+        // handle, so it must not be retried either.
+        let posixAttempts = 0;
+        assert.throws(
+            () => onPosix(() => atomicWrite(file, 'replacement\n', {
+                operations: {
+                    rename() {
+                        posixAttempts += 1;
+                        throw Object.assign(new Error('denied'), { code: 'EPERM' });
+                    },
+                },
+            })),
+            (error) => error.code === 'EPERM',
+        );
+        assert.equal(posixAttempts, 1);
+        assert.equal(readFileSync(file, 'utf8'), 'original\n');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
