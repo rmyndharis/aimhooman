@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.env.minimal`) no longer reports success while leaving the block in place.
   It now fails closed and directs to `--scope secret-path`, the only scope that
   can silence a secret, so a local override cannot hide a possible leaked key.
+- Git hooks no longer trap the repository when the aimhooman CLI or Node is
+  missing (for example after the package was removed without `aimhooman
+  uninstall`). The dispatcher used to exit 127 and abort every commit; it now
+  warns once and allows the operation without protection, so a half-removed
+  install degrades gracefully instead of breaking Git.
 
 ### Changed
 
