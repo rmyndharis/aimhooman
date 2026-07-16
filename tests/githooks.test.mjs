@@ -1079,7 +1079,7 @@ test('final staged review mapping rejects changed blobs, mode flips, and interme
     ));
 });
 
-test('generated hook stops when its embedded CLI cannot run', () => {
+test('generated hook allows the operation when its embedded CLI cannot run', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-missing-cli-'));
     try {
         isolatedGitConfig(base, () => {
@@ -1092,8 +1092,9 @@ test('generated hook stops when its embedded CLI cannot run', () => {
                 encoding: 'utf8',
                 env: { ...process.env, PATH: '' },
             });
-            assert.equal(out.status, 127);
+            assert.equal(out.status, 0, out.stderr);
             assert.match(out.stderr, /guard unavailable/);
+            assert.match(out.stderr, /allowing this operation without protection/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

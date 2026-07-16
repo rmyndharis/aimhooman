@@ -581,8 +581,8 @@ AIMHOOMAN_NODE=${shq(nodePath)}
 AIMHOOMAN_PATH=${shq(shellPathValue)}
 ${captureTree}${captureTransaction}run_aimhooman() {
   if [ ! -f "$AIMHOOMAN_CLI" ] || [ ! -f "$AIMHOOMAN_NODE" ]; then
-    echo "aimhooman: guard unavailable; install it or run 'aimhooman init' again" >&2
-    return 127
+    echo "aimhooman: guard unavailable (aimhooman CLI or Node is missing); allowing this operation without protection. Reinstall aimhooman or remove the managed hooks." >&2
+    return 0
   fi
   (
     unset NODE_OPTIONS NODE_PATH NODE_REPL_EXTERNAL_MODULE NODE_EXTRA_CA_CERTS
