@@ -101,7 +101,12 @@ function hookPreToolUse(input) {
     const executorCommand = command(input, executor);
     if (executorCommand === null) return unknownExecutorShape(input, executor.name);
     const rawParsed = parseGit(executorCommand);
-    if (nonPosixExecutor(executor.name)) rawParsed.uncertainShell = true;
+    if (nonPosixExecutor(executor.name)) {
+        rawParsed.uncertainShell = true;
+        // The benign-pipeline classifier is POSIX-only; never exempt a non-POSIX
+        // shell line (pwsh/fish/cmd/nu) from opaque-commit-hiding treatment.
+        rawParsed.opaqueCommitHiding = true;
+    }
     if (executorTargetSyntaxUncertain(executor.name, executorCommand, rawParsed)
         && (rawParsed.addPaths.length > 0 || rawParsed.commands.some(isProtectedMutation))) {
         return emitDecision(
@@ -364,7 +369,7 @@ function hookPreToolUse(input) {
     const prefixBypass = parsed.commands.some((candidate) => (
         (candidate.verb === 'commit' || candidate.verb === 'unknown')
         && candidate.prefixRisk
-    )) || (parsed.uncertainShell && parsed.commands.length === 0 && parsed.prefixRisk);
+    )) || (parsed.opaqueCommitHiding && parsed.commands.length === 0 && parsed.prefixRisk);
     const aliasBypass = parsed.commands.some((candidate) => (
         (candidate.verb === 'commit' || candidate.verb === 'unknown')
         && candidate.inlineAliasRisk
@@ -379,7 +384,13 @@ function hookPreToolUse(input) {
     const unmodelledPrefixReason =
         'aimhooman cannot verify the final staged snapshot or Git hooks after an earlier unmodelled command; run that command separately, then retry the commit.';
     const blocks = [];
-    const potentialCommit = commit || parsed.uncertainShell;
+    // potentialCommit treats a command as leading to a commit. uncertainShell
+    // was too broad: it flagged any pipe, so a benign read-only pipeline
+    // (gh ... | tail) was scanned and denied as if it staged a secret.
+    // opaqueCommitHiding keeps every commit-hiding shape (subshells,
+    // substitution, script-feeds, code-executing/unlisted pipe segments) while
+    // excluding pipelines of known read-only commands.
+    const potentialCommit = commit || parsed.opaqueCommitHiding;
     if (potentialCommit && repo) {
         try {
             const entries = stagedEntries(repo);
@@ -1055,11 +1066,17 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 : commands.some((candidate) => candidate.verb === 'commit' && candidate.futureIndex)
                     ? 'future-index'
                     : 'direct';
+    // opaqueCommitHiding narrows uncertainShell to uncertainty that can hide or
+    // feed a commit (subshells, substitution, script-feeds, code-executing or
+    // unlisted pipe segments). A bare pipeline of known read-only commands
+    // (gh ... | tail) cannot, so it is not treated as a potential commit.
+    const opaqueCommitHiding = uncertainShell && !benignReadOnlyPipeline(cmd);
     return {
         commit,
         noVerify,
         bypassHooks,
         uncertainShell,
+        opaqueCommitHiding,
         classification,
         environmentRisk: unique(commands.flatMap((candidate) => candidate.environmentRisk || [])),
         prefixRisk,
@@ -1735,6 +1752,103 @@ function shellUnits(s) {
     }
     push(null);
     return out;
+}
+
+// SAFE_PIPE_EXECUTABLES are commands permitted in a "benign read-only pipeline":
+// they take only data arguments, never run a sub-command, never execute code,
+// never write files, and cannot bypass Git hooks. Anything not listed is treated
+// as potentially able to hide or feed a commit (fail-closed). Deliberately
+// excluded: shells and interpreters, awk/sed/ed/vim, sqlite3/psql/dc/bc/octave
+// and other stdin-as-program readers, git, tee (writes files), env/xargs/find
+// (run sub-commands), and curl/wget (fetch arbitrary content to a pipe).
+const SAFE_PIPE_EXECUTABLES = new Set([
+    'cat', 'tac', 'head', 'tail', 'tr', 'cut', 'paste', 'fold', 'fmt', 'expand',
+    'unexpand', 'rev', 'nl', 'pr', 'column', 'sort', 'uniq', 'comm', 'tsort',
+    'shuf', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'xxd', 'od',
+    'hexdump', 'base64', 'base32', 'md5sum', 'sha1sum', 'sha224sum', 'sha256sum',
+    'sha384sum', 'sha512sum', 'cksum', 'b2sum', 'sum', 'file', 'ls', 'exa', 'eza',
+    'lsd', 'tree', 'du', 'df', 'stat', 'date', 'whoami', 'id', 'uname',
+    'hostname', 'uptime', 'printenv', 'pwd', 'basename', 'dirname', 'realpath',
+    'seq', 'yes', 'echo', 'printf', 'test', 'true', 'false', 'jq', 'yq', 'bat',
+    'gh', '[',
+]);
+
+// containsOpaquePipeLexeme is a quote-aware scan for shell constructs that can
+// hide or feed a commit or subcommand: command substitution, subshells, brace
+// expansion/groups, script-feed redirects, and command separators. Output
+// redirects (>, >>) and fd-dups such as 2>&1 are intentionally NOT opaque: they
+// cannot feed code into a pipe sink. A bare & (background) is opaque unless it
+// is part of an fd-dup (>& / <&) or &&.
+function containsOpaquePipeLexeme(command) {
+    let quote = '';
+    let escaped = false;
+    for (let i = 0; i < command.length; i += 1) {
+        const char = command[i];
+        const prev = command[i - 1];
+        const next = command[i + 1];
+        if (escaped) { escaped = false; continue; }
+        if (char === '\\' && quote !== "'") { escaped = true; continue; }
+        if (quote) {
+            if (quote === '"' && (char === '`' || (char === '$' && next === '('))) return true;
+            if (char === quote) quote = '';
+            continue;
+        }
+        if (char === "'" || char === '"') { quote = char; continue; }
+        if (char === '`' || char === '(' || char === ')' || char === '{' || char === '}') return true;
+        if (char === '$' && (next === '(' || next === '{')) return true;
+        if (char === '<' || char === ';') return true;
+        if (char === '&' && next !== '&' && prev !== '&' && prev !== '>' && prev !== '<') return true;
+    }
+    return false;
+}
+
+// splitPipeSegments splits a command on an unquoted pipe (|) that is not part
+// of ||. Unlike shellUnits it does not break on &, so 2>&1 stays within a
+// segment.
+function splitPipeSegments(command) {
+    const segments = [];
+    let segment = '';
+    let quote = '';
+    let escaped = false;
+    for (let i = 0; i < command.length; i += 1) {
+        const char = command[i];
+        if (escaped) { segment += char; escaped = false; continue; }
+        if (char === '\\' && quote !== "'") { segment += char; escaped = true; continue; }
+        if (quote) { segment += char; if (char === quote) quote = ''; continue; }
+        if (char === "'" || char === '"') { segment += char; quote = char; continue; }
+        if (char === '|' && command[i + 1] !== '|') { segments.push(segment); segment = ''; continue; }
+        segment += char;
+    }
+    segments.push(segment);
+    return segments;
+}
+
+// pipelineSegmentExecutable returns the shellExecutable basename of the first
+// non-environment-assignment token in a pipe segment, or null when the segment
+// has no command. A leading redirect token (e.g. 2>&1 before the command) is
+// treated as unlisted -> null -> not benign (fail-closed), which is safe.
+function pipelineSegmentExecutable(segment) {
+    for (const word of shellWords(segment.trim())) {
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+        return shellExecutable(word);
+    }
+    return null;
+}
+
+// benignReadOnlyPipeline reports whether a command is a bare pipeline whose
+// every segment is a known non-code-executing, non-mutating command with no
+// opaque shell syntax. Such a pipe cannot hide or feed a commit, so it is not a
+// "potential commit" for the unmodelled-prefix guard. Fail-closed: any opaque
+// lexeme, unlisted executable, missing executable, or non-pipe returns false.
+function benignReadOnlyPipeline(command) {
+    if (!command.includes('|')) return false;
+    if (containsOpaquePipeLexeme(command)) return false;
+    const segments = splitPipeSegments(command);
+    if (segments.length < 2) return false;
+    return segments.every((segment) => {
+        const executable = pipelineSegmentExecutable(segment);
+        return executable !== null && SAFE_PIPE_EXECUTABLES.has(executable);
+    });
 }
 
 function pipedShellCommitInvocations(source, initialCwd) {

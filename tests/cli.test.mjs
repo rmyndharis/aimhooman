@@ -595,6 +595,27 @@ test('hook command exits 20 on an unsupported event', () => {
     }
 });
 
+test('clean allows a benign non-git pipeline and denies a pipe to a shell', () => {
+    const dir = makeRepo('clean');
+    try {
+        const benign = result('hook', ['pre-tool-use'], dir, JSON.stringify({
+            cwd: dir,
+            tool_name: 'Bash',
+            tool_input: { command: 'gh issue view 747 --comments 2>&1 | tail -60' },
+        }));
+        assert.equal(benign.status, 0, benign.stderr);
+        assert.doesNotMatch(benign.stdout, /"deny"/);
+
+        const danger = result('hook', ['pre-tool-use'], dir, JSON.stringify({
+            cwd: dir,
+            tool_name: 'Bash',
+            tool_input: { command: 'cat script.sh | bash' },
+        }));
+        const decision = JSON.parse(danger.stdout).hookSpecificOutput?.permissionDecision;
+        assert.equal(decision, 'deny', danger.stdout);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('strict agent guard recognizes bundled -n and core.hooksPath overrides', () => {
     const dir = makeRepo('strict');
     try {
