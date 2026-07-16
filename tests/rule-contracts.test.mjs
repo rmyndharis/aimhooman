@@ -260,6 +260,68 @@ test('message attribution repair is exact and compliance preserves disclosures',
     }
 });
 
+test('attribution rules block the footer Claude Code emits today', () => {
+    const clean = newEngine('clean');
+    const message = [
+        'feat: add thing',
+        '',
+        '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+        '',
+        'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>',
+        '',
+    ].join('\n');
+
+    const fixed = clean.fixMessage(message);
+    assert.equal(fixed.removed.length, 2, 'both footer lines must be repaired');
+    assert.equal(fixed.cleaned.includes('Generated with'), false);
+    assert.equal(fixed.cleaned.includes('noreply@anthropic.com'), false);
+    assert.ok(fixed.cleaned.startsWith('feat: add thing'), 'the subject must survive');
+});
+
+test('attribution patterns never pin a vendor URL', () => {
+    // Vendor links are marketing surface and get rebranded (claude.ai/code ->
+    // claude.com/claude-code); a pinned one rots silently while CI stays green.
+    // Match the link's shape and anchor on the noreply mail domain, which is
+    // infrastructure and does not move.
+    for (const rule of loadRules().filter((rule) => rule.category === 'ai-attribution')) {
+        for (const pattern of rule.match.content ?? []) {
+            assert.equal(
+                /https?:/i.test(pattern),
+                false,
+                `${rule.id} pins a vendor URL: ${pattern}`
+            );
+        }
+    }
+});
+
+test('attribution patterns stay cheap on adversarial input', () => {
+    // A trailer whose "<" never arrives. Built-in patterns are exempt from the
+    // local input cap (src/rules.mjs), so an unbounded commit message line
+    // reaches them directly; an ambiguous quantifier pair here cost 49s at this
+    // length. The budget is loose on purpose: it catches catastrophic
+    // backtracking, not slow machines.
+    const engine = newEngine('clean');
+    const line = `x-by:${' '.repeat(6400)}`;
+    const start = process.hrtime.bigint();
+    engine.checkMessage(line);
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    assert.ok(ms < 1000, `attribution scan took ${ms.toFixed(0)}ms on adversarial input`);
+});
+
+test('generalized attribution patterns do not swallow ordinary trailers or prose', () => {
+    const clean = newEngine('clean');
+    const nearMisses = [
+        'Generated with [our release script](https://ci.example.com/docs)',
+        'Co-authored-by: Claude Dupont <claude.dupont@example.com>',
+        'Co-authored-by: Codexter Ltd <team@example.com>',
+        'Reviewed-by: Robin Ott <robin@example.com>',
+        'See https://claude.com/claude-code for the changelog.',
+    ];
+    for (const line of nearMisses) {
+        assert.equal(clean.checkMessage(line).length, 0, line);
+    }
+});
+
 test('public certificates are allowed while private credential content is blocked', () => {
     const engine = newEngine('clean');
     const certificate = [

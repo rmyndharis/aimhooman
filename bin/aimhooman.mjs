@@ -487,7 +487,7 @@ function cmdRefcheck(args) {
             return 30;
         }
         if (/^0+$/.test(newObjectId)) continue;
-        updates.push({ oldObjectId, newObjectId });
+        updates.push({ oldObjectId, newObjectId, ref });
     }
 
     let commits;
@@ -759,7 +759,13 @@ function cmdInit(args) {
         rep = installHooks(repo, CLI_PATH);
         const activeHooks = installedHooks(repo);
         if (!REQUIRED_GIT_HOOKS.every((name) => activeHooks.includes(name))) {
-            throw new Error('hook installation incomplete; repository guard is not active');
+            // installHooks declines rather than throws when the hooks directory is
+            // not ours, and its warnings are the only record of why. They are
+            // printed on the success path only, so carry them into the failure or
+            // the user is told nothing but "incomplete". The prefix is load-bearing:
+            // the exit-code branch below matches on it.
+            const cause = rep.shared && rep.warnings.length ? `${rep.warnings.join('; ')}; ` : '';
+            throw new Error(`hook installation incomplete; ${cause}repository guard is not active`);
         }
         saveConfig(repo.stateDir, { profile });
         applyExclude(repo.excludeFile, patternsForRules(eng.rules));

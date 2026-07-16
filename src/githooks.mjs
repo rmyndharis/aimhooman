@@ -38,13 +38,19 @@ function hooksDir(repo) {
 
     const scope = configScope(repo, 'core.hooksPath');
     const localScope = ['local', 'worktree'].includes(scope);
-    const repositoryOwned = localScope && repositoryOwnsPath(repo, dir);
+    const inside = localScope && repositoryOwnsPath(repo, dir);
+    // Inside the worktree is not the same as ours. A hooks directory Git tracks
+    // (husky, the vanilla .githooks pattern) is repository content: a dispatcher
+    // written there stages this machine's absolute CLI, Node, and PATH for
+    // everyone who clones.
+    const tracked = inside && trackedPath(repo, dir);
+    const repositoryOwned = inside && !tracked;
     const shared = !repositoryOwned || resolve(dir) === resolve(globalHooksDir());
     if (shared) {
         const where = scope ? `${scope} scope` : 'a non-local scope';
-        const reason = localScope && !repositoryOwned
-            ? `${where}, outside this repository`
-            : where;
+        let reason = where;
+        if (tracked) reason = `${where}, tracked by this repository`;
+        else if (localScope && !inside) reason = `${where}, outside this repository`;
         return {
             dir,
             shared: true,
@@ -70,6 +76,21 @@ function repositoryOwnsPath(repo, path) {
             return rel === '' || (!rel.startsWith(`..${sep}`)
                 && rel !== '..' && !isAbsolute(rel));
         });
+}
+
+// trackedPath reports whether Git tracks anything under path. A Git that cannot
+// answer counts as tracked: refusing to install costs a warning, while guessing
+// wrong commits this machine's absolute paths into a shared repository.
+function trackedPath(repo, path) {
+    try {
+        return execFileSync(
+            'git',
+            ['--literal-pathspecs', 'ls-files', '-z', '--', String(path)],
+            { cwd: repo.root, encoding: 'utf8' }
+        ).length > 0;
+    } catch {
+        return true;
+    }
 }
 
 function canonicalPath(path) {
@@ -580,9 +601,13 @@ AIMHOOMAN_CLI=${shq(resolvedCliPath)}
 AIMHOOMAN_NODE=${shq(nodePath)}
 AIMHOOMAN_PATH=${shq(shellPathValue)}
 ${captureTree}${captureTransaction}run_aimhooman() {
-  if [ ! -f "$AIMHOOMAN_CLI" ] || [ ! -f "$AIMHOOMAN_NODE" ]; then
-    echo "aimhooman: guard unavailable (aimhooman CLI or Node is missing); allowing this operation without protection. Reinstall aimhooman or remove the managed hooks." >&2
+  if [ ! -f "$AIMHOOMAN_CLI" ]; then
+    echo "aimhooman: guard unavailable (aimhooman CLI is missing); allowing this operation without protection. Reinstall aimhooman or remove the managed hooks." >&2
     return 0
+  fi
+  if [ ! -f "$AIMHOOMAN_NODE" ]; then
+    echo "aimhooman: the pinned Node interpreter is missing (\$AIMHOOMAN_NODE); the operation was stopped. Run 'aimhooman init' to re-pin it, or 'aimhooman uninstall' to remove the guard." >&2
+    return 20
   fi
   (
     unset NODE_OPTIONS NODE_PATH NODE_REPL_EXTERNAL_MODULE NODE_EXTRA_CA_CERTS

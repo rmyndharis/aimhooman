@@ -229,6 +229,25 @@ test('commitmsg: strict blocks and exits 10', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('init: a tracked hooks directory is refused with the reason, not a bare failure', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aim-cli-tracked-hooks-'));
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+        mkdirSync(join(dir, '.husky'), { recursive: true });
+        writeFileSync(join(dir, '.husky/pre-commit'), '#!/bin/sh\necho team\n');
+        execFileSync('git', ['add', '-A'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'hooks'], { cwd: dir });
+        execFileSync('git', ['config', '--local', 'core.hooksPath', '.husky'], { cwd: dir });
+
+        const out = result('init', [], dir);
+        assert.notEqual(out.status, 0, 'init must not claim success without an active guard');
+        assert.match(out.stderr, /tracked by this repository/, out.stderr);
+        assert.match(out.stderr, /core\.hooksPath/, out.stderr);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('commitmsg: allow override preserves matching attribution', () => {
     const dir = makeRepo('clean');
     try {
