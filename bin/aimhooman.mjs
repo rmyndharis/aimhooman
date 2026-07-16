@@ -20,7 +20,6 @@ import {
 import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, saveConfig, saveOverrides } from '../src/state.mjs';
 import { applyExclude, inspectExclude, patternsForRules, removeExclude } from '../src/exclude.mjs';
 import { hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
-import { runHook } from '../src/hook.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
@@ -1578,7 +1577,14 @@ if (argv[0] === 'hook') {
         console.error('aimhooman: hook requires exactly one supported event');
         process.exit(20);
     }
-    runHook(hookArgs)
+    // hook.mjs (the PreToolUse shell parser) is by far the largest module and is
+    // only needed for the `hook` subcommand. Loading it lazily cuts the heaviest
+    // parse cost from every other command's startup, so the lifecycle-lock
+    // candidate is published earlier. This widens the margin under the queue-wait
+    // budget rather than guaranteeing it: openRepo's git spawns still set the
+    // floor on slow runners.
+    import('../src/hook.mjs')
+        .then(({ runHook }) => runHook(hookArgs))
         .then((code) => {
             // Drain the permission decision before exiting: on a piped stdout,
             // process.exit() can cut off the emit() write and drop a deny. The

@@ -581,6 +581,20 @@ test('strict agent guard denies --no-verify before a combined add and commit', (
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('hook command exits 20 on an unsupported event', () => {
+    // The hook subcommand validates its event before loading the parser module
+    // or touching a repository, so an unsupported event fails fast with a usage
+    // error rather than proceeding to the agent guard.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-hook-'));
+    try {
+        const out = result('hook', ['bogus-event'], dir);
+        assert.equal(out.status, 20, out.stderr);
+        assert.match(out.stderr, /hook requires exactly one supported event/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('strict agent guard recognizes bundled -n and core.hooksPath overrides', () => {
     const dir = makeRepo('strict');
     try {
