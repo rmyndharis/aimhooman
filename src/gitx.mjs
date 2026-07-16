@@ -612,18 +612,6 @@ export function trackedEntries(repo) {
     return enrichEntries(repo, entries);
 }
 
-// hasStagedChanges checks the complete index delta, including deletions that
-// are intentionally excluded from content scanning.
-export function hasStagedChanges(repo) {
-    try {
-        gitBuf(['diff', '--cached', '--quiet', '--'], repo.root);
-        return false;
-    } catch (error) {
-        if (error?.status === 1) return true;
-        throw error;
-    }
-}
-
 // withIndexFromTree exposes an immutable tree through Git's staged-index APIs.
 // It is used by commit-msg after the dispatcher snapshots the would-be commit
 // tree, so a chained hook cannot switch the policy by mutating the live index.

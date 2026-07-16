@@ -72,6 +72,29 @@ test('precommit: clean unstages AI artifact and exits 0', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('precommit: clean omits the empty-commit hint when other files remain staged', () => {
+    const dir = makeRepo('clean');
+    try {
+        mkdirSync(join(dir, '.playwright-mcp'));
+        writeFileSync(join(dir, '.playwright-mcp/trace.json'), '{}');
+        execFileSync('git', ['add', '-f', '.playwright-mcp/trace.json'], { cwd: dir });
+        writeFileSync(join(dir, 'feature.txt'), 'safe\n');
+        execFileSync('git', ['add', 'feature.txt'], { cwd: dir });
+
+        const out = result('precommit', [], dir);
+        assert.equal(out.status, 0, out.stderr);
+        // The artifact is unstaged, the real feature work stays staged, and the
+        // empty-commit hint is absent because feature.txt remains in the commit.
+        const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {
+            cwd: dir,
+            encoding: 'utf8',
+        }).trim();
+        assert.equal(staged, 'feature.txt');
+        assert.doesNotMatch(out.stderr, /commit will be empty/);
+        assert.doesNotMatch(out.stderr, /nothing else staged/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('precommit: a zero-similarity blocked rename restores the possible source deletion', () => {
     const dir = makeRepo('clean');
     try {

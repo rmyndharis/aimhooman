@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret-category findings and reports them on the destination path where the bytes
   live, so clean-profile repair unstages the blob that carries the secret. Deleting
   a secret path remains a non-finding.
+- Derive the post-repair empty-commit hint from the staged paths captured
+  before repair instead of a second git read after `git restore --staged`. That
+  read followed an index write and could transiently report the wrong state
+  under heavy CI load, which flaked the repair test on the slowest Node 22.8.0
+  runners; the derivation is deterministic.
 
 ### Changed
 

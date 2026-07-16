@@ -8,11 +8,11 @@ import { exitCode, human, jsonReport, visible } from '../src/report.mjs';
 import {
     GitRevisionError,
     gitConfig,
-    hasStagedChanges,
     introducedCommits,
     openRepo,
     readCommitPath,
     readStagedPath,
+    stagedPaths,
     stagedRenameSources,
     unstagePaths,
     withIndexFromTree,
@@ -284,9 +284,24 @@ function cmdPrecommit(args) {
             }
         }
         for (const source of stagedRenameSources(repo, paths)) unstageTargets.add(source);
+        // The empty-commit hint is derived from the staged paths captured before
+        // repair, not from a second git read after `git restore --staged`. That
+        // post-repair read followed an index write and could transiently report
+        // the wrong state under heavy CI load, flaking the repair tests.
+        // unstagePaths is atomic (it throws on failure), so when every staged
+        // path is a repair target the index matches HEAD afterward. The capture
+        // is best-effort and runs before the repair: if this read fails the
+        // unstage still runs and the hint is omitted (empty stays false) rather
+        // than skipping the repair or blocking the commit.
+        let stagedBefore;
+        try {
+            stagedBefore = stagedPaths(repo);
+        } catch {
+            stagedBefore = null;
+        }
         unstagePaths(repo, [...unstageTargets]);
-        let empty = false;
-        try { empty = !hasStagedChanges(repo); } catch { /* could not re-read */ }
+        const empty = stagedBefore !== null
+            && stagedBefore.every((path) => unstageTargets.has(path));
         process.stderr.write(
             `aimhooman: unstaged ${paths.length} AI artifact(s) from this commit: ${paths.map(visible).join(', ')}${empty ? ' (nothing else staged — the commit will be empty)' : ''}\n`
         );
