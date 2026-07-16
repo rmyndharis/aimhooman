@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read followed an index write and could transiently report the wrong state
   under heavy CI load, which flaked the repair test on the slowest Node 22.8.0
   runners; the derivation is deterministic.
+- A bare `allow <path>` for a path that matches a secret rule (for example
+  `.env.minimal`) no longer reports success while leaving the block in place.
+  It now fails closed and directs to `--scope secret-path`, the only scope that
+  can silence a secret, so a local override cannot hide a possible leaked key.
 
 ### Changed
 

@@ -707,7 +707,13 @@ test('CLI override scopes block new paths and require an explicit secret-path al
         execFileSync('git', ['reset', '-q'], { cwd: dir });
         writeFileSync(join(dir, '.env'), 'SECRET=value\n');
         execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
-        assert.equal(result('allow', ['.env'], dir).status, 0);
+        // A bare allow of a secret-matching path used to report success yet
+        // leave the block in place; it now fails closed and directs to the
+        // explicit secret-path scope (a local override must not hide a key).
+        const bareAllow = result('allow', ['.env'], dir);
+        assert.equal(bareAllow.status, 20, bareAllow.stderr);
+        assert.match(bareAllow.stderr, /matches a secret rule/);
+        assert.match(bareAllow.stderr, /--scope secret-path/);
         checked = result('check', ['--staged', '--json'], dir);
         assert.equal(checked.status, 10, checked.stderr);
         assert.equal(JSON.parse(checked.stdout).findings[0]?.ruleId, 'secret.dotenv');
