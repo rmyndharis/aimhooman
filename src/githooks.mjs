@@ -445,15 +445,20 @@ function uninstallHooksLocked(repo, dir, warnings) {
     return { removed: removed.sort(), restored: restored.sort(), warnings, failures };
 }
 
-// remainingDispatchers lists aimhooman dispatchers still on disk. uninstall
-// checks the directory rather than trusting its own report: a refusal that only
-// produced a warning would otherwise be printed under a success headline, and
-// "uninstalled" while four dispatchers still block every commit is the one lie
-// a guard must never tell. The global directory is excluded because it has its
-// own command; a local uninstall was never responsible for it.
+// remainingDispatchers lists aimhooman dispatchers a local uninstall was meant
+// to remove and did not. uninstall checks the directory rather than trusting its
+// own report: a refusal that only produced a warning would otherwise be printed
+// under a success headline, and "uninstalled" while four dispatchers still block
+// every commit is the one lie a guard must never tell.
+//
+// A shared hooks directory is skipped because uninstallHooks does not touch one
+// either — the global directory has `uninstall --global`, and a foreign or
+// tracked one is reported by its own warning. This asks hooksDir rather than
+// comparing paths: two spellings of one directory differ on Windows, and
+// deciding ownership by string is the bug this change exists to remove.
 export function remainingDispatchers(repo) {
-    const { dir } = hooksDir(repo);
-    if (canonicalPath(dir) === canonicalPath(globalHooksDir())) return [];
+    const { dir, shared } = hooksDir(repo);
+    if (shared) return [];
     return Object.keys(MANAGED).sort().flatMap((name) => {
         const path = join(dir, name);
         try {
