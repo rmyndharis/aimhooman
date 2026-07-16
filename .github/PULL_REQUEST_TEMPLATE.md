@@ -12,6 +12,8 @@
 
 ## Checklist
 
+- [ ] PR title is `type(scope): summary` (`feat`, `fix`, `docs`, `test`, `refactor`,
+      `perf`, `ci`, `chore`) — it lands on `main` as the commit message
 - [ ] `npm run verify` passes
 - [ ] Tests added for any new behavior
 - [ ] `CHANGELOG.md` updated (if user-visible)

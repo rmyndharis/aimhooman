@@ -88,7 +88,39 @@ Personal, per-clone detection belongs in `<git-common-dir>/aimhooman/rules/*.jso
 (local, never committed). Linked worktrees share it. Contribute general-purpose
 rules to `rules/` instead.
 
-## Commit policy (important)
+## Commits
+
+Subject lines follow [Conventional Commits](https://www.conventionalcommits.org/):
+`type(scope): summary`.
+
+| Type | Use for |
+| --- | --- |
+| `feat` | a new rule, host adapter, or CLI capability |
+| `fix` | a bug fix |
+| `docs` | documentation only |
+| `test` | tests and fixtures only |
+| `refactor` | restructuring that leaves behavior identical |
+| `perf` | a speedup you can measure |
+| `ci` | workflows and release automation |
+| `chore` | dependency bumps, version stamping, housekeeping |
+
+Scopes track the project layout: `rules`, `hook`, `githooks`, `cli`, `state`,
+`adapter`, `deps`, `release`. Drop the scope when a change spans several.
+
+The `type(scope):` prefix is the only part that is a format. Everything after the
+colon stays a plain imperative sentence that names what actually changed:
+
+```
+fix(state): retry the rename when Windows reports a transient lock
+fix(hook): allow Git operations when the aimhooman CLI or Node is missing
+ci: run the test matrix once per change instead of twice
+chore(release): 0.1.1
+```
+
+PRs land as squash merges, so the PR title is the commit message that lands on
+`main`. Title the PR the same way.
+
+### Policy (important)
 
 This project keeps AI tooling residue out of history — **including its own**.
 Commits must read as if a human wrote them:
@@ -100,10 +132,11 @@ Commits must read as if a human wrote them:
 
 ## Pull requests
 
-1. Open a PR against `main`.
+1. Open a PR against `main`. Title it `type(scope): summary` — it becomes the
+   commit message on `main`.
 2. Include tests for any new behavior and run `npm run verify`.
 3. Update `CHANGELOG.md` and `docs/` where relevant.
-4. Make sure the PR follows the commit policy above.
+4. Make sure the PR follows the commit conventions above.
 
 By participating, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
