@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The legacy per-clone state migration is gone, and with it the failure paths it
+  created. `openRepo` used to look for state under `.git/worktrees/<name>/aimhooman`
+  and migrate it into `<commonDir>/aimhooman`, fingerprinting both and refusing to
+  continue when two copies disagreed. No released version ever wrote to that
+  location — v0.1.0 already resolved state to `<commonDir>/aimhooman` on the line
+  above the migration — so the predecessor it protected never existed. What it did
+  produce was real: any error other than ENOENT while listing `.git/worktrees` was
+  re-raised through every command, including `uninstall`, so a directory Git itself
+  reads without trouble could freeze a repository with no supported way out.
+  `.git/worktrees` belongs to Git and can be owned by another uid after a
+  `sudo git worktree add`. Repository state resolves to `<commonDir>/aimhooman`, as
+  it always has.
+
 ### Fixed
 
 - Renaming or moving a repository no longer freezes it. The dispatcher bakes

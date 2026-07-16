@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1247,5 +1247,30 @@ test('uninstall lets a renamed repository go', () => {
     } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(moved, { recursive: true, force: true });
+    }
+});
+
+test('an unreadable .git/worktrees does not disable the CLI or trap the repository', () => {
+    // .git/worktrees belongs to Git, not to aimhooman: it exists for every user
+    // of `git worktree`, and under a restrictive umask or after `sudo git` it can
+    // be owned by another uid that cannot simply chmod its way out. Git itself is
+    // unaffected by it, so aimhooman must be too — above all `uninstall`, which
+    // is the way out of everything else.
+    const dir = makeRepo('clean');
+    const worktrees = join(dir, '.git', 'worktrees');
+    try {
+        mkdirSync(worktrees, { recursive: true });
+        chmodSync(worktrees, 0o000);
+
+        writeFileSync(join(dir, 'work.txt'), 'ordinary\n');
+        execFileSync('git', ['add', 'work.txt'], { cwd: dir });
+        const commit = spawnSync('git', ['commit', '-m', 'ordinary work'], { cwd: dir, encoding: 'utf8' });
+        assert.equal(commit.status, 0, commit.stderr);
+
+        const out = result('uninstall', [], dir);
+        assert.equal(out.status, 0, out.stdout + out.stderr);
+    } finally {
+        try { chmodSync(worktrees, 0o700); } catch { /* best effort */ }
+        rmSync(dir, { recursive: true, force: true });
     }
 });
