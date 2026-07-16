@@ -51,6 +51,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a distribution that ships `/home` as a link, or an NFS or autofs home, the
   two spellings differed and every global hook was diagnosed as managed for
   another repository.
+- A failed excludes refresh no longer disables the `PreToolUse` guard. Writing
+  `.git/info/exclude` sat inside the same `try` as the engine load, and the shared
+  `catch` allowed the command on every non-strict profile, so an unwritable
+  `.git/info` — a CI checkout, a read-only volume, a repository owned by another
+  user — turned a staged AWS key plus `git commit --no-verify` from `deny` into
+  `allow`. Nothing about the policy was wrong: the rules had loaded, and the
+  reported cause ("could not load policy rules") named the wrong thing. Refreshing
+  the excludes is gitignore hygiene, which `pre-commit` never does and still
+  answers correctly, so it now runs outside the verdict and reports as a warning.
+
+### Fixed
 
 - A local rule pack that cannot load no longer produces a report claiming a
   complete scan. `strict` already failed closed, but `clean` and `compliance`
