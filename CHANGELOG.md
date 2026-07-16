@@ -49,13 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a half-removed install but wrong for a relocated interpreter: `brew upgrade
   node`, `nvm`, `fnm`, and `volta` all move the `process.execPath` that `init`
   pins, and every hook then warned once and allowed the commit unprotected. The
-  two conditions now separate by intent. A missing CLI still allows the operation,
-  because the package is gone and the user wants no guard. A missing pinned
-  interpreter stops the operation and names the path and the remedy, because
-  aimhooman is still installed and the guard is still wanted. This also matches
-  what the CLI already believed: `installedHooks` treats an unreachable Node as
-  an inactive dispatcher, so the shell was short-circuiting the CLI's own
-  fail-closed path. Re-run `aimhooman init` after upgrading Node to re-pin it.
+  conditions now separate by what the user can still do about them. A missing CLI
+  still allows the operation, because the package is gone and no guard is wanted.
+  A missing pinned interpreter stops the operation and names the path and the
+  remedy — but only while a Node exists to run that remedy with, since `init` and
+  `uninstall` are both Node programs and the CLI file is inert without one.
+  Where no Node is present at all, the dispatcher degrades and says so, because
+  refusing there would leave the repository unusable with no supported way to
+  remove the hooks. Stopping matches what the CLI already believed —
+  `installedHooks` treats an unreachable Node as an inactive dispatcher, so the
+  shell was short-circuiting the CLI's own fail-closed path — but only where
+  stopping is recoverable. Re-run `aimhooman init` after upgrading Node to re-pin it.
 - Attribution rules no longer miss current AI footers. `attribution.generated-with`
   pinned the literal vendor link `https://claude.ai/code`, and the co-author rules
   pinned the display names `Claude`, `Claude Code`, and `Codex`. Once the link was

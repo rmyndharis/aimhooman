@@ -606,8 +606,16 @@ ${captureTree}${captureTransaction}run_aimhooman() {
     return 0
   fi
   if [ ! -f "$AIMHOOMAN_NODE" ]; then
-    echo "aimhooman: the pinned Node interpreter is missing (\$AIMHOOMAN_NODE); the operation was stopped. Run 'aimhooman init' to re-pin it, or 'aimhooman uninstall' to remove the guard." >&2
-    return 20
+    # Both remedies below are Node programs, so stopping is only fair when a Node
+    # exists to run them with. Without one the CLI file is inert: 'init' and
+    # 'uninstall' cannot run, and refusing would leave the repository unusable
+    # with no way to remove these hooks except deleting them by hand.
+    if command -v node >/dev/null 2>&1; then
+      echo "aimhooman: the pinned Node interpreter is missing (\$AIMHOOMAN_NODE); the operation was stopped. Run 'aimhooman init' to re-pin it, or 'aimhooman uninstall' to remove the guard." >&2
+      return 20
+    fi
+    echo "aimhooman: guard unavailable (no Node interpreter found); allowing this operation without protection. Install Node and run 'aimhooman init' to restore the guard." >&2
+    return 0
   fi
   (
     unset NODE_OPTIONS NODE_PATH NODE_REPL_EXTERNAL_MODULE NODE_EXTRA_CA_CERTS

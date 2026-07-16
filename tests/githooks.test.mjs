@@ -1131,32 +1131,60 @@ test('generated hook allows the operation when its embedded CLI cannot run', () 
     }
 });
 
-test('generated hook stops the operation when its pinned Node interpreter is gone', () => {
-    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-missing-node-'));
+// A dispatcher whose pinned interpreter has moved: `brew upgrade node`, an nvm
+// switch, an fnm or volta shim all relocate the process.execPath that init pins.
+// The CLI file is still there, but a .mjs file is inert without an interpreter,
+// so what the dispatcher may do next depends entirely on whether any Node exists.
+function repoWithMovedNodePin(base) {
+    const root = makeRepo(base);
+    const repo = openRepo(root);
+    const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+    const cli = join(base, 'cli.mjs');
+    writeFileSync(cli, '');
+    installHooks(repo, cli);
+    const hookPath = join(hooks, 'pre-commit');
+    writeFileSync(hookPath, readFileSync(hookPath, 'utf8')
+        .replace(/^AIMHOOMAN_NODE=.*$/m, `AIMHOOMAN_NODE='${join(base, 'gone', 'node')}'`));
+    return { root, hookPath };
+}
+
+test('a moved Node pin stops the operation while a Node exists to run the remedy', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-moved-node-'));
     try {
         isolatedGitConfig(base, () => {
-            const root = makeRepo(base);
-            const repo = openRepo(root);
-            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
-            // The CLI is present: aimhooman is still installed and the user still
-            // wants the guard. Only the pinned interpreter moved, which is what
-            // `brew upgrade node` or an `nvm` switch does to process.execPath.
-            const cli = join(base, 'cli.mjs');
-            writeFileSync(cli, '');
-            installHooks(repo, cli);
-            const hookPath = join(hooks, 'pre-commit');
-            const script = readFileSync(hookPath, 'utf8')
-                .replace(/^AIMHOOMAN_NODE=.*$/m, `AIMHOOMAN_NODE='${join(base, 'gone', 'node')}'`);
-            writeFileSync(hookPath, script);
+            const { root, hookPath } = repoWithMovedNodePin(base);
+            // PATH carries a Node, so `aimhooman init` and `aimhooman uninstall`
+            // both run: stopping here costs one command and is recoverable.
+            const out = spawnSync(HOOK_SHELL, [shellArgumentPath(hookPath)], {
+                cwd: root,
+                encoding: 'utf8',
+                env: { ...process.env, PATH: dirname(process.execPath) },
+            });
+            assert.notEqual(out.status, 0, 'a guard that could run must not allow the commit');
+            assert.match(out.stderr, /pinned Node interpreter is missing/);
+            assert.match(out.stderr, /aimhooman init/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
 
+test('a moved Node pin allows the operation when no Node exists to run the remedy', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-no-node-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const { root, hookPath } = repoWithMovedNodePin(base);
+            // No Node anywhere: 'init' and 'uninstall' are both Node programs, so
+            // refusing would leave the repository unusable with no supported way
+            // to remove these hooks. Degrading is the only honest answer.
             const out = spawnSync(HOOK_SHELL, [shellArgumentPath(hookPath)], {
                 cwd: root,
                 encoding: 'utf8',
                 env: { ...process.env, PATH: '' },
             });
-            assert.notEqual(out.status, 0, 'a guard that cannot run must not allow the commit');
-            assert.match(out.stderr, /pinned Node interpreter is missing/);
-            assert.match(out.stderr, /aimhooman init/);
+            assert.equal(out.status, 0, 'refusing here would trap the repository');
+            assert.match(out.stderr, /no Node interpreter found/);
+            assert.match(out.stderr, /without protection/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
