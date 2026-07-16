@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The release workflow runs `npm run verify` before publish instead of `npm test`,
   so the tarball-manifest check and the installed-hook smoke test gate the published
   tag, matching the push workflow.
+- Non-hook commands no longer load the PreToolUse shell parser at startup; it is
+  imported only for the `hook` subcommand, which speeds up `init`, `uninstall`,
+  `check`, `status`, and the rest and gives the lifecycle-lock queue more headroom
+  on slow runners.
 
 ## [0.1.0] - 2026-07-15
 
