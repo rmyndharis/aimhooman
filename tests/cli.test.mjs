@@ -229,6 +229,29 @@ test('commitmsg: strict blocks and exits 10', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('check --json reports an unloadable local rule pack as an incomplete scan', () => {
+    // The pack most teams write is a detector for their own token format. One
+    // typo takes it out of the run, and a report that still says complete: true
+    // actively certifies that nothing was missed.
+    const dir = makeRepo('clean');
+    try {
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/broken.json'), JSON.stringify([{
+            id: 'local.acme-token', version: 1, provider: 'local', category: 'secret', kind: 'code',
+            match: { content: ['ACME_[A-Z'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'internal ACME token',
+        }]));
+        writeFileSync(join(dir, 'app.js'), 'const t = "ACME_TOKEN";\n');
+        execFileSync('git', ['add', 'app.js'], { cwd: dir });
+
+        const out = result('check', ['--staged', '--json'], dir);
+        const report = JSON.parse(out.stdout);
+        assert.equal(report.complete, false, 'a pack that never ran cannot be a complete scan');
+        assert.equal(out.status, 31, out.stderr);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('init: a tracked hooks directory is refused with the reason, not a bare failure', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-cli-tracked-hooks-'));
     try {
@@ -696,7 +719,11 @@ test('strict agent guard denies combined add and commit when no Git guard is ins
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('clean skips a malformed local rule pack without cancelling precommit', () => {
+test('clean reports a malformed local rule pack as an incomplete precommit scan', () => {
+    // A pack that never loaded is a coverage gap, not an empty result, and gets
+    // the treatment local-input-limit already has in every profile: clean stops
+    // at 31 rather than certifying a scan its own rules never took part in.
+    // strict still fails closed at 20 (below).
     const dir = makeRepo('clean');
     try {
         mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
@@ -704,8 +731,12 @@ test('clean skips a malformed local rule pack without cancelling precommit', () 
         writeFileSync(join(dir, 'normal.txt'), 'x');
         execFileSync('git', ['add', 'normal.txt'], { cwd: dir });
         const out = result('precommit', [], dir);
-        assert.equal(out.status, 0, out.stderr);
+        assert.equal(out.status, 31, out.stderr);
         assert.match(out.stderr, /pack skipped/);
+        // The other skip reasons are budgets the user can shrink; a pack that
+        // will not compile is not, so the stock hint would misdirect.
+        assert.match(out.stderr, /fix the reported rule pack/, out.stderr);
+        assert.doesNotMatch(out.stderr, /reduce the target or limits/, out.stderr);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

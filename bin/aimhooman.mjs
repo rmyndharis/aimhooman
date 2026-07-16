@@ -159,10 +159,17 @@ function emitDiagnostics(diagnostics = []) {
 }
 
 function incompleteMessage(scan) {
-    const skipped = Object.entries(scan.stats?.skipped || {})
+    const reasons = scan.stats?.skipped || {};
+    const skipped = Object.entries(reasons)
         .map(([reason, count]) => `${reason}=${count}`)
         .join(', ');
-    return `aimhooman: scan incomplete${skipped ? ` (${skipped})` : ''}; reduce the target or limits and retry\n`;
+    // Every other reason is a size or budget the caller can shrink. A pack that
+    // will not compile is not, and the warning above already names the file and
+    // the error, so point at that instead of misdirecting to the limits.
+    const hint = reasons['local-pack-error']
+        ? 'fix the reported rule pack and retry'
+        : 'reduce the target or limits and retry';
+    return `aimhooman: scan incomplete${skipped ? ` (${skipped})` : ''}; ${hint}\n`;
 }
 
 function snapshotFile(path) {

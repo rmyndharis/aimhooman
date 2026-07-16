@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A local rule pack that cannot load no longer produces a report claiming a
+  complete scan. `strict` already failed closed, but `clean` and `compliance`
+  turned the load error into a stderr warning and left the accumulator untouched,
+  so `--json` returned `complete: true`, `findings: []`, `skipped: {}` and exit 0
+  while the team's own rules had never run. The pack most teams write is a
+  detector for their internal token format; one typo took it out of the scan, and
+  the report actively certified that nothing was missed. A failed pack is now the
+  counted skip reason `local-pack-error` and marks the scan incomplete, which is
+  the treatment `local-input-limit` already had in every profile: a rule that
+  never ran is a coverage gap, not an empty result. `clean` and `compliance`
+  therefore stop at exit 31 where they previously continued. The hint now points
+  at the pack instead of suggesting the caller reduce the target or limits, which
+  was never the remedy for a pattern that will not compile.
 - Creating a branch no longer rescans the entire repository. A new branch arrives
   with an all-zero old tip, so `rev-list` ran with no negative boundary and every
   ancestor was re-read, tree and blob sizes included: 24.7s at 200 commits, growing

@@ -49,6 +49,7 @@ export function scanMessage(repo, text, options = {}) {
     const { policy, head } = resolved;
     const loaded = engineForPolicy(repo, policy, options.overrideHead || head);
     const accumulator = createAccumulator(options.limits);
+    accumulator.addSkipped(loaded.skipped);
     accumulator.add(loaded.engine.checkMessage(text).map((finding) => decorate(finding, null, policy)));
     accumulator.addSkipped(loaded.engine.takeSkipped());
     return {
@@ -68,6 +69,7 @@ function scanIndex(repo, options) {
     const { rawPolicy, floor, policy, head, acknowledged } = resolveStagedPolicy(repo, options.explicitProfile);
     const loaded = engineForPolicy(repo, policy, options.overrideHead || head);
     const accumulator = createAccumulator(options.limits);
+    accumulator.addSkipped(loaded.skipped);
     let entries = kind === 'tracked' ? trackedEntries(repo) : stagedEntries(repo);
     const conflicts = unmergedPaths(repo);
     const diagnostics = [...loaded.diagnostics];
@@ -189,6 +191,7 @@ function scanCommit(repo, options) {
         reviewContexts,
     );
     const accumulator = createAccumulator(options.limits);
+    accumulator.addSkipped(loaded.skipped);
     const diagnostics = [...loaded.diagnostics];
 
     if (snapshot.shallowBoundary) {
@@ -261,6 +264,9 @@ function scanRange(repo, options) {
     // only constructs an Engine and applies overrides (see engineForPolicy).
     const preloaded = loadRulesWithDiagnostics(repo.stateDir);
     const preloadedOverrides = loadOverrides(repo.stateDir);
+    // Counted once for the range, not once per commit: the same packs back every
+    // commit's engine, so the per-commit loaded.skipped would inflate the tally.
+    accumulator.addSkipped(packSkipped(preloaded.errors));
 
     for (const commit of history.commits) {
         const changes = commitChanges(repo, commit.commit, commit.commit, commit.parents);
@@ -452,7 +458,14 @@ export function engineForPolicy(
         [...reviewedInstructions, ...reviewedPolicies],
     );
     const diagnostics = loaded.errors.map((error) => ({ level: 'warning', message: `${error.message}; pack skipped` }));
-    return { engine: loaded.engine, diagnostics };
+    return { engine: loaded.engine, diagnostics, skipped: packSkipped(loaded.errors) };
+}
+
+// packSkipped turns rule-pack load failures into a counted skip reason. A pack
+// that never loaded is a hole in coverage, not an empty result: strict throws
+// above, and clean/compliance proceed but must not report a complete scan.
+function packSkipped(errors) {
+    return errors.length ? { 'local-pack-error': errors.length } : {};
 }
 
 function reviewedEngineEntry(entry, ruleId, transition) {
@@ -589,6 +602,10 @@ function rangeReportPolicy(basePolicy, policies, usedStrictFloor, explicitProfil
     };
 }
 
+// Skip reasons that mean a rule never ran, as opposed to a rule running and
+// matching nothing. Either way the scan cannot claim to have covered its input.
+const INCOMPLETE_SKIP_REASONS = new Set(['local-input-limit', 'local-pack-error']);
+
 function createAccumulator(limits = {}) {
     const effectiveLimits = { ...DEFAULT_SCAN_LIMITS, ...limits };
     const findings = [];
@@ -644,7 +661,7 @@ function createAccumulator(limits = {}) {
         addSkipped(skipped = {}) {
             for (const [reason, count] of Object.entries(skipped)) {
                 stats.skipped[reason] = (stats.skipped[reason] || 0) + count;
-                if (reason === 'local-input-limit') complete = false;
+                if (INCOMPLETE_SKIP_REASONS.has(reason)) complete = false;
             }
         },
         markIncomplete() {
