@@ -1,14 +1,14 @@
 [
     {
         "id": "attribution.claude-coauthor",
-        "version": 1,
+        "version": 2,
         "provider": "claude-code",
         "category": "ai-attribution",
         "confidence": "high",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*co-authored-by:\\s*(?:claude|claude code)\\s*<noreply@anthropic\\.com>\\s*$"
+                "(?i)^\\s*co-authored-by:[^<>]+<noreply@anthropic\\.com>\\s*$"
             ]
         },
         "actions": {
@@ -49,14 +49,14 @@
     },
     {
         "id": "attribution.codex-coauthor",
-        "version": 1,
+        "version": 2,
         "provider": "codex",
         "category": "ai-attribution",
         "confidence": "high",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*co-authored-by:\\s*(?:openai\\s+)?codex\\s*<noreply@openai\\.com>\\s*$"
+                "(?i)^\\s*co-authored-by:[^<>]+<noreply@openai\\.com>\\s*$"
             ]
         },
         "actions": {
@@ -95,7 +95,7 @@
     },
     {
         "id": "attribution.generated-with",
-        "version": 1,
+        "version": 2,
         "provider": "generic",
         "category": "ai-attribution",
         "confidence": "high",
@@ -103,7 +103,7 @@
         "match": {
             "content": [
                 "(?i)^\\s*generated\\s+(?:with|by)\\s+(?:claude(?:\\s+code)?|(?:github\\s+)?copilot|chatgpt|gpt(?:-[0-9]+(?:\\.[0-9]+)?)?|(?:openai\\s+)?codex|cursor)[.!]?\\s*$",
-                "(?i)^\\s*(?:🤖\\s*)?generated\\s+with\\s+\\[claude code\\]\\(https://claude\\.ai/code\\)\\s*$"
+                "(?i)^\\s*(?:🤖\\s*)?generated\\s+with\\s+\\[(?:claude(?:\\s+code)?|(?:github\\s+)?copilot|chatgpt|gpt(?:-[0-9]+(?:\\.[0-9]+)?)?|(?:openai\\s+)?codex|cursor)\\]\\([^)]*\\)\\s*$"
             ]
         },
         "actions": {
@@ -126,7 +126,7 @@
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*[a-z-]+-by:\\s*[^<>]+\\s*<noreply@(anthropic|openai)\\.com>\\s*$"
+                "(?i)^\\s*[a-z-]+-by:[^<>]+<noreply@(anthropic|openai)\\.com>\\s*$"
             ]
         },
         "actions": {

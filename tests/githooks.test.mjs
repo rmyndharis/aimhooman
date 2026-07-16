@@ -247,6 +247,36 @@ test('install/uninstall honors a local-scope core.hooksPath', () => {
     }
 });
 
+test('a tracked hooks directory is treated as shared and never modified', () => {
+    // husky and the vanilla .githooks pattern commit their hook scripts. Writing
+    // a dispatcher into one stages this machine's absolute CLI, Node, and PATH
+    // for the whole team: the hook dies for everyone else, and the PATH alone
+    // discloses the developer's home directory and installed tooling.
+    const base = mkdtempSync(join(tmpdir(), 'aim-tracked-hookspath-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const custom = join(root, '.husky');
+            const teamHook = '#!/bin/sh\necho team pre-commit\n';
+            mkdirSync(custom, { recursive: true });
+            writeFileSync(join(custom, 'pre-commit'), teamHook);
+            git(root, ['add', '-A', '.husky']);
+            git(root, ['commit', '-q', '-m', 'add team hooks']);
+            git(root, ['config', '--local', 'core.hooksPath', custom]);
+
+            const result = installHooks(openRepo(root), CLI);
+            assert.equal(result.shared, true, 'a tracked hooks directory is not ours to write to');
+            assert.deepEqual(result.installed, []);
+            assert.match(result.warnings.join('\n'), /tracked/);
+            assert.equal(readFileSync(join(custom, 'pre-commit'), 'utf8'), teamHook);
+            assert.equal(existsSync(join(custom, 'reference-transaction')), false);
+            assert.equal(git(root, ['status', '--short']), '', 'init must not dirty the worktree');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('local install and uninstall never modify a globally configured hooks path', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-global-'));
     try {
@@ -1095,6 +1125,38 @@ test('generated hook allows the operation when its embedded CLI cannot run', () 
             assert.equal(out.status, 0, out.stderr);
             assert.match(out.stderr, /guard unavailable/);
             assert.match(out.stderr, /allowing this operation without protection/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('generated hook stops the operation when its pinned Node interpreter is gone', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-missing-node-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            // The CLI is present: aimhooman is still installed and the user still
+            // wants the guard. Only the pinned interpreter moved, which is what
+            // `brew upgrade node` or an `nvm` switch does to process.execPath.
+            const cli = join(base, 'cli.mjs');
+            writeFileSync(cli, '');
+            installHooks(repo, cli);
+            const hookPath = join(hooks, 'pre-commit');
+            const script = readFileSync(hookPath, 'utf8')
+                .replace(/^AIMHOOMAN_NODE=.*$/m, `AIMHOOMAN_NODE='${join(base, 'gone', 'node')}'`);
+            writeFileSync(hookPath, script);
+
+            const out = spawnSync(HOOK_SHELL, [shellArgumentPath(hookPath)], {
+                cwd: root,
+                encoding: 'utf8',
+                env: { ...process.env, PATH: '' },
+            });
+            assert.notEqual(out.status, 0, 'a guard that cannot run must not allow the commit');
+            assert.match(out.stderr, /pinned Node interpreter is missing/);
+            assert.match(out.stderr, /aimhooman init/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

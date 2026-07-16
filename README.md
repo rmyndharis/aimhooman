@@ -151,8 +151,10 @@ Prefer repository `init` unless the global ordering is understood.
 
 When `core.hooksPath` is set, Git reads hooks only from that effective directory and
 ignores `.git/hooks`. Repository `init` installs and chains predecessors only when
-that directory is absent or is proven to be owned by the repository. It refuses to
-modify a global, shared, or external hook directory. In that case, integrate
+that directory is absent or is proven to be owned by the repository: inside it and
+not tracked by Git. It refuses to modify a global, shared, external, or tracked
+hook directory, because a dispatcher committed from one machine names paths that
+exist only on that machine. In that case, integrate
 aimhooman into the existing hook manager or remove the override before retrying.
 
 Repository `init` installs `pre-commit`, `pre-merge-commit`, `commit-msg`, and

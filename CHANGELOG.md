@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A local rule pack that cannot load no longer produces a report claiming a
+  complete scan. `strict` already failed closed, but `clean` and `compliance`
+  turned the load error into a stderr warning and left the accumulator untouched,
+  so `--json` returned `complete: true`, `findings: []`, `skipped: {}` and exit 0
+  while the team's own rules had never run. The pack most teams write is a
+  detector for their internal token format; one typo took it out of the scan, and
+  the report actively certified that nothing was missed. A failed pack is now the
+  counted skip reason `local-pack-error` and marks the scan incomplete, which is
+  the treatment `local-input-limit` already had in every profile: a rule that
+  never ran is a coverage gap, not an empty result. `clean` and `compliance`
+  therefore stop at exit 31 where they previously continued. The hint now points
+  at the pack instead of suggesting the caller reduce the target or limits, which
+  was never the remedy for a pattern that will not compile.
+- Creating a branch no longer rescans the entire repository. A new branch arrives
+  with an all-zero old tip, so `rev-list` ran with no negative boundary and every
+  ancestor was re-read, tree and blob sizes included: 24.7s at 200 commits, growing
+  linearly, on an operation `--no-verify` cannot skip. Reachability from
+  `refs/heads/*` is now trusted, because those commits passed this same guard when
+  their branch was written, which puts `git checkout -b` back at ordinary commit
+  cost (0.95s in the same repository). Only `refs/heads/*` counts: tags and remote
+  refs are not gated here and still cannot pre-poison reachability, the refs under
+  review are never their own proof, and a commit no local branch reaches is still
+  scanned in full. Commits that predate `aimhooman init` are outside the guard's
+  scope; audit them with `check --range`.
+- `init` no longer writes dispatchers into a hooks directory that Git tracks.
+  Ownership was tested by location alone, so any `core.hooksPath` inside the
+  worktree counted as the repository's own — including the committed `.husky` and
+  `.githooks` directories that husky and the vanilla pattern rely on. init edited
+  those tracked files in place, and the dispatcher it wrote carries this machine's
+  absolute CLI, Node, and PATH: once committed, the hook is dead for every
+  teammate, and the PATH alone discloses the author's home directory and installed
+  tooling. Ownership now also requires that Git is not tracking the directory, and
+  a directory Git cannot be asked about counts as tracked. A refusal now names the
+  cause instead of reporting a bare incomplete installation; as before, integrate
+  aimhooman into the existing hook manager or remove the override.
+- A moved Node interpreter no longer disables the guard silently. 0.1.1 made the
+  dispatcher degrade gracefully when the CLI or Node was missing, which is right
+  for a half-removed install but wrong for a relocated interpreter: `brew upgrade
+  node`, `nvm`, `fnm`, and `volta` all move the `process.execPath` that `init`
+  pins, and every hook then warned once and allowed the commit unprotected. The
+  two conditions now separate by intent. A missing CLI still allows the operation,
+  because the package is gone and the user wants no guard. A missing pinned
+  interpreter stops the operation and names the path and the remedy, because
+  aimhooman is still installed and the guard is still wanted. This also matches
+  what the CLI already believed: `installedHooks` treats an unreachable Node as
+  an inactive dispatcher, so the shell was short-circuiting the CLI's own
+  fail-closed path. Re-run `aimhooman init` after upgrading Node to re-pin it.
+- Attribution rules no longer miss current AI footers. `attribution.generated-with`
+  pinned the literal vendor link `https://claude.ai/code`, and the co-author rules
+  pinned the display names `Claude`, `Claude Code`, and `Codex`. Once the link was
+  rebranded and the display name grew a model suffix, the default footer passed
+  through untouched with exit 0 while the older form was still repaired perfectly.
+  The rules now anchor on what identifies the machine rather than what marketing
+  changes: a co-author trailer is matched by its `noreply@` service address alone,
+  and the generated-with link is matched by its shape. A new contract test rejects
+  any attribution pattern that pins a vendor URL, so the pack cannot rot back into
+  this state without failing CI.
+- `attribution.ai-noreply` no longer backtracks catastrophically. `\s*[^<>]+\s*`
+  placed three ambiguous quantifiers before a literal `<`, which cost 49s on a
+  6400-character trailer that never closes; built-in patterns are exempt from the
+  local input cap, so a commit message reached it directly. The redundant
+  whitespace quantifiers are gone (`[^<>]+` already spans them), leaving the
+  matched language unchanged, and a bounded-cost test now covers the built-in
+  message patterns.
+
 ## [0.1.1] - 2026-07-16
 
 ### Fixed

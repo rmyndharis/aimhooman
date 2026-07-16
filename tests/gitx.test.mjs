@@ -8,6 +8,7 @@ import {
     GitRevisionError,
     GitTargetReadError,
     archiveLegacyStates,
+    introducedCommits,
     openRepo,
     readCommitPath,
     readStagedPath,
@@ -481,6 +482,89 @@ test('staged entry metadata reports oversized blobs without reading their conten
         assert.equal(entry.type, 'blob');
         assert.equal(entry.size, size);
         assert.match(entry.oid, /^[0-9a-f]{40,64}$/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+const ZERO = '0'.repeat(40);
+
+function git(dir, args) {
+    return execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+}
+
+test('creating a branch from an already-gated tip introduces no commits', () => {
+    // Every commit reachable from refs/heads/* was gated when that ref was
+    // written, so branching off one re-scans nothing. Before this, a new branch
+    // had an all-zero old tip and rescanned the entire ancestry on every
+    // `git checkout -b`.
+    const dir = freshRepo();
+    try {
+        writeFileSync(join(dir, 'a.txt'), 'a');
+        git(dir, ['add', 'a.txt']);
+        commit(dir, 'second');
+        const tip = git(dir, ['rev-parse', 'HEAD']);
+
+        const introduced = introducedCommits(openRepo(dir), [
+            { oldObjectId: ZERO, newObjectId: tip, ref: 'refs/heads/feature' },
+        ]);
+        assert.deepEqual(introduced, []);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('creating a branch still scans commits that no local branch reaches', () => {
+    const dir = freshRepo();
+    try {
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const orphan = git(dir, ['commit-tree', tree, '-p', base, '-m', 'not on any branch']);
+
+        const introduced = introducedCommits(openRepo(dir), [
+            { oldObjectId: ZERO, newObjectId: orphan, ref: 'refs/heads/feature' },
+        ]);
+        assert.deepEqual(introduced, [orphan], 'an unreached commit must still be scanned');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('a tag reaching the proposed tip does not suppress the scan', () => {
+    // Tags and remote refs are not gated by aimhooman, so they must never count
+    // as proof that a commit was already checked. Only refs/heads/* may.
+    const dir = freshRepo();
+    try {
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const smuggled = git(dir, ['commit-tree', tree, '-p', base, '-m', 'smuggled']);
+        git(dir, ['tag', 'poison', smuggled]);
+        git(dir, ['update-ref', 'refs/remotes/origin/poison', smuggled]);
+
+        const introduced = introducedCommits(openRepo(dir), [
+            { oldObjectId: ZERO, newObjectId: smuggled, ref: 'refs/heads/feature' },
+        ]);
+        assert.deepEqual(introduced, [smuggled], 'an ungated tag must not pre-poison reachability');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('a branch update that is already visible cannot exclude itself from its own scan', () => {
+    // The reference-transaction hook can observe the ref it is being asked about
+    // (Git shows it at the `committed` phase, and ref backends differ), so the
+    // ref under review must never be used as its own negative.
+    const dir = freshRepo();
+    try {
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const proposed = git(dir, ['commit-tree', tree, '-p', base, '-m', 'proposed']);
+        git(dir, ['update-ref', 'refs/heads/feature', proposed]);
+
+        const introduced = introducedCommits(openRepo(dir), [
+            { oldObjectId: ZERO, newObjectId: proposed, ref: 'refs/heads/feature' },
+        ]);
+        assert.deepEqual(introduced, [proposed], 'the ref under review must not gate itself');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

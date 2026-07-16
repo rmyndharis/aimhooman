@@ -636,21 +636,40 @@ export function withIndexFromTree(repo, treeOid, fn) {
     }
 }
 
-// introducedCommits returns each commit added by a proposed branch update,
-// independent of reachability through other refs. Using `--not --all` here
-// would let an ignored tag/remote ref pre-poison reachability and suppress the
-// final scan. A newly created branch has no trusted old tip, so its full ancestry
-// is checked; ordinary updates scan exactly old..new.
+// gatedTips lists the local branch tips this guard has already cleared. Only
+// refs/heads/* qualifies, because it is the only namespace cmdRefcheck gates;
+// the refs under review are excluded, since Git already publishes them at the
+// `committed` phase and a ref must never serve as its own proof.
+function gatedTips(repo, reviewing) {
+    return gitBuf(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads/'], repo.root)
+        .toString('utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => line.split(' '))
+        .filter(([name, oid]) => name && oid && !reviewing.has(name))
+        .map(([, oid]) => oid);
+}
+
+// introducedCommits returns each commit added by a proposed branch update.
+// Reachability through refs/heads/* is trusted because those commits passed this
+// same guard when their branch was written; every other namespace is not. Using
+// `--not --all` would let an ignored tag or remote ref pre-poison reachability
+// and suppress the scan, so tips come from refs/heads/* alone. A newly created
+// branch is measured against those tips instead of its full ancestry, which
+// would otherwise rescan the entire repository on every `git checkout -b`;
+// ordinary updates scan exactly old..new.
 export function introducedCommits(repo, updates) {
     const commits = [];
     const seen = new Set();
+    const reviewing = new Set(updates.map((update) => update?.ref).filter(Boolean));
+    const gated = gatedTips(repo, reviewing);
     for (const update of updates) {
         const oldObjectId = update?.oldObjectId;
         const newObjectId = update?.newObjectId;
         assertOid(oldObjectId);
         assertOid(newObjectId);
         const revisions = /^0+$/.test(oldObjectId)
-            ? [newObjectId]
+            ? [newObjectId, ...(gated.length ? ['--not', ...gated] : [])]
             : [newObjectId, `^${oldObjectId}`];
         const resolved = gitBuf(['rev-list', '--reverse', ...revisions], repo.root)
             .toString('utf8')
