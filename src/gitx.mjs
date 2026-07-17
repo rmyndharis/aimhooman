@@ -13,7 +13,7 @@ import {
     symlinkSync,
 } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { gitEnvironment } from './git-environment.mjs';
+import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
 export class GitRevisionError extends Error {
     constructor(revision, detail, cause) {
@@ -40,6 +40,7 @@ function gitBuf(args, cwd, input) {
         env: gitEnvironment(),
         encoding: 'buffer',
         maxBuffer: 64 * 1024 * 1024,
+        timeout: GIT_TIMEOUT_MS,
         // Capture stderr into the thrown error (pipe) instead of letting git's
         // raw stderr leak to the user's terminal alongside aimhooman's own
         // diagnostics; stdin is ignored unless input is supplied.
@@ -452,6 +453,7 @@ export function unstagePaths(repo, paths) {
         cwd: repo.root,
         env: gitEnvironment(),
         input: pathspecs,
+        timeout: GIT_TIMEOUT_MS,
         stdio: ['pipe', 'ignore', 'pipe'],
     };
     let hasHead = true;

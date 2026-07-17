@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { gitEnvironment } from './git-environment.mjs';
+import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
 export const DEFAULT_SCAN_LIMITS = Object.freeze({
     maxFileBytes: 2 << 20,
@@ -112,6 +112,7 @@ function readObjects(repo, objectIds, expectedBytes = 0) {
         input: Buffer.from(unique.join('\n') + '\n'),
         encoding: 'buffer',
         maxBuffer: Math.max(2 * 1024 * 1024, expectedBytes + unique.length * 256 + 1024),
+        timeout: GIT_TIMEOUT_MS,
     });
     const objects = new Map();
     const failures = [];

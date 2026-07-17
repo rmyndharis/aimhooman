@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GitRevisionError } from './gitx.mjs';
-import { gitEnvironment } from './git-environment.mjs';
+import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
 export const EMPTY_HISTORY_OID = '0'.repeat(40);
 
@@ -12,6 +12,7 @@ function gitBuffer(repo, args, input) {
         env: gitEnvironment(),
         encoding: 'buffer',
         maxBuffer: 128 * 1024 * 1024,
+        timeout: GIT_TIMEOUT_MS,
         ...(input === undefined ? {} : { input }),
     });
 }
@@ -26,6 +27,7 @@ function gitStringQuiet(repo, args) {
         env: gitEnvironment(),
         encoding: 'utf8',
         maxBuffer: 128 * 1024 * 1024,
+        timeout: GIT_TIMEOUT_MS,
         stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
 }
@@ -223,6 +225,7 @@ function isAncestor(repo, ancestor, descendant) {
             cwd: repo.root,
             env: gitEnvironment(),
             stdio: ['ignore', 'ignore', 'pipe'],
+            timeout: GIT_TIMEOUT_MS,
         });
         return true;
     } catch (error) {
