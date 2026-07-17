@@ -30,6 +30,9 @@ jobs:
           - os: windows-latest
             node: 24
     runs-on: ${{ matrix.os }}
+    # A healthy job finishes well under 8 minutes. Without a bound, a hung child
+    # process holds the runner for the 6-hour default instead of failing.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
