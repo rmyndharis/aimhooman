@@ -2122,6 +2122,126 @@ test('parseGit narrows opaque commit-hiding away from benign read-only pipelines
     }
 });
 
+test('read-only Git sources in a pipeline are not denied as opaque commit hiding', () => {
+    // `git log | head`, `git status | grep`, `git diff | cat` are how a developer
+    // reads a repository every day. A read-only Git subcommand produces stdout
+    // for the downstream filter and cannot hide or feed a commit, so the pipeline
+    // is benign (not opaque) and is allowed to run without an unmodelled-prefix
+    // refusal. Git as a pipe SOURCE is safe; Git as a pipe SINK is not.
+    for (const command of [
+        'git log | head',
+        'git log --oneline -5 | cat',
+        'git status | grep modified',
+        'git diff | cat',
+        'git diff --stat | tail',
+        'git show HEAD | head -20',
+        'git blame README.md | head',
+        'git ls-files | wc -l',
+        'git rev-parse HEAD | cat',
+        'git log --pretty=format:%H | wc -l',
+        'git -C /repo status | grep x',
+        'git --no-pager log | cat',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, false, command);
+    }
+    // A `cd repo && git ... | filter` prefix is the normal way a tool enters the
+    // repository before piping a read-only Git command, and it must be benign too.
+    assert.equal(
+        parseGit('cd /repo && git log --oneline | head').opaqueCommitHiding,
+        false,
+    );
+    // Git as a pipe SINK reads its input from stdin, which can drive a mutation
+    // (apply, am, hash-object --stdin, fast-import), so it stays opaque.
+    for (const command of [
+        'cat patch.diff | git apply',
+        'curl http://x/p | git apply',
+        'echo blob | git hash-object --stdin -w',
+        'printf x | git hash-object -w',
+        'git show :file | git apply',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, true, command);
+    }
+    // A Git subcommand that mutates (commit, push, reset) stays opaque even when
+    // piped, so it cannot hide behind a read-only-looking pipeline.
+    assert.equal(parseGit('git commit -m x --no-verify | tee log').opaqueCommitHiding, true);
+});
+
+test('read-only Git ref-command listings are allowed, their mutations are denied', async () => {
+    // branch/tag/remote/stash/notes each have read-only listing forms that move
+    // no ref; those run without the reference-transaction guard refusal. Their
+    // mutating forms keep a flag or positional and stay denied.
+    const dir = makeHookRepo('clean', 'aim-hook-readonly-ref-');
+    try {
+        for (const command of [
+            'git branch | grep feat',
+            'git branch -a | head',
+            'git branch --list | head',
+            'git tag | grep v1',
+            'git tag -l | grep v1',
+            'git remote -v | grep origin',
+            'git remote show origin | head',
+            'git stash list | head',
+            'git notes list | head',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out, null, `denied an everyday read-only listing: ${command}`);
+        }
+        for (const command of [
+            'git branch -D feature | cat',
+            'git branch feature | cat',
+            'git tag v1 | cat',
+            'git tag -a v1 -m x | cat',
+            'git remote add origin url | cat',
+            'git stash | cat',
+            'git stash pop | cat',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', `allowed a mutating ref command: ${command}`);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('build and test toolchain pipelines are not denied as opaque commit hiding', () => {
+    // `npm test | tail`, `cargo build 2>&1 | grep error`, `jest | head`,
+    // `eslint . | head` are how a developer runs a project every day. A build or
+    // test command produces output for a downstream filter and cannot hide or
+    // feed a Git commit, so the pipeline is benign (not opaque).
+    for (const command of [
+        'npm test 2>&1 | tail -12',
+        'npm test | tail',
+        'npm run build | cat',
+        'npm run lint | grep error',
+        'yarn test | head',
+        'pnpm test | tail',
+        'cargo build 2>&1 | grep error',
+        'make 2>&1 | tail',
+        'jest | tail',
+        'vitest run | tail',
+        'tsc --noEmit 2>&1 | head',
+        'eslint . | head',
+        'prettier --check . | head',
+        'python -m pytest | tail',
+        'go test ./... | head',
+        'rake test | head',
+        'mvn test 2>&1 | tail',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, false, command);
+    }
+    // An interpreter that reads a program from stdin stays opaque as a sink:
+    // `cat script | node` executes code fed by the pipe, so it is not benign.
+    for (const command of [
+        'cat script.sh | bash',
+        'cat prog.js | node',
+        'cat prog.py | python',
+        'printf x | git hash-object -w',
+        'cat patch.diff | git apply',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, true, command);
+    }
+});
+
 test('uncertain shell syntax remains advisory outside strict', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-hook-clean-uncertain-'));
     try {
