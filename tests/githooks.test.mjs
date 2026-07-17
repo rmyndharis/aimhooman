@@ -932,6 +932,60 @@ test('reference transaction scans old-to-new delta even when an ignored tag alre
     }
 });
 
+function refcheckPrepared(root, input) {
+    return spawnSync(process.execPath, [CLI, 'refcheck', 'prepared'], {
+        cwd: root,
+        input,
+        encoding: 'utf8',
+    });
+}
+
+// The reference-transaction tests below drive this scan through a real installed hook,
+// and none of it reaches the coverage report: the generated hook unsets NODE_V8_COVERAGE
+// before exec'ing the CLI, and inheriting that variable is how a profile gets collected
+// at all. The scrub stays, because the guard must not honour Node environment handed to
+// it by its caller. So drive the same command directly instead, with the reference-update
+// lines Git writes to the hook's stdin.
+test('refcheck prepared scans proposed updates and stops on input it cannot parse', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-refcheck-direct-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const before = git(root, ['rev-parse', 'HEAD']);
+            mkdirSync(join(root, '.claude'));
+            writeFileSync(join(root, '.claude', 'session.json'), '{"session":"local"}\n');
+            git(root, ['add', '-f', '.claude/session.json']);
+            git(root, ['commit', '--no-verify', '-q', '-m', 'session state']);
+            const after = git(root, ['rev-parse', 'HEAD']);
+            const branch = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+
+            const rejected = refcheckPrepared(root, `${before} ${after} refs/heads/${branch}\n`);
+            assert.equal(rejected.status, 10, rejected.stderr);
+            assert.match(rejected.stderr, /claude\.session-state/);
+            assert.ok(
+                rejected.stderr.includes(`proposed commit ${after} was rejected before refs changed`),
+                rejected.stderr,
+            );
+
+            // A deletion carries an all-zero new object ID and introduces no commit, so
+            // it scans nothing and still reaches the closing dispatcher check.
+            const deletion = refcheckPrepared(root, `${after} ${'0'.repeat(40)} refs/heads/${branch}\n`);
+            assert.equal(deletion.status, 0, deletion.stderr);
+
+            const malformed = refcheckPrepared(root, 'garbage\n');
+            assert.equal(malformed.status, 30, malformed.stderr);
+            assert.match(malformed.stderr, /malformed reference-transaction input/);
+
+            const badObject = refcheckPrepared(root, `zzz ${after} refs/heads/${branch}\n`);
+            assert.equal(badObject.status, 30, badObject.stderr);
+            assert.match(badObject.stderr, /malformed object ID in reference transaction/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('final reference scan uses enforcement state changed during the transaction', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-attestation-state-'));
     try {

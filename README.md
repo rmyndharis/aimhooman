@@ -238,7 +238,8 @@ files automatically.
   `.agent/`. [`rules/paths.json`](rules/paths.json) is the complete catalog.
 - **Secrets**: a real `.env` (not `.env.example`), private-key content,
   `.aws/credentials`, service-account private keys, recognized AWS secret/session
-  assignments, and provider token prefixes for GitHub, GitLab, npm, and Slack.
+  assignments, and provider token prefixes for GitHub, GitLab, npm, Slack,
+  Anthropic, OpenAI, Google, Stripe, Hugging Face, and SendGrid.
   Public certificates are allowed.
 - **AI attribution** in commit messages: known AI `Co-authored-by:` identities,
   exact "Generated with/by ..." lines, and AI-service noreply attribution trailers.

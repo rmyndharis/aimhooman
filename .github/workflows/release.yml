@@ -24,6 +24,14 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      # Verify runs check:static, which runs the pinned actionlint through `go run`.
+      # A tag push triggers no other workflow, so this job is the only gate at tag
+      # time; without this step it would run on whatever Go the runner image ships.
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25.x'
+          cache: false
       - name: Install
         run: npm ci --ignore-scripts
       - name: Verify

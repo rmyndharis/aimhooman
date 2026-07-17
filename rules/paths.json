@@ -1,12 +1,13 @@
 [
     {
         "id": "claude.local-settings",
-        "version": 1,
+        "version": 2,
         "provider": "claude-code",
         "category": "local-settings",
         "confidence": "high",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".claude/settings.local.json",
                 "**/.claude/settings.local.json"
@@ -24,17 +25,16 @@
     },
     {
         "id": "claude.session-state",
-        "version": 1,
+        "version": 2,
         "provider": "claude-code",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".claude.json",
                 "**/.claude.json",
-                ".claude/.credentials.json",
-                "**/.claude/.credentials.json",
                 ".claude/session*.json",
                 "**/.claude/session*.json",
                 ".claude/history*",
@@ -64,12 +64,13 @@
     },
     {
         "id": "codex.session-state",
-        "version": 1,
+        "version": 2,
         "provider": "codex",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".codex/sessions/**",
                 "**/.codex/sessions/**",
@@ -93,12 +94,13 @@
     },
     {
         "id": "copilot.session-state",
-        "version": 2,
+        "version": 3,
         "provider": "copilot",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".copilot/**",
                 "**/.copilot/**"
@@ -116,12 +118,13 @@
     },
     {
         "id": "cursor.session-state",
-        "version": 1,
+        "version": 2,
         "provider": "cursor",
         "category": "ephemeral-state",
         "confidence": "medium",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".cursor/session*",
                 "**/.cursor/session*",
@@ -143,12 +146,13 @@
     },
     {
         "id": "aider.history",
-        "version": 2,
+        "version": 3,
         "provider": "aider",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".aider.*",
                 "**/.aider.*"
@@ -166,12 +170,13 @@
     },
     {
         "id": "specstory.history",
-        "version": 1,
+        "version": 2,
         "provider": "specstory",
         "category": "ephemeral-state",
         "confidence": "medium",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".specstory/**",
                 "**/.specstory/**"
@@ -189,12 +194,13 @@
     },
     {
         "id": "continue.sessions",
-        "version": 1,
+        "version": 2,
         "provider": "continue",
         "category": "ephemeral-state",
         "confidence": "medium",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".continue/sessions/**",
                 "**/.continue/sessions/**"
@@ -212,7 +218,7 @@
     },
     {
         "id": "secret.dotenv",
-        "version": 2,
+        "version": 3,
         "provider": "generic",
         "category": "secret",
         "confidence": "high",
@@ -226,16 +232,11 @@
                 "**/.env.*"
             ],
             "except": [
-                ".env.example",
-                "**/.env.example",
-                ".env.sample",
-                "**/.env.sample",
-                ".env.template",
-                "**/.env.template",
-                ".env.dist",
-                "**/.env.dist",
-                ".env.defaults",
-                "**/.env.defaults"
+                "**/*.example",
+                "**/*.sample",
+                "**/*.template",
+                "**/*.dist",
+                "**/*.defaults"
             ]
         },
         "actions": {
@@ -303,8 +304,33 @@
         ]
     },
     {
-        "id": "generic.agent-instructions",
+        "id": "secret.claude-credentials",
         "version": 1,
+        "provider": "claude-code",
+        "category": "secret",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                ".claude/.credentials.json",
+                "**/.claude/.credentials.json"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "This file holds an OAuth access token and must never be committed.",
+        "remediation": [
+            "git restore --staged <path>",
+            "Revoke the token if it already reached a commit."
+        ]
+    },
+    {
+        "id": "generic.agent-instructions",
+        "version": 2,
         "provider": "generic",
         "category": "ambiguous-instructions",
         "confidence": "medium",
@@ -328,18 +354,19 @@
         },
         "reason": "Agent instruction files may be intentional team config. Review before committing.",
         "remediation": [
-            "aimhooman allow <path> --reason \"shared team config\"",
+            "aimhooman review <path> --head <commit> --reason \"shared team config\"",
             "or unstage if it is personal"
         ]
     },
     {
         "id": "generic.project-policy",
-        "version": 1,
+        "version": 2,
         "provider": "aimhooman",
         "category": "policy-config",
         "confidence": "high",
         "kind": "path",
         "match": {
+            "path_case": "insensitive",
             "paths": [
                 ".aimhooman.json",
                 "**/.aimhooman.json"
@@ -352,54 +379,54 @@
         },
         "reason": "Versioned enforcement policy changes require explicit human review.",
         "remediation": [
-            "aimhooman allow .aimhooman.json --reason \"reviewed team policy change\"",
+            "aimhooman review .aimhooman.json --head <commit> --reason \"reviewed team policy change\"",
             "or unstage the policy change"
         ]
     },
     {
         "id": "playwright-mcp.state",
-        "version": 1,
+        "version": 2,
         "provider": "playwright-mcp",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "paths": [".playwright-mcp/**", "**/.playwright-mcp/**"] },
+        "match": { "path_case": "insensitive", "paths": [".playwright-mcp/**", "**/.playwright-mcp/**"] },
         "actions": { "clean": "block", "strict": "block", "compliance": "block" },
         "reason": "Playwright MCP session artifacts are local, not repository content.",
         "remediation": ["git restore --staged <path>"]
     },
     {
         "id": "remember.state",
-        "version": 1,
+        "version": 2,
         "provider": "remember",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "paths": [".remember/**", "**/.remember/**"] },
+        "match": { "path_case": "insensitive", "paths": [".remember/**", "**/.remember/**"] },
         "actions": { "clean": "block", "strict": "block", "compliance": "block" },
         "reason": "Remember second-brain data is local, not repository content.",
         "remediation": ["git restore --staged <path>"]
     },
     {
         "id": "superpowers.state",
-        "version": 1,
+        "version": 2,
         "provider": "superpowers",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "paths": [".superpowers/**", "**/.superpowers/**"] },
+        "match": { "path_case": "insensitive", "paths": [".superpowers/**", "**/.superpowers/**"] },
         "actions": { "clean": "block", "strict": "block", "compliance": "block" },
         "reason": "Superpowers plugin state is local, not repository content.",
         "remediation": ["git restore --staged <path>"]
     },
     {
         "id": "agent.state",
-        "version": 2,
+        "version": 3,
         "provider": "generic",
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "paths": [".agent/**", "**/.agent/**"] },
+        "match": { "path_case": "insensitive", "paths": [".agent/**", "**/.agent/**"] },
         "actions": { "clean": "block", "strict": "block", "compliance": "block" },
         "reason": "Generic agent state is local, not repository content.",
         "remediation": ["git restore --staged <path>"]

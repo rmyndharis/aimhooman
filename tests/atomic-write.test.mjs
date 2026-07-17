@@ -222,6 +222,45 @@ test('a stale lock whose PID was reused does not count as a live owner', {
     }
 });
 
+// The sibling above proves reclamation using an identity string, which is the shape
+// Windows never produces: processIdentity returns null there by design, and on any
+// platform whose identity probe fails. Liveness is then kill(pid, 0) alone, so a
+// recycled PID reads as the original owner and the candidate is retained. Retaining is
+// correct — an owner that cannot be disproved outranks a faster release — but the error
+// has to name the queue, since clearing it is the only recovery. Build the candidate
+// here instead of asking the host platform for one, or the case runs nowhere.
+test('a lock held by an unidentifiable owner fails closed and names the queue to clear', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aim-null-identity-lock-'));
+    const lock = join(dir, 'state.lock');
+    const queue = `${lock}.queue`;
+    const token = '12345678-1234-4123-8123-123456789abc';
+    try {
+        mkdirSync(queue, { recursive: true });
+        writeFileSync(join(queue, `${token}.json`), JSON.stringify({
+            version: 1,
+            pid: process.pid,
+            token,
+            processIdentity: null,
+            choosing: false,
+            ticket: 1,
+        }));
+        assert.throws(() => withLock(lock, () => 'acquired', {
+            retries: 3,
+            staleMs: 0,
+            retryDelayMs: 1,
+        }), (error) => {
+            assert.match(error.message, /cannot acquire state lock/);
+            assert.ok(
+                error.message.includes(queue),
+                `the error must name the queue directory holding the candidate: ${error.message}`,
+            );
+            return true;
+        });
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('lock release only removes its own never-reused candidate path', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-lock-replacement-'));
     const lock = join(dir, 'state.lock');

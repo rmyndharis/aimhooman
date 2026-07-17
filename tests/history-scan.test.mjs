@@ -89,6 +89,33 @@ test('history object reads ignore local replacement refs', () => {
     }
 });
 
+test('git stderr from a passing history read is captured, not printed', () => {
+    const dir = repository();
+    try {
+        const head = git(dir, ['rev-parse', 'HEAD']);
+        // A --reference clone whose reference was deleted leaves a stale
+        // alternates file. Git then writes `error:` to stderr and still exits 0,
+        // so only the wrapper's stdio decides whether the user reads it, mixed
+        // in with aimhooman's own diagnostics on the same stream.
+        writeFileSync(join(dir, '.git/objects/info/alternates'), `${join(dir, 'gone', 'objects')}\n`);
+        const repo = openRepo(dir);
+
+        const leaked = [];
+        const write = process.stderr.write;
+        process.stderr.write = (chunk) => (leaked.push(String(chunk)), true);
+        try {
+            assert.equal(commitMessage(repo, head, head).message.trim(), 'base');
+            assert.equal(commitSnapshot(repo, head).entries.length, 1);
+            assert.equal(commitChanges(repo, head, head, []).entries.length, 1);
+        } finally {
+            process.stderr.write = write;
+        }
+        assert.equal(leaked.join(''), '');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('commit snapshot handles a root tree and unusual path names', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-history-root-'));
     try {
@@ -215,6 +242,30 @@ test('a likely reversed range warns without rejecting a valid empty range', () =
         const emptyHistory = historyRange(repo, 'HEAD..HEAD');
         assert.equal(emptyHistory.reversed, false);
         assert.equal(scanGitTarget(repo, { kind: 'range', range: 'HEAD..HEAD' }).complete, true);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('a range mixing clean and compliance is not reported as compliance', () => {
+    // Across the shipped packs compliance is not above clean: it allows the six
+    // attribution rules clean blocks or reviews, and no rule runs the other way.
+    // Nothing else in the code orders the two either. So the rank behind this
+    // field is only a tiebreak, and it must not name the profile that allows
+    // what the other blocks. Enforcement is per-commit and unaffected.
+    const dir = repository();
+    try {
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        writeFileSync(join(dir, 'one.txt'), 'one\n');
+        git(dir, ['add', 'one.txt']);
+        git(dir, ['commit', '-q', '-m', 'work under the default profile']);
+        writeFileSync(join(dir, '.aimhooman.json'), '{"schema_version":1,"profile":"compliance"}\n');
+        git(dir, ['add', '.aimhooman.json']);
+        git(dir, ['commit', '-q', '-m', 'adopt compliance']);
+
+        const report = scanGitTarget(openRepo(dir), { kind: 'range', range: `${base}..HEAD` });
+        assert.equal(report.policy_source, 'per-commit');
+        assert.equal(report.profile, 'clean');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

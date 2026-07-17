@@ -290,7 +290,17 @@ export function withLock(lockPath, fn, options = {}) {
             if (attempt + 1 < retries) waitForLock(retryDelayMs);
         }
         if (!held) {
-            throw new Error(`cannot acquire state lock "${lockPath}" after ${retries} attempts`);
+            // Name the queue, not just the lock. This scheme writes no file at lockPath;
+            // only the legacy holder checked above would, so a reader of this error
+            // usually goes looking for a path that is not there. What blocks is a
+            // candidate in the queue directory, retained because its owner cannot be
+            // disproved, and a holder killed outright never reaches the finally below
+            // that would have removed its own.
+            throw new Error(
+                `cannot acquire state lock "${lockPath}" after ${retries} attempts. Contenders `
+                + `queue in "${queueDir}"; if no other aimhooman command is running, a candidate `
+                + 'there outlived the process that published it, and removing that directory clears it',
+            );
         }
         return fn();
     } catch (error) {

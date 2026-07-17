@@ -13,6 +13,10 @@ function gitBuffer(repo, args, input) {
         encoding: 'buffer',
         maxBuffer: 128 * 1024 * 1024,
         timeout: GIT_TIMEOUT_MS,
+        // Same reason as gitBuf in gitx.mjs: without an explicit stdio,
+        // execFileSync echoes the child's stderr before it checks the exit
+        // status, so git's raw output reaches the terminal even on success.
+        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         ...(input === undefined ? {} : { input }),
     });
 }

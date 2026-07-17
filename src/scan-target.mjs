@@ -11,7 +11,16 @@ import { commitChanges, commitMessage, commitSnapshot, historyRange } from './hi
 import { DEFAULT_SCAN_LIMITS, scanEntries } from './scan-session.mjs';
 import { loadRulesWithDiagnostics } from './rules.mjs';
 
-const PROFILE_RANK = { clean: 0, compliance: 1, strict: 2 };
+// A tiebreak for the one profile a range report has to name, not a strength
+// lattice. Clean and compliance are not ordered against each other: compliance
+// allows the six attribution rules clean blocks or reviews, no shipped rule runs
+// the other way, and applyExplicitProfile refuses to move between them in either
+// direction. No single profile is truthful for a mixed range, so this only
+// settles which policy object gets reported — clean outranks compliance because
+// a value read as the strongest must not name the profile that allows what the
+// other blocks. Enforcement never reads this: each commit is scanned under its
+// own policy and the exit code uses each finding's own scanProfile.
+const PROFILE_RANK = { compliance: 0, clean: 1, strict: 2 };
 const REVIEW_REQUIRED_PATH_RULES = new Set([
     'generic.agent-instructions',
     'generic.project-policy',

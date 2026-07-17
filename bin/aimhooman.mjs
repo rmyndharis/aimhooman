@@ -59,6 +59,42 @@ function tone() {
     return process.env.AIMHOOMAN_TONE === 'professional' || process.env.CI ? 'professional' : 'playful';
 }
 
+// The per-scan budget sizes the `cat-file --batch` read buffer, so a value that
+// travelled with a clone would let a hostile repository drive the verifier out
+// of memory instead of being rejected by it. These stay in the environment for
+// that reason, never in .aimhooman.json, and a raise is capped for the same one.
+// Lowering needs no ceiling: a smaller budget only skips more, and a skip is
+// already an incomplete scan, which fails closed at 31.
+const MAX_SCAN_LIMIT_BYTES = 1 << 30;
+
+// Crossing a scan budget marks the scan incomplete on every profile, and an
+// incomplete scan is a ref update the reference-transaction hook refuses — the
+// one boundary --no-verify does not skip. A repository tracking a lockfile, an
+// image or a vendored bundle over the default therefore could not commit at all,
+// and "reduce the target or limits and retry" named something no flag, schema
+// field or config key could do. This is that knob.
+function scanLimits() {
+    const limits = {};
+    for (const [key, name] of [
+        ['maxFileBytes', 'AIMHOOMAN_MAX_FILE_BYTES'],
+        ['maxTotalBytes', 'AIMHOOMAN_MAX_TOTAL_BYTES'],
+    ]) {
+        const raw = process.env[name];
+        if (raw === undefined || raw === '') continue;
+        if (!/^\d+$/.test(raw)) {
+            throw new ArgumentError(`${name} must be a whole number of bytes; got "${visible(raw)}"`);
+        }
+        const value = Number(raw);
+        if (value < 1 || value > MAX_SCAN_LIMIT_BYTES) {
+            throw new ArgumentError(
+                `${name} must be between 1 and ${MAX_SCAN_LIMIT_BYTES} bytes; got ${raw}`
+            );
+        }
+        limits[key] = value;
+    }
+    return limits;
+}
+
 function configuredEngine(profile, repo) {
     const { engine, errors } = newEngineWithDiagnostics(profile, repo?.stateDir);
     if (errors.length && profile === 'strict') {
@@ -166,10 +202,16 @@ function incompleteMessage(scan) {
         .join(', ');
     // Every other reason is a size or budget the caller can shrink. A pack that
     // will not compile is not, and the warning above already names the file and
-    // the error, so point at that instead of misdirecting to the limits.
+    // the error, so point at that instead of misdirecting to the limits. When a
+    // byte budget is what stopped the scan, name the budget: the caller whose own
+    // tree outgrew it needs to raise one, and "reduce the limits" sends them the
+    // wrong way down a road they cannot leave.
+    const budgeted = reasons['size-limit'] || reasons['total-byte-limit'];
     const hint = reasons['local-pack-error']
         ? 'fix the reported rule pack and retry'
-        : 'reduce the target or limits and retry';
+        : budgeted
+            ? 'reduce the target, or raise AIMHOOMAN_MAX_FILE_BYTES / AIMHOOMAN_MAX_TOTAL_BYTES, and retry'
+            : 'reduce the target or limits and retry';
     return `aimhooman: scan incomplete${skipped ? ` (${skipped})` : ''}; ${hint}\n`;
 }
 
@@ -256,9 +298,10 @@ function cmdPrecommit(args) {
     parseNoArguments(args);
     const repo = tryRepo();
     if (!repo) { console.error('aimhooman: not a git repository'); return 30; }
+    const limits = scanLimits();
     let scan;
     try {
-        scan = scanGitTarget(repo, { kind: 'staged' });
+        scan = scanGitTarget(repo, { kind: 'staged', limits });
     } catch (e) {
         console.error(`aimhooman: cannot scan staged content: ${e.message}`);
         return expectedErrorCode(e);
@@ -328,7 +371,7 @@ function cmdPrecommit(args) {
         const empty = stagedBefore !== null
             && stagedBefore.every((path) => unstageTargets.has(path));
         process.stderr.write(
-            `aimhooman: unstaged ${paths.length} AI artifact(s) from this commit: ${paths.map(visible).join(', ')}${empty ? ' (nothing else staged — the commit will be empty)' : ''}\n`
+            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')}${empty ? ' (nothing else staged — the commit will be empty)' : ''}\n`
         );
     } catch (e) {
         process.stderr.write(
@@ -337,7 +380,14 @@ function cmdPrecommit(args) {
         );
         return 10;
     }
-    if (reviews.length) process.stderr.write(human(reviews, tone()));
+    // Seven of the rules that can reach the summary above are secret rules, so it
+    // cannot name a cause without guessing wrong for a private key or an AWS
+    // credential — and it used to be the only thing printed for a block. Let the
+    // findings speak instead: human() already carries the rule id, the path, the
+    // reason and the remediation, and already redacts secret text. It labels each
+    // one BLOCK, which is the decision that unstaged the path, not a stopped
+    // commit; the summary above says what actually happened to them.
+    process.stderr.write(human([...blocks, ...reviews], tone()));
     if (!scan.complete) process.stderr.write(incompleteMessage(scan));
     return scan.complete ? 0 : 31;
 }
@@ -380,12 +430,13 @@ function cmdCommitmsg(args) {
     }
     const text = messageBytes.toString('utf8');
     const validUtf8 = Buffer.from(text, 'utf8').equals(messageBytes);
+    const limits = scanLimits();
     let scan;
     let treeScan = null;
     try {
         const checked = againstWouldBeTree(() => ({
             message: scanMessage(repo, text, { target: 'staged' }),
-            tree: options.tree ? scanGitTarget(repo, { kind: 'staged' }) : null,
+            tree: options.tree ? scanGitTarget(repo, { kind: 'staged', limits }) : null,
         }));
         scan = checked.message;
         treeScan = checked.tree;
@@ -461,18 +512,12 @@ function cmdRefcheck(args) {
     if (phase === 'committed' || phase === 'aborted') return 0;
 
     const repo = tryRepo();
-    if (!repo) {
-        // Global hooks also run in bare repositories. Bare repositories have no
-        // worktree/index policy boundary and are intentionally unsupported, so
-        // a global dispatcher must remain transparent there instead of making
-        // every receive-pack or update-ref fail merely because --show-toplevel
-        // is unavailable.
-        if (currentRepositoryIsBare()) return 0;
-        console.error('aimhooman: not a git repository');
-        return 30;
-    }
     if (phase === 'preparing') {
-        return dispatchHooksChanged(repo, 'clean') ? 20 : 0;
+        // This phase never scans, and without a repository there is no
+        // dispatcher directory to inspect either. Git fires it while `git init`
+        // is still building the repository, so refusing here would only stop
+        // repository creation on behalf of a phase with nothing to say.
+        return repo && dispatchHooksChanged(repo, 'clean') ? 20 : 0;
     }
     let input;
     try { input = readFileSync(0, 'utf8'); }
@@ -497,6 +542,31 @@ function cmdRefcheck(args) {
         }
         if (/^0+$/.test(newObjectId)) continue;
         updates.push({ oldObjectId, newObjectId, ref });
+    }
+
+    if (!repo) {
+        // Git writes the initial HEAD inside a reference transaction and fires
+        // this hook while the repository is still being built: GIT_DIR is
+        // exported but nothing can be queried yet, so every rev-parse fails,
+        // --is-bare-repository included. The bare carve-out below therefore
+        // cannot speak for `git init` or `git init --bare`, and reading the
+        // silence as "not a git repository" aborted the transaction and left a
+        // half-built .git behind that a second `git init` could not repair.
+        // That payload is `0000..0000 ref:refs/heads/<name> HEAD`, which the
+        // symref filter above already dropped, so no policy-relevant update
+        // survives and there is nothing to scan. The scope is "the payload
+        // carries nothing", never "git failed to answer": a transaction holding
+        // a real object still demands a repository, so no one can disable the
+        // last veto by arranging for openRepo to fail.
+        if (!updates.length) return 0;
+        // Global hooks also run in bare repositories. Bare repositories have no
+        // worktree/index policy boundary and are intentionally unsupported, so
+        // a global dispatcher must remain transparent there instead of making
+        // every receive-pack or update-ref fail merely because --show-toplevel
+        // is unavailable.
+        if (currentRepositoryIsBare()) return 0;
+        console.error('aimhooman: not a git repository');
+        return 30;
     }
 
     let commits;
@@ -533,6 +603,7 @@ function cmdRefcheck(args) {
         console.error(`aimhooman: cannot resolve proposed commits: ${error.message}`);
         return 30;
     }
+    const limits = scanLimits();
     for (const [revision, reviewContexts] of commits) {
         let scan;
         try {
@@ -541,6 +612,7 @@ function cmdRefcheck(args) {
                 revision,
                 reviewContexts,
                 policyMigrationContexts: reviewContexts,
+                limits,
             });
         }
         catch (error) {
@@ -593,6 +665,7 @@ function cmdCheck(args) {
             return 30;
         }
     }
+    const limits = scanLimits();
     let scan;
     try {
         if (o.message && !o.staged && !o.tracked) {
@@ -606,6 +679,7 @@ function cmdCheck(args) {
                 revision: o.commit,
                 range: o.range,
                 explicitProfile: o.profile,
+                limits,
                 ...(o.message ? { messageText } : {}),
             });
         }
@@ -1537,7 +1611,18 @@ function cmdUninstall(args) {
     }
     return withLock(join(repo.commonDir, 'aimhooman-lifecycle.lock'), () => {
     const rep = uninstallHooks(repo);
-    removeExclude(repo.excludeFile);
+    // The irreversible work is already done above, and the report is still
+    // below. A throw from here unwound past all of it, so a damaged marker was
+    // the only thing the user heard while four dispatchers kept guarding every
+    // commit. Report the failure beside the removal report instead of in place
+    // of it. Nothing is swallowed: this is also where the symlink and permission
+    // guards surface, and their messages still reach the user and still exit 30.
+    let excludeFailure = '';
+    try {
+        removeExclude(repo.excludeFile);
+    } catch (error) {
+        excludeFailure = `exclude block left in ${repo.excludeFile}: ${error.message}`;
+    }
     // Trust the directory, not the report. Every refusal below leaves a working
     // dispatcher behind, and one printed under "uninstalled" reads as done.
     const remaining = remainingDispatchers(repo);
@@ -1552,6 +1637,7 @@ function cmdUninstall(args) {
     if (rep.restored.length) console.log(`  hooks restored: ${rep.restored.join(', ')}`);
     for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
     for (const f of rep.failures || []) console.error(`  failure: ${f}`);
+    if (excludeFailure) console.error(`  failure: ${excludeFailure}`);
     const unrestored = purge ? unrestoredChainedBackups(repo) : [];
     if (purge) {
         // Never wipe stateDir while a predecessor hook backup is still on disk:
@@ -1587,7 +1673,9 @@ function cmdUninstall(args) {
         console.log('  eligible non-bare repositories that inherit core.hooksPath are still guarded.');
         console.log('  run `aimhooman uninstall --global` to remove it.');
     }
-    return remaining.length || rep.failures?.length || unrestored.length ? 30 : 0;
+    // The managed block is still in the exclude file and still ignoring paths, so
+    // the uninstall is genuinely incomplete and 30 is the honest answer.
+    return remaining.length || rep.failures?.length || unrestored.length || excludeFailure ? 30 : 0;
     }, LIFECYCLE_LOCK_OPTIONS);
 }
 

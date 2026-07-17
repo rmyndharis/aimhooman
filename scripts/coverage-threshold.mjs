@@ -8,9 +8,24 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.mjs']);
 
-export const BRANCH_THRESHOLDS = Object.freeze({
-    src: 50,
-    bin: 35,
+// Per-file floors, one set per production directory. Node's own --test-coverage-lines
+// and --test-coverage-functions are project totals, so a well-covered majority carries a
+// bare file over them; only a per-file floor can see that file. Line and function here
+// match those totals, except src function, which sits at the lowest a shipped file holds
+// today. No floor is above the current tree, so each one moves the day a file stops
+// being exercised as well as it is now.
+export const THRESHOLDS = Object.freeze({
+    src: Object.freeze({ branch: 50, line: 75, function: 75 }),
+    bin: Object.freeze({ branch: 35, line: 75, function: 85 }),
+});
+
+// Branch coverage cannot stand in for the other two: V8 collapses a function that never
+// runs into one uncovered range without enumerating the branches inside it, so dropping
+// a function barely moves the branch number.
+const METRICS = Object.freeze({
+    branch: 'coveredBranchPercent',
+    line: 'coveredLinePercent',
+    function: 'coveredFunctionPercent',
 });
 
 function portablePath(path) {
@@ -32,7 +47,7 @@ function sourceFilesIn(root, directory, prefix = directory) {
 }
 
 export function productionSourceFiles(root = ROOT) {
-    return Object.keys(BRANCH_THRESHOLDS)
+    return Object.keys(THRESHOLDS)
         .flatMap((directory) => sourceFilesIn(root, directory))
         .sort();
 }
@@ -46,9 +61,9 @@ function relativeCoveragePath(root, path) {
     return portablePath(candidate);
 }
 
-function branchThreshold(path) {
+function thresholdsFor(path) {
     const directory = path.split('/', 1)[0];
-    return BRANCH_THRESHOLDS[directory];
+    return THRESHOLDS[directory];
 }
 
 export function evaluateCoverage(summary, {
@@ -63,19 +78,22 @@ export function evaluateCoverage(summary, {
     const covered = new Set();
     for (const file of summary.files) {
         const path = relativeCoveragePath(root, file?.path);
-        const threshold = path ? branchThreshold(path) : undefined;
-        if (threshold === undefined) continue;
+        const thresholds = path ? thresholdsFor(path) : undefined;
+        if (thresholds === undefined) continue;
         if (covered.has(path)) {
             failures.push(`${path}: duplicate coverage record`);
             continue;
         }
         covered.add(path);
-        if (!Number.isFinite(file.coveredBranchPercent)) {
-            failures.push(`${path}: branch coverage is missing`);
-        } else if (file.coveredBranchPercent < threshold) {
-            failures.push(
-                `${path}: branch coverage ${file.coveredBranchPercent.toFixed(2)}% is below ${threshold}%`,
-            );
+        for (const [metric, field] of Object.entries(METRICS)) {
+            const percent = file[field];
+            if (!Number.isFinite(percent)) {
+                failures.push(`${path}: ${metric} coverage is missing`);
+            } else if (percent < thresholds[metric]) {
+                failures.push(
+                    `${path}: ${metric} coverage ${percent.toFixed(2)}% is below ${thresholds[metric]}%`,
+                );
+            }
         }
     }
 
@@ -104,8 +122,11 @@ export default async function* coverageThresholdReporter(source) {
             process.exitCode = 1;
             yield `production coverage failed:\n${result.failures.map((failure) => `- ${failure}`).join('\n')}\n`;
         } else {
-            yield `production coverage passed for ${result.coveredFiles} files `
-                + `(src ${BRANCH_THRESHOLDS.src}% branch, bin ${BRANCH_THRESHOLDS.bin}% branch)\n`;
+            const held = Object.entries(THRESHOLDS).map(([directory, thresholds]) => (
+                `${directory} ${thresholds.branch}% branch, ${thresholds.line}% line, `
+                + `${thresholds.function}% function`
+            )).join('; ');
+            yield `production coverage passed for ${result.coveredFiles} files (${held})\n`;
         }
     }
 
