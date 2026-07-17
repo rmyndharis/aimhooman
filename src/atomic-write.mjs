@@ -111,6 +111,7 @@ function syncDirectory(directory, operations) {
 }
 
 const LOCK_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+const IDENTITY_PROBE_TIMEOUT_MS = 5_000;
 
 function waitForLock(milliseconds) {
     if (milliseconds > 0) Atomics.wait(LOCK_WAIT_BUFFER, 0, 0, milliseconds);
@@ -136,6 +137,12 @@ function processIdentity(pid) {
             const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
                 encoding: 'utf8',
                 stdio: ['ignore', 'pipe', 'ignore'],
+                // This is the only spawn on the lock path, and it runs on macOS
+                // and BSD alone: Linux reads /proc and Windows returns early.
+                // The retry loop below budgets milliseconds per attempt, so a
+                // probe that stalls must lose rather than stretch the loop. A
+                // timeout throws into the catch below, which fails safe.
+                timeout: IDENTITY_PROBE_TIMEOUT_MS,
             }).trim();
             return started ? `ps:${started}` : null;
         }
