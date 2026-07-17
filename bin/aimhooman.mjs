@@ -327,6 +327,7 @@ function cmdPrecommit(args) {
         return 10;
     }
     const paths = [...new Set(blocks.map((f) => f.path).filter(Boolean))];
+    let emptied = false;
     try {
         const unstageTargets = new Set(paths);
         for (const finding of blocks) {
@@ -335,15 +336,15 @@ function cmdPrecommit(args) {
             }
         }
         for (const source of stagedRenameSources(repo, paths)) unstageTargets.add(source);
-        // The empty-commit hint is derived from the staged paths captured before
-        // repair, not from a second git read after `git restore --staged`. That
-        // post-repair read followed an index write and could transiently report
-        // the wrong state under heavy CI load, flaking the repair tests.
-        // unstagePaths is atomic (it throws on failure), so when every staged
-        // path is a repair target the index matches HEAD afterward. The capture
-        // is best-effort and runs before the repair: if this read fails the
-        // unstage still runs and the hint is omitted (empty stays false) rather
-        // than skipping the repair or blocking the commit.
+        // Whether the repair empties the index is derived from the staged paths
+        // captured before repair, not from a second git read after
+        // `git restore --staged`. That post-repair read followed an index write
+        // and could transiently report the wrong state under heavy CI load,
+        // flaking the repair tests. unstagePaths is atomic (it throws on
+        // failure), so when every staged path is a repair target the index
+        // matches HEAD afterward. The capture is best-effort and runs before the
+        // repair: if this read fails the unstage still runs and the commit is
+        // left to proceed rather than blocked on a state we could not read.
         let stagedBefore;
         try {
             stagedBefore = stagedPaths(repo);
@@ -368,10 +369,10 @@ function cmdPrecommit(args) {
             if (!pending.length) break;
             unstagePaths(repo, pending);
         }
-        const empty = stagedBefore !== null
+        emptied = stagedBefore !== null
             && stagedBefore.every((path) => unstageTargets.has(path));
         process.stderr.write(
-            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')}${empty ? ' (nothing else staged — the commit will be empty)' : ''}\n`
+            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')}${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
         );
     } catch (e) {
         process.stderr.write(
@@ -389,6 +390,11 @@ function cmdPrecommit(args) {
     // commit; the summary above says what actually happened to them.
     process.stderr.write(human([...blocks, ...reviews], tone()));
     if (!scan.complete) process.stderr.write(incompleteMessage(scan));
+    // Git refuses a commit with nothing staged; repair runs after git has already
+    // decided otherwise, so carrying on here mints the empty commit git would
+    // not. The request was to commit the artifact, not to stamp the history with
+    // its message and no content.
+    if (emptied) return 10;
     return scan.complete ? 0 : 31;
 }
 

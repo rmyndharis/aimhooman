@@ -422,6 +422,12 @@ function hookPreToolUse(input) {
     // index still stops the commit here.
     const prefixHookBypass = opaqueCommitRisk
         || (commitPrefixRisk && (noVerify || bypassHooks || parsed.prefixHooksRisk));
+    // The same distinction, for the deny paths that ask "will anything scan this
+    // commit". hiddenBypass answers a different question — "should the backstop
+    // read the blobs" — and answering the first with the second refuses
+    // `build && git add . && git commit`, which is how most commits get made.
+    const guardBypass = noVerify || bypassHooks || parsed.uncertainShell
+        || prefixHookBypass || aliasBypass;
     const bypassContext = aliasBypass
         ? 'an inline Git alias cannot be proved to preserve the pre-commit guard'
         : prefixBypass
@@ -488,7 +494,7 @@ function hookPreToolUse(input) {
     const indexReplacement = parsed.commands.some((candidate) => (
         candidate.verb === 'commit' && candidate.indexMutationRisk
     ));
-    if (profile !== 'strict' && commit && hiddenBypass
+    if (profile !== 'strict' && commit && guardBypass
         && parsed.commands.some((c) => c.verb === 'commit' && c.futureIndex)) {
         if (indexReplacement) {
             return emitDecision(

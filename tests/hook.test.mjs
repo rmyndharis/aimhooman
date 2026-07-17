@@ -1634,6 +1634,45 @@ test('a prefix that names the hooks path still stops the commit', async () => {
     }
 });
 
+// `build && git add . && git commit` is how most commits get made. Each half is
+// already allowed on its own; only the pair was refused, because a staging step
+// plus any unmodelled prefix read as a bypass. pre-commit scans the real index at
+// commit time, so with the hooks intact there is nothing here this hook has to
+// answer for.
+test('an ordinary prefix before staging and committing is not treated as a bypass', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-prefix-add-');
+    try {
+        for (const command of [
+            'npm run build && git add . && git commit -m ship',
+            'npm test && git add -A && git commit -m x',
+            'ls && git add file.txt && git commit -m x',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out, null, `denied an everyday commit: ${command}`);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The same shape keeps the deny when the guard really is gone: the staged files
+// were never scanned and no pre-commit will run to scan them.
+test('a prefix before staging still stops the commit when the guard is bypassed', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-prefix-add-bypass-');
+    try {
+        for (const command of [
+            'npm run build && git add . && git commit --no-verify -m x',
+            'rm -rf .git/hooks && git add . && git commit -m x',
+            'npm run build && git add . && git -c core.hooksPath=/dev/null commit -m x',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', `allowed an unscannable commit: ${command}`);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 // The alias channel raises prefixRisk but is parsed separately, so a hooks-
 // removing prefix reached through an alias has no literal text to read. The
 // expansion is where the risk is named.
