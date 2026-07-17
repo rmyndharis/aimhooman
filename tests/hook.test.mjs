@@ -1543,17 +1543,227 @@ test('alternate and replaced Git indexes are denied before a clean no-verify com
         });
         assert.equal(replacement.permissionDecision, 'deny');
         assert.match(replacement.permissionDecisionReason, /replaces the Git index/);
-        const unmodelled = await invokePreToolUse(dir, {
-            tool_name: 'Bash',
-            tool_input: {
-                command: 'node mutate-index.mjs && git commit -m bypass',
-            },
-        });
-        assert.equal(unmodelled.permissionDecision, 'deny');
-        assert.match(unmodelled.permissionDecisionReason, /earlier unmodelled command/);
         assert.equal(gitValue(dir, 'rev-parse', 'HEAD'), beforeHead);
         assert.equal(gitValue(dir, 'write-tree'), beforeIndex);
         assert.doesNotMatch(gitValue(dir, 'ls-files'), /ordinary\.txt/);
+
+        // A script that names neither the index nor the hooks reads as ordinary,
+        // so the tool call proceeds. It really does swap the index underneath —
+        // what stops the secret is the guard it left alone. Run it, rather than
+        // assert against a fixture that never existed and a command that never
+        // ran.
+        const mutation = 'node mutate-index.mjs && git commit -m bypass';
+        writeFileSync(
+            join(dir, 'mutate-index.mjs'),
+            `import { copyFileSync } from 'node:fs';\n`
+            + `copyFileSync(${JSON.stringify(alternateIndex)}, ${JSON.stringify(defaultIndex)});\n`,
+        );
+        const unmodelled = await invokePreToolUse(dir, {
+            tool_name: 'Bash',
+            tool_input: { command: mutation },
+        });
+        assert.equal(unmodelled, null);
+        const execution = spawnSync(BASH, ['-c', mutation], { cwd: dir, encoding: 'utf8' });
+        assert.equal(execution.status, 0, execution.stderr);
+        assert.match(execution.stderr, /secret\.private-key-content/);
+        assert.doesNotMatch(
+            gitValue(dir, 'ls-tree', '-r', '--name-only', 'HEAD'),
+            /ordinary\.txt/,
+            'the swapped-in index reached the commit and the key was not committed',
+        );
+        assert.doesNotMatch(gitValue(dir, 'ls-files'), /ordinary\.txt/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// A command before `git commit` on the same line is not by itself a reason to
+// refuse. `<verify> && git commit` is how an agent gates a commit on its own
+// checks, and refusing it does not make the agent run the check separately — it
+// makes it drop the gate, or reach for a flag.
+test('an ordinary command before a commit is not treated as a hook bypass', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-prefix-ordinary-');
+    try {
+        for (const command of [
+            'npm test && git commit -m x',
+            'npm run build && git commit -m x',
+            'make && git commit -m x',
+            'pytest && git commit -m x',
+            'cargo build && git commit -m x',
+            './scripts/check.sh && git commit -m x',
+            'ls && git commit -m x',
+        ]) {
+            assert.equal(
+                await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                null,
+                command,
+            );
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The other half of the same decision: a prefix runs in the repo with write
+// access to the hooks, so one that names them keeps the deny. The opaque shapes
+// keep it too — a pipe into a shell has no argv to read a --no-verify out of, so
+// letting it through on the grounds that none is visible has it backwards.
+test('a prefix that names the hooks path still stops the commit', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-prefix-hooks-');
+    try {
+        for (const command of [
+            'cat script.sh | bash',
+            'rm -rf .git/hooks && git commit -m x',
+            'rm .git/hooks/pre-commit && git commit -m x',
+            'cp /tmp/payload .git/hooks/pre-commit && git commit -m x',
+            'sort -o .git/hooks/pre-commit /tmp/payload && git commit -m x',
+            'git config core.hooksPath /tmp/evil && git commit -m x',
+            "GIT_CONFIG_PARAMETERS='core.hooksPath=/dev/null' npm test && git commit -m x",
+            // An include carries a core.hooksPath of its own, so it removes the
+            // guard without ever naming it. The -c spelling of this already
+            // denies; the two must not disagree.
+            'git config include.path /tmp/evil.cfg && git commit -m x',
+            'git config includeif.gitdir:/tmp/.path /tmp/evil.cfg && git commit -m x',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', command);
+            assert.match(out.permissionDecisionReason, /earlier unmodelled command/, command);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The alias channel raises prefixRisk but is parsed separately, so a hooks-
+// removing prefix reached through an alias has no literal text to read. The
+// expansion is where the risk is named.
+test('an alias that repoints the hooks path still stops the commit', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-alias-hooks-');
+    try {
+        execFileSync('git', ['config', 'alias.setup', 'config core.hooksPath /tmp/evil'], { cwd: dir });
+        execFileSync('git', ['config', 'alias.pull-in', 'config include.path /tmp/evil.cfg'], { cwd: dir });
+        for (const command of [
+            'git setup && git commit -m x',
+            'git pull-in && git commit -m x',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', command);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// Letting an ordinary prefix through must not also let the staged-content
+// backstop go. The prefix stays part of hiddenBypass, so clean/compliance still
+// read the staged blobs and stop a secret that is already in the index.
+test('an ordinary command before a commit keeps the staged-secret backstop', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-prefix-secret-');
+    try {
+        writeFileSync(join(dir, '.env'), `AWS_SECRET_ACCESS_KEY=${'a'.repeat(40)}\n`);
+        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        const out = await invokePreToolUse(dir, {
+            tool_name: 'Bash',
+            tool_input: { command: 'npm test && git commit -m x' },
+        });
+        assert.equal(out?.permissionDecision, 'deny');
+        assert.match(out.permissionDecisionReason, /would be committed/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// An unknown verb is denied so it cannot route around the reference-transaction
+// guard. These five are builtins that move no ref at all, so the reasoning does
+// not reach them: git format-patch was being refused for failing to prove it
+// preserves a guard it never touches.
+test('read-only Git builtins are not denied as unknown subcommands', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-readonly-verbs-');
+    try {
+        for (const command of [
+            'git format-patch -1',
+            'git stripspace --strip-comments',
+            'git merge-tree HEAD HEAD',
+            'git commit-graph write',
+            'git rerere status',
+        ]) {
+            assert.equal(
+                await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                null,
+                command,
+            );
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// notes and maintenance are builtins too, but they do move refs — git notes add
+// fires reference-transaction on refs/notes/commits. They go on both lists, so
+// they keep the presence check that push and rebase already get.
+test('notes and maintenance keep the reference-transaction check', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-noting-verbs-');
+    const commands = ['git notes add -m note HEAD', 'git maintenance run'];
+    try {
+        for (const command of commands) {
+            assert.equal(
+                await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                null,
+                command,
+            );
+        }
+        unlinkSync(join(dir, '.git', 'hooks', 'reference-transaction'));
+        for (const command of commands) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', command);
+            assert.match(out.permissionDecisionReason, /reference-transaction.*unavailable/s, command);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// These are not builtins, so a repo-local alias of the same name wins whenever
+// the external binary is absent. The safe list skips alias resolution, so they
+// stay on the unknown path until a resolved candidate can be inspected.
+test('subcommands that an alias can shadow stay on the unknown path', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-external-verbs-');
+    try {
+        for (const command of [
+            'git lfs pull',
+            'git subtree pull --prefix vendor origin main',
+            'git svn rebase',
+            'git filter-branch --tree-filter true HEAD',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', command);
+            assert.match(out.permissionDecisionReason, /cannot prove.*subcommand or alias/, command);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// What makes the safe list safe for these verbs is that Git resolves a builtin
+// before an alias of the same name, so an alias cannot turn one of them into a
+// commit. That is an assumption about Git, not about this code, so run it.
+test('an alias cannot shadow a Git builtin on the safe list', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-builtin-alias-');
+    try {
+        execFileSync('git', ['config', 'alias.format-patch', '!git commit --no-verify -m alias'], { cwd: dir });
+        writeFileSync(join(dir, '.env'), `AWS_SECRET_ACCESS_KEY=${'a'.repeat(40)}\n`);
+        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        const before = gitValue(dir, 'rev-parse', 'HEAD');
+
+        const out = await invokePreToolUse(dir, {
+            tool_name: 'Bash',
+            tool_input: { command: 'git format-patch -1' },
+        });
+        assert.equal(out, null);
+        const execution = spawnSync(BASH, ['-c', 'git format-patch -1'], { cwd: dir, encoding: 'utf8' });
+        assert.equal(execution.status, 0, execution.stderr);
+        assert.equal(gitValue(dir, 'rev-parse', 'HEAD'), before, 'the alias must not have committed');
+        assert.match(gitValue(dir, 'ls-files'), /\.env/, 'the staged secret is still staged, not committed');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -2399,6 +2609,43 @@ function gitValue(cwd, ...args) {
     return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
+// Overriding the hooks path removes pre-commit, commit-msg and
+// reference-transaction at once, so nothing downstream can catch what this hook
+// waves through. --no-verify leaves reference-transaction running and keeps its
+// advisory path; these forms do not. Pinning only the -c spelling would leave the
+// GIT_CONFIG_* forms open while reading as closed, so the whole class is asserted
+// here — the same six forms tests/cli.test.mjs:661 already treats as one.
+test('clean denies a commit that removes the managed guards, in every override form', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aim-hookspath-'));
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+        execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: dir });
+        mkdirSync(join(dir, '.claude'), { recursive: true });
+        writeFileSync(join(dir, '.claude', 'session.json'), '{}');
+        execFileSync('git', ['add', '-f', '.claude/session.json'], { cwd: dir });
+
+        const commands = [
+            'git -c core.hooksPath=/dev/null commit -m x',
+            'git -c include.path=/tmp/evil.cfg commit -m x',
+            'git -c includeif.gitdir:/tmp/.path=/tmp/evil.cfg commit -m x',
+            'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x',
+            "GIT_CONFIG_PARAMETERS='core.hooksPath=/dev/null' git commit -m x",
+            'GIT_CONFIG_GLOBAL=/tmp/evil.cfg git commit -m x',
+        ];
+        for (const command of commands) {
+            const out = await invokePreToolUse(dir, {
+                tool_name: 'Bash',
+                tool_input: { command },
+            });
+            assert.equal(out.permissionDecision, 'deny', `allowed a guardless commit: ${command}`);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 async function invokePreToolUse(cwd, payload) {
     return invokePreToolUseRaw(cwd, JSON.stringify(payload));
 }
@@ -2456,5 +2703,36 @@ test('a failed .git/info/exclude refresh does not turn the staged verdict into a
     } finally {
         try { chmodSync(info, 0o700); } catch { /* best effort */ }
         rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The verdict block above proves a chmod cannot turn a deny into an allow. This
+// pins the other direction, which is the one the guard reaches far more often:
+// with nothing to object to it emits nothing and leaves the host's permission
+// rules in charge. An unwritable .git/info must not turn that silence into an
+// allow, which auto-approves the call and skips those rules.
+test('an unwritable .git/info produces the same verdict as a writable one', async () => {
+    for (const profile of ['clean', 'strict', 'compliance']) {
+        const dir = makeHookRepo(profile, `aim-hook-info-verdict-${profile}-`);
+        const info = join(dir, '.git', 'info');
+        try {
+            for (const command of ['git add README.md', 'cat README.md | tail']) {
+                const label = `${profile}: ${command}`;
+                const writable = await invokePreToolUse(dir, {
+                    tool_name: 'Bash',
+                    tool_input: { command },
+                });
+                chmodSync(info, 0o500);
+                const readOnly = await invokePreToolUse(dir, {
+                    tool_name: 'Bash',
+                    tool_input: { command },
+                });
+                chmodSync(info, 0o700);
+                assert.deepEqual(readOnly, writable, label);
+            }
+        } finally {
+            try { chmodSync(info, 0o700); } catch { /* best effort */ }
+            rmSync(dir, { recursive: true, force: true });
+        }
     }
 });

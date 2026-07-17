@@ -67,9 +67,11 @@ export function scanEntries(repo, engine, entries, options = {}) {
             increment(stats.skipped, 'binary');
             // Binary classification only skips text-oriented policy rules. Secret
             // signatures are ASCII byte sequences, so latin1 preserves a
-            // one-byte-to-one-code-unit view and prevents one NUL from hiding
-            // credential material while keeping the existing byte limits.
-            matched = engine.checkContent(entry.path, blob.toString('latin1'), {
+            // one-byte-to-one-code-unit view and keeps the existing byte limits.
+            // Stripping NULs is what defeats hiding credential material behind
+            // them: one injected NUL breaks a signature, and a multi-byte
+            // encoding like UTF-16 injects one per character.
+            matched = engine.checkContent(entry.path, blob.toString('latin1').replace(/\0/g, ''), {
                 categories: ['secret'],
             });
         } else {
@@ -113,6 +115,10 @@ function readObjects(repo, objectIds, expectedBytes = 0) {
         encoding: 'buffer',
         maxBuffer: Math.max(2 * 1024 * 1024, expectedBytes + unique.length * 256 + 1024),
         timeout: GIT_TIMEOUT_MS,
+        // Same reason as gitBuf in gitx.mjs: without an explicit stdio,
+        // execFileSync echoes the child's stderr before it checks the exit
+        // status, so git's raw output reaches the terminal even on success.
+        stdio: ['pipe', 'pipe', 'pipe'],
     });
     const objects = new Map();
     const failures = [];

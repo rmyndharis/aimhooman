@@ -231,6 +231,62 @@ test('uninstall --purge-state removes the shared state directory; plain uninstal
     }
 });
 
+test('a damaged exclude marker cannot swallow the uninstall report', {
+    skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, () => {
+    // uninstall does the irreversible work first — remove the dispatchers,
+    // restore any chained originals — then clears the managed excludes, and only
+    // then reports. Removing one of the two markers by hand made that clear
+    // throw, and the throw unwound past the whole report, including the check
+    // that exists because a surviving dispatcher printed under "uninstalled"
+    // reads as done. A read-only hooks directory keeps every dispatcher alive,
+    // so the user must be told they are still guarded.
+    const repo = createRepo('clean');
+    const hooks = gitPath(repo, 'hooks');
+    try {
+        const exclude = gitPath(repo, 'info/exclude');
+        writeFileSync(exclude, readFileSync(exclude, 'utf8')
+            .split('\n')
+            .filter((line) => !line.startsWith('# >>> aimhooman managed excludes'))
+            .join('\n'));
+        chmodSync(hooks, 0o500);
+
+        const uninstalled = run(repo, ['uninstall']);
+        assert.equal(uninstalled.status, 30, uninstalled.stdout + uninstalled.stderr);
+        assert.match(uninstalled.stderr, /NOT uninstalled; leaving dispatchers in place/);
+        assert.match(uninstalled.stderr, /reference-transaction/);
+        assert.match(uninstalled.stderr, /These still guard every commit/);
+        // The excludes failure is reported beside the removal report, not instead
+        // of it, and it still names what went wrong.
+        assert.match(uninstalled.stderr, /exclude block left in/);
+        assert.match(uninstalled.stderr, /markers are malformed/);
+    } finally {
+        chmodSync(hooks, 0o700);
+        cleanup(repo);
+    }
+});
+
+test('a non-regular exclude file still fails the uninstall loudly', {
+    skip: process.platform === 'win32',
+}, () => {
+    // The excludes read is the enforcement point for the symlink guard. Catching
+    // its throw must surface the message, never swallow it into a silent exit 0.
+    const repo = createRepo('clean');
+    try {
+        const exclude = gitPath(repo, 'info/exclude');
+        const elsewhere = join(repo.root, 'exclude-elsewhere');
+        writeFileSync(elsewhere, '');
+        rmSync(exclude);
+        symlinkSync(elsewhere, exclude);
+
+        const uninstalled = run(repo, ['uninstall']);
+        assert.equal(uninstalled.status, 30, uninstalled.stdout + uninstalled.stderr);
+        assert.match(uninstalled.stderr, /must be a regular file/);
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('override list, replacement, removal, reset, and path normalization are stable', () => {
     const repo = createRepo('clean');
     try {

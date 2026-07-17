@@ -285,6 +285,18 @@ function hookPreToolUse(input) {
                     "Run 'aimhooman init' and retry."
                 );
             }
+            // The hooks are installed but this command routes around them. Unlike
+            // --no-verify, which leaves reference-transaction to catch the ref
+            // update, an overridden hooks path removes every managed guard at
+            // once, so there is nothing downstream to delegate to. Persisting the
+            // same override already denies, so this keeps the two forms agreeing.
+            if (gitCommand.verb === 'commit' && gitCommand.hooksPathOverride) {
+                return emitDecision(
+                    'deny',
+                    'aimhooman cannot verify the managed pre-commit and reference-transaction guards for '
+                    + 'git commit when the command overrides the hooks path; run the commit without the override.'
+                );
+            }
             if (targetProfile !== 'strict') continue;
             if (parsed.uncertainShell || gitCommand.classification === 'uncertain') {
                 return emitDecision(
@@ -331,9 +343,9 @@ function hookPreToolUse(input) {
         }
     }
     let eng;
-    // diagnosticWarning is about the rule pack and drives the messages below;
+    // diagnosticWarning is about the rule pack and can stop a strict command;
     // hygieneWarning is housekeeping that never touches the decision. Kept apart
-    // so the "invalid local pack skipped" wording stays true.
+    // because only one of the two is ever grounds to deny.
     let diagnosticWarning = '';
     let hygieneWarning = '';
     try {
@@ -354,7 +366,9 @@ function hookPreToolUse(input) {
             : `aimhooman could not load policy rules: ${e.message}`;
         if (e?.name === 'LocalOverridesError') return emitDecision('deny', reason);
         if (profile === 'strict') return emitDecision('deny', reason);
-        return emitDecision('allow', `${reason}; continuing because profile=${profile}`);
+        // Rules that will not load are the least basis there is for granting an
+        // allow, and clean/compliance do not deny on them. Say nothing instead.
+        return 0;
     }
     // Refreshing the excludes is gitignore hygiene, not part of the verdict:
     // pre-commit never writes them and still answers. Kept out of the block
@@ -381,16 +395,33 @@ function hookPreToolUse(input) {
     // also a potential pre-commit bypass. Strict rejects it above; clean and
     // compliance still need the staged-content backstop so a hook mutation
     // cannot expose a secret that was already in the index.
-    const prefixBypass = parsed.commands.some((candidate) => (
+    const commitPrefixRisk = parsed.commands.some((candidate) => (
         (candidate.verb === 'commit' || candidate.verb === 'unknown')
         && candidate.prefixRisk
-    )) || (parsed.opaqueCommitHiding && parsed.commands.length === 0 && parsed.prefixRisk);
+    ));
+    // Nothing here was modelled, yet the shape can still hide a commit — a pipe
+    // into a shell, a fed script. There is no argv to read a --no-verify out of,
+    // which is the reason to refuse rather than a reason to let it past.
+    const opaqueCommitRisk = parsed.opaqueCommitHiding
+        && parsed.commands.length === 0
+        && parsed.prefixRisk;
+    const prefixBypass = commitPrefixRisk || opaqueCommitRisk;
     const aliasBypass = parsed.commands.some((candidate) => (
         (candidate.verb === 'commit' || candidate.verb === 'unknown')
         && candidate.inlineAliasRisk
     ));
     const hiddenBypass = noVerify || bypassHooks || parsed.uncertainShell
         || prefixBypass || aliasBypass;
+    // Being unmodelled is not the same as being a bypass. Once a commit has been
+    // read out of the command, a prefix earns the refusal below only when it can
+    // take the guard away: it names the hooks, or the commit already bypasses
+    // them. A build, a test run, ls — those leave pre-commit to answer, and
+    // refusing them taught agents to drop the `&&` gate rather than to run the
+    // command separately. hiddenBypass stays wider on purpose; it is what keeps
+    // the staged-content backstop reading the blobs, so a secret already in the
+    // index still stops the commit here.
+    const prefixHookBypass = opaqueCommitRisk
+        || (commitPrefixRisk && (noVerify || bypassHooks || parsed.prefixHooksRisk));
     const bypassContext = aliasBypass
         ? 'an inline Git alias cannot be proved to preserve the pre-commit guard'
         : prefixBypass
@@ -474,18 +505,17 @@ function hookPreToolUse(input) {
         );
     }
     if (blocks.length === 0) {
-        if (profile !== 'strict' && potentialCommit && prefixBypass) {
+        if (profile !== 'strict' && potentialCommit && prefixHookBypass) {
             return emitDecision(
                 'deny',
                 unmodelledPrefixReason,
             );
         }
-        if (diagnosticWarning) {
-            return emitDecision('allow', `aimhooman warning: ${diagnosticWarning}; invalid local pack skipped`);
-        }
-        if (hygieneWarning) {
-            return emitDecision('allow', `aimhooman warning: ${hygieneWarning}`);
-        }
+        // Nothing found and nothing to object to, so emit nothing and leave the
+        // host's permission rules in charge. An allow auto-approves the call and
+        // skips them, and neither warning is an opinion about this command: one
+        // is about the rule pack, the other about a housekeeping write. Both
+        // still reach the notes on the findings path below.
         return 0;
     }
 
@@ -505,7 +535,7 @@ function hookPreToolUse(input) {
             `aimhooman blocked this: ${bypassContext}, so ${reasonParts(blocks).join('; ')} would be committed. Run the commit separately without the bypass, or unstage it. AI works, hoomans ship.`,
         );
     }
-    if (profile !== 'strict' && potentialCommit && prefixBypass) {
+    if (profile !== 'strict' && potentialCommit && prefixHookBypass) {
         return emitDecision(
             'deny',
             unmodelledPrefixReason,
@@ -641,6 +671,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             classification: 'none',
             environmentRisk: [],
             prefixRisk: false,
+            prefixHooksRisk: false,
             addPaths,
             commands,
         };
@@ -656,6 +687,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
     const persistentEnvironmentRisk = new Set();
     let prefixRisk = false;
     let prefixIndexMutationRisk = false;
+    let prefixHooksRisk = false;
     let policyTransitionRisk = false;
     for (const unit of shellUnits(cmd)) {
         const precedingOperator = previousOperator;
@@ -792,6 +824,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         if (toks.length < 2) {
             if (toks.length && !READ_ONLY_SHELL_COMMANDS.has(basename(toks[0]))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
+                prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
                 prefixRisk = true;
             }
             continue;
@@ -838,6 +871,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             }
             if (!READ_ONLY_SHELL_COMMANDS.has(basename(g0))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
+                prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
                 prefixRisk = true;
                 if (CURRENT_SHELL_MUTATORS.has(shellExecutable(g0)) || definesShellFunction) {
                     shellTargetUncertain = true;
@@ -848,6 +882,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         let i = 1;
         let cwd = unwrapped.cwd;
         let commandBypass = environmentRisk.length > 0;
+        let commandHooksPathOverride = environmentRisk.some(gitConfigEnvName);
         let aliasResolutionRisk = !canResolveGitAlias(g0);
         let inlineAliasRisk = false;
         while (i < toks.length && toks[i].startsWith('-')) {
@@ -867,6 +902,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 i += 1;
             } else if (option === '-c' && toks[i + 1]) {
                 if (hookAffectingConfig(toks[i + 1])) commandBypass = true;
+                if (hooksPathOverrideConfig(toks[i + 1])) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(toks[i + 1])) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
@@ -874,6 +910,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 i += 2;
             } else if (option.startsWith('-c') && option.length > 2) {
                 if (hookAffectingConfig(option.slice(2))) commandBypass = true;
+                if (hooksPathOverrideConfig(option.slice(2))) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(option.slice(2))) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
@@ -881,6 +918,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 i += 1;
             } else if (option === '--config-env' && toks[i + 1]) {
                 if (hookAffectingConfig(toks[i + 1])) commandBypass = true;
+                if (hooksPathOverrideConfig(toks[i + 1])) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(toks[i + 1])) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
@@ -945,6 +983,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 cwd,
                 noVerify: false,
                 bypassHooks: commandBypass,
+                hooksPathOverride: commandHooksPathOverride,
                 futureIndex: true,
                 classification: 'uncertain',
                 environmentRisk,
@@ -970,6 +1009,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 cwd,
                 noVerify: commandNoVerify,
                 bypassHooks: commandBypass,
+                hooksPathOverride: commandHooksPathOverride,
                 futureIndex,
                 editorRisk: commitOptions.editorRisk,
                 classification: uncertainShell
@@ -1005,9 +1045,16 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             });
             sawAdd = true;
         } else if (verb === 'config') {
-            prefixRisk ||= gitConfigMayMutate(toks.slice(i + 1));
+            if (gitConfigMayMutate(toks.slice(i + 1))) {
+                prefixRisk = true;
+                prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
+            }
         } else if (verb === 'init') {
+            // init copies the hook templates into the hooks directory, and
+            // --separate-git-dir moves the directory itself, so the hooks read
+            // here are not necessarily the ones the commit runs.
             prefixRisk = true;
+            prefixHooksRisk = true;
         } else if (!SAFE_NON_COMMIT_GIT.has(verb)) {
             commands.push({
                 verb: 'unknown',
@@ -1096,6 +1143,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         classification,
         environmentRisk: unique(commands.flatMap((candidate) => candidate.environmentRisk || [])),
         prefixRisk,
+        prefixHooksRisk,
         addPaths,
         commands,
     };
@@ -1201,6 +1249,22 @@ function commandMayReplaceIndex(tokens, source) {
         || /\bgit\s+rev-parse\b[^;&|\n]*\b--git-path(?:=|\s+)index\b/i.test(text);
 }
 
+// The same shape, asking the other question a prefix raises: it runs in the repo
+// before Git starts, with write access to the hooks. A build or a test suite
+// cannot take pre-commit away; writing into the hooks directory or repointing
+// core.hooksPath can. Literal, like the index check above, so an ordinary
+// command does not read as a bypass merely for being unmodelled.
+// An include never names the hooks; it carries a core.hooksPath of its own and
+// the guard is gone all the same. hooksPathOverrideConfig already counts it for
+// the -c spelling, so leaving it out here would let the two spellings of one
+// bypass disagree.
+function commandMayTouchHooks(tokens, source) {
+    const text = `${tokens.join(' ')} ${source}`.replace(/\\/g, '/');
+    return /(?:^|[\s"'=/])\.git\/hooks(?:$|[\s"'/])/i.test(text)
+        || /\bhookspath\b/i.test(text)
+        || /\binclude(?:if\.[^\s"'=]*)?\.path\b/i.test(text);
+}
+
 const GIT_POLICY_TRANSITION_COMMANDS = new Set([
     'am', 'branch', 'checkout', 'cherry-pick', 'commit', 'merge', 'pull', 'read-tree', 'rebase',
     'replace', 'reset', 'restore', 'revert', 'rm', 'switch', 'symbolic-ref', 'update-index',
@@ -1211,9 +1275,9 @@ const GIT_POLICY_TRANSITION_COMMANDS = new Set([
 // safety boundary is the managed reference-transaction hook, so PreToolUse
 // must not let config/environment/prefix indirection disable that boundary.
 const GIT_REF_MUTATION_COMMANDS = new Set([
-    'am', 'bisect', 'branch', 'checkout', 'cherry-pick', 'fetch', 'merge', 'pull', 'push',
-    'rebase', 'remote', 'replace', 'reset', 'revert', 'stash', 'switch', 'symbolic-ref',
-    'update-ref', 'worktree',
+    'am', 'bisect', 'branch', 'checkout', 'cherry-pick', 'fetch', 'maintenance', 'merge', 'notes',
+    'pull', 'push', 'rebase', 'remote', 'replace', 'reset', 'revert', 'stash', 'switch',
+    'symbolic-ref', 'update-ref', 'worktree',
 ]);
 
 function gitCommandMayBypassRefGuard(verb, args = []) {
@@ -1289,17 +1353,25 @@ function gitConfigMayMutate(args) {
     return positionals.length > 1;
 }
 
+// A verb missing from this list is captured as 'unknown' before the ref-mutation
+// branch below is ever reached, so membership here is what lets a verb be
+// modelled at all. Ref-moving verbs need both lists, never this one alone.
 const SAFE_NON_COMMIT_GIT = new Set([
     'add', 'am', 'annotate', 'apply', 'archive', 'bisect', 'blame', 'branch', 'bundle', 'cat-file',
     'check-attr', 'check-ignore', 'check-mailmap', 'check-ref-format', 'checkout',
-    'cherry-pick', 'clean', 'clone', 'column', 'config', 'count-objects', 'credential', 'describe',
+    'cherry-pick', 'clean', 'clone', 'column', 'commit-graph', 'config', 'count-objects',
+    'credential', 'describe',
     'diff', 'diff-files', 'diff-index', 'diff-tree', 'difftool', 'fetch', 'for-each-ref',
-    'fsck', 'gc', 'grep', 'hash-object', 'help', 'index-pack', 'init', 'interpret-trailers',
-    'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge', 'merge-base', 'mktag', 'mktree', 'mv',
-    'name-rev', 'pack-objects', 'prune', 'pull', 'push', 'range-diff', 'read-tree', 'rebase',
-    'reflog', 'remote', 'repack', 'replace', 'reset', 'restore', 'rev-list', 'rev-parse', 'revert',
+    'format-patch', 'fsck', 'gc', 'grep', 'hash-object', 'help', 'index-pack', 'init',
+    'interpret-trailers',
+    'log', 'ls-files', 'ls-remote', 'ls-tree', 'maintenance', 'merge', 'merge-base', 'merge-tree',
+    'mktag', 'mktree', 'mv',
+    'name-rev', 'notes', 'pack-objects', 'prune', 'pull', 'push', 'range-diff', 'read-tree',
+    'rebase',
+    'reflog', 'remote', 'repack', 'replace', 'rerere', 'reset', 'restore', 'rev-list', 'rev-parse',
+    'revert',
     'rm', 'shortlog', 'show', 'show-branch', 'show-ref', 'sparse-checkout', 'stash', 'status',
-    'submodule', 'switch', 'symbolic-ref', 'tag', 'unpack-objects', 'update-index',
+    'stripspace', 'submodule', 'switch', 'symbolic-ref', 'tag', 'unpack-objects', 'update-index',
     'update-ref', 'verify-commit', 'verify-pack', 'verify-tag', 'version', 'whatchanged',
     'worktree', 'write-tree',
 ]);
@@ -1310,6 +1382,11 @@ function resolveGitAliases(parsed) {
     let aliasPolicyTransitionRisk = false;
     let aliasIndexMutationRisk = false;
     let aliasPrefixRisk = false;
+    // parseGit derives prefixHooksRisk from the literal command text, and an
+    // alias hides its expansion from that text entirely. Without this the alias
+    // channel raises prefixRisk but never the hooks half, so a hooks-removing
+    // prefix reached through an alias reads as an ordinary build step.
+    let aliasHooksRisk = false;
     for (const candidate of parsed.commands) {
         let resolved = candidate;
         if (candidate.verb === 'unknown') {
@@ -1344,6 +1421,8 @@ function resolveGitAliases(parsed) {
             || effective.indexMutationRisk
             || gitIndexMutationRisk(effective.verb, effective.args);
         aliasPrefixRisk ||= effective.verb === 'unknown' || effective.prefixMutationRisk;
+        aliasHooksRisk ||= Boolean(effective.prefixMutationRisk)
+            && commandMayTouchHooks(effective.args || [], effective.aliasExpansion || '');
     }
     const commitCommands = commands.filter((candidate) => (
         candidate.verb === 'commit' || candidate.verb === 'unknown'
@@ -1357,6 +1436,7 @@ function resolveGitAliases(parsed) {
         commit: commitCommands.length > 0,
         noVerify,
         bypassHooks,
+        prefixHooksRisk: Boolean(parsed.prefixHooksRisk || aliasHooksRisk),
         addPaths: [...parsed.addPaths, ...aliasAddPaths],
         commands,
         environmentRisk: unique(commitCommands.flatMap((candidate) => candidate.environmentRisk || [])),
@@ -1488,6 +1568,15 @@ function canResolveGitAlias(value) {
 function hookAffectingConfig(value) {
     const key = String(value).split('=', 1)[0];
     return /^(?:core\.(?:editor|hookspath)|sequence\.editor|include\.path|includeif\..+\.path|remote\..+\.receivepack)$/i.test(key);
+}
+
+// A narrower question than hookAffectingConfig: not "can this change how a hook
+// behaves" but "does this take the managed hooks away". core.editor and
+// sequence.editor leave pre-commit, commit-msg and reference-transaction
+// running; these do not.
+function hooksPathOverrideConfig(value) {
+    const key = String(value).split('=', 1)[0];
+    return /^(?:core\.hookspath|include\.path|includeif\..+\.path)$/i.test(key);
 }
 
 function aliasAffectingConfig(value) {
@@ -2566,16 +2655,22 @@ function updatePersistentEnvironment(words, risks) {
     return false;
 }
 
+// An assignment that can inject arbitrary Git config can set core.hooksPath, so
+// it can remove every managed hook. Named at the key level so both the
+// assignment list and the already-computed risk names can ask the same question.
+function gitConfigEnvName(key) {
+    if (key === 'GIT_CONFIG_PARAMETERS' || key === 'GIT_CONFIG_COUNT') return true;
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) return true;
+    if ([
+        'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
+    ].includes(key)) return true;
+    return ['HOME', 'XDG_CONFIG_HOME'].includes(key);
+}
+
 function gitConfigAssignmentsBypass(assignments) {
     return assignments.some((assignment) => {
         const separator = assignment.indexOf('=');
-        const key = assignment.slice(0, separator).toUpperCase();
-        if (key === 'GIT_CONFIG_PARAMETERS' || key === 'GIT_CONFIG_COUNT') return true;
-        if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) return true;
-        if ([
-            'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
-        ].includes(key)) return true;
-        return ['HOME', 'XDG_CONFIG_HOME'].includes(key);
+        return gitConfigEnvName(assignment.slice(0, separator).toUpperCase());
     });
 }
 

@@ -24,8 +24,13 @@ function run(cmd, args, cwd) {
     catch (e) { return { code: e.status, stderr: e.stderr }; }
 }
 
-function result(cmd, args, cwd, input) {
-    return spawnSync('node', [CLI, cmd, ...args], { cwd, input, encoding: 'utf8' });
+function result(cmd, args, cwd, input, env) {
+    return spawnSync('node', [CLI, cmd, ...args], {
+        cwd,
+        input,
+        encoding: 'utf8',
+        ...(env ? { env: { ...process.env, ...env } } : {}),
+    });
 }
 
 function globalFixtureEnv(home) {
@@ -111,6 +116,115 @@ test('precommit: a zero-similarity blocked rename restores the possible source d
         assert.equal(out.status, 0, out.stderr);
         assert.match(out.stderr, /commit will be empty/);
         const staged = execFileSync('git', ['diff', '--cached', '--name-status'], {
+            cwd: dir,
+            encoding: 'utf8',
+        }).trim();
+        assert.equal(staged, '');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a tracked file over the per-file scan budget wedges every commit until the budget is raised', () => {
+    // Crossing a scan budget marks the scan incomplete, an incomplete scan is 31
+    // on every profile, and 31 at the reference-transaction boundary is a ref
+    // update git refuses — a boundary --no-verify does not skip. A lockfile, an
+    // image or a vendored bundle over the 2 MiB default therefore stopped every
+    // commit in the repository, with nothing the owner could set to get out.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-scan-budget-'));
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+        // ~3.3 MiB of ordinary source: over the default per-file budget, and
+        // nothing any rule objects to.
+        writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 1;\n'.repeat(140000));
+        writeFileSync(join(dir, 'app.js'), 'export const x = 1;\n');
+        execFileSync('git', ['add', 'vendor.js', 'app.js'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'import the vendored bundle'], { cwd: dir });
+        execFileSync('node', [CLI, 'init', '--profile', 'clean'], { cwd: dir });
+
+        writeFileSync(join(dir, 'app.js'), 'export const x = 2;\n');
+        execFileSync('git', ['add', 'app.js'], { cwd: dir });
+
+        // The default budget is what wedges it: 2 MiB, which vendor.js crosses.
+        const wedged = spawnSync('git', ['commit', '-m', 'tweak one line'], {
+            cwd: dir,
+            encoding: 'utf8',
+        });
+        assert.notEqual(wedged.status, 0);
+        assert.match(wedged.stderr, /scan incomplete \(size-limit=1\)/);
+        // The only place a wedged repository learns the way out.
+        assert.match(wedged.stderr, /raise AIMHOOMAN_MAX_FILE_BYTES \/ AIMHOOMAN_MAX_TOTAL_BYTES/);
+
+        const raised = spawnSync('git', ['commit', '-m', 'tweak one line'], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { ...process.env, AIMHOOMAN_MAX_FILE_BYTES: String(8 << 20) },
+        });
+        assert.equal(raised.status, 0, raised.stdout + raised.stderr);
+        assert.equal(
+            execFileSync('git', ['log', '-1', '--format=%s'], { cwd: dir, encoding: 'utf8' }).trim(),
+            'tweak one line',
+        );
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the scan budget knob refuses a value that is not a byte count, and caps the raise', () => {
+    // The per-scan budget sizes the `cat-file --batch` read buffer, so an
+    // unbounded raise trades a fail-closed rejection for an out-of-memory kill
+    // of the verifier. A raise past the ceiling is refused rather than clamped
+    // silently, so nobody walks away thinking a budget took that never did.
+    const dir = makeRepo('clean');
+    try {
+        const junk = result('check', ['--tracked'], dir, undefined, {
+            AIMHOOMAN_MAX_FILE_BYTES: '2MB',
+        });
+        assert.equal(junk.status, 20, junk.stderr);
+        assert.match(junk.stderr, /AIMHOOMAN_MAX_FILE_BYTES must be a whole number of bytes/);
+
+        const huge = result('check', ['--tracked'], dir, undefined, {
+            AIMHOOMAN_MAX_TOTAL_BYTES: String(64 * (1 << 30)),
+        });
+        assert.equal(huge.status, 20, huge.stderr);
+        assert.match(huge.stderr, /AIMHOOMAN_MAX_TOTAL_BYTES must be between 1 and 1073741824 bytes/);
+
+        // Lowering needs no ceiling: a smaller budget only skips more, and a
+        // skipped file is already an incomplete scan.
+        writeFileSync(join(dir, 'notes.md'), 'a tracked file with some bytes in it\n');
+        execFileSync('git', ['add', 'notes.md'], { cwd: dir });
+        const lowered = result('check', ['--tracked'], dir, undefined, {
+            AIMHOOMAN_MAX_FILE_BYTES: '8',
+        });
+        assert.equal(lowered.status, 31, lowered.stderr);
+        assert.match(lowered.stderr, /scan incomplete \(size-limit=1\)/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('precommit: the clean repair reports the rule that took each file, not one guessed noun', () => {
+    // The repair line was the only output for a clean-profile block, and its noun
+    // was hardcoded to "AI artifact(s)". Seven of the rules that reach it are
+    // secret rules, so a private key and a live AWS key were announced as AI
+    // leftovers — asserting a false cause and withholding the true one at the one
+    // moment the answer is "rotate this credential".
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(
+            join(dir, 'id_rsa'),
+            '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n',
+        );
+        mkdirSync(join(dir, '.playwright-mcp'));
+        writeFileSync(join(dir, '.playwright-mcp/trace.json'), '{}');
+        execFileSync('git', ['add', '-f', 'id_rsa', '.playwright-mcp/trace.json'], { cwd: dir });
+
+        const out = result('precommit', [], dir);
+        assert.equal(out.status, 0, out.stderr);
+        assert.match(out.stderr, /unstaged 2 file\(s\) from this commit: /);
+        assert.doesNotMatch(out.stderr, /AI artifact/);
+        // Both categories are in the set, and each finding carries its own rule
+        // id, path and remediation instead of a shared label that fits neither.
+        assert.match(out.stderr, /secret\.private-key/);
+        assert.match(out.stderr, /id_rsa/);
+        assert.match(out.stderr, /\.playwright-mcp\/trace\.json/);
+        const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {
             cwd: dir,
             encoding: 'utf8',
         }).trim();
@@ -400,7 +514,11 @@ test('clean precommit fully unstages a blocked rename', () => {
         execFileSync('git', ['mv', 'README.md', '.env'], { cwd: dir });
         const out = result('precommit', [], dir);
         assert.equal(out.status, 0, out.stderr);
-        assert.match(out.stderr, /unstaged 1 AI artifact/);
+        // .env is a credential, not an AI leftover. The summary counts files and
+        // the stanza names the rule that took it.
+        assert.match(out.stderr, /unstaged 1 file\(s\)/);
+        assert.match(out.stderr, /secret\.dotenv/);
+        assert.doesNotMatch(out.stderr, /AI artifact/);
         const staged = execFileSync('git', ['diff', '--cached', '--name-status'], {
             cwd: dir,
             encoding: 'utf8',
@@ -1050,6 +1168,71 @@ test('global reference dispatcher stays transparent in unsupported bare reposito
         rmSync(bare, { recursive: true, force: true });
         rmSync(home, { recursive: true, force: true });
     }
+});
+
+test('global reference dispatcher stays transparent while a repository is still being created', () => {
+    // git writes the initial HEAD inside a reference transaction and fires this
+    // hook at `prepared`, when GIT_DIR is exported but nothing can be queried
+    // yet: every rev-parse there fails, --is-bare-repository included. Reading
+    // that as "not a git repository" aborted the transaction and left a .git
+    // behind that no second `git init` could repair.
+    const source = mkdtempSync(join(tmpdir(), 'aim-global-init-source-'));
+    const plain = mkdtempSync(join(tmpdir(), 'aim-global-init-plain-'));
+    const bare = mkdtempSync(join(tmpdir(), 'aim-global-init-bare-'));
+    const home = mkdtempSync(join(tmpdir(), 'aim-global-init-home-'));
+    const env = globalFixtureEnv(home);
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: source, env });
+        execFileSync('node', [CLI, 'init', '--global', '--yes'], { cwd: source, env });
+
+        const created = spawnSync('git', ['init', '-q'], { cwd: plain, env, encoding: 'utf8' });
+        assert.equal(created.status, 0, created.stderr);
+        assert.equal(
+            execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+                cwd: plain,
+                env,
+                encoding: 'utf8',
+            }).trim(),
+            'true',
+        );
+
+        const createdBare = spawnSync('git', ['init', '--bare', '-q'], {
+            cwd: bare,
+            env,
+            encoding: 'utf8',
+        });
+        assert.equal(createdBare.status, 0, createdBare.stderr);
+        assert.equal(
+            execFileSync('git', ['rev-parse', '--is-bare-repository'], {
+                cwd: bare,
+                env,
+                encoding: 'utf8',
+            }).trim(),
+            'true',
+        );
+    } finally {
+        rmSync(source, { recursive: true, force: true });
+        rmSync(plain, { recursive: true, force: true });
+        rmSync(bare, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test('refcheck goes transparent for an unqueryable repository only when no update survives', () => {
+    // The transparency above is scoped to "the payload carries nothing to scan",
+    // never to "git failed to answer". A transaction holding a real object still
+    // needs a repository and still fails closed without one.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-refcheck-unqueryable-'));
+    const zero = '0'.repeat(40);
+    try {
+        const symref = result('refcheck', ['prepared'], dir, `${zero} ref:refs/heads/main HEAD\n`);
+        assert.equal(symref.status, 0, symref.stderr);
+        assert.equal(symref.stderr, '');
+
+        const real = result('refcheck', ['prepared'], dir, `${zero} ${'a'.repeat(40)} refs/heads/main\n`);
+        assert.equal(real.status, 30, real.stderr);
+        assert.match(real.stderr, /not a git repository/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('init --global refuses when core.hooksPath is already set elsewhere', () => {

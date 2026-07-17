@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, realpathSync, readdirSync, rmSync, writeFileSync, mkdirSync, symlinkSync, truncateSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync, mkdirSync, symlinkSync, truncateSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -13,6 +13,7 @@ import {
     readStagedPath,
     stagedEntries,
     stagedPaths,
+    stagedRenameSources,
     trackedEntries,
     unmergedPaths,
     unstagePaths,
@@ -150,6 +151,63 @@ test('unstagePaths works on the initial commit (no HEAD)', () => {
     }
 });
 
+test('unstagePaths drops an index entry whose file changed on disk (no HEAD)', () => {
+    // An agent appends to its session log continuously, so the file moves on
+    // after `git add`. With no HEAD there is no tip to compare against, and
+    // `git rm --cached` refuses unless the staged blob still matches the file.
+    // Retrying never converges: the staged blob is frozen at `git add` time.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-gitx-nohead-drift-'));
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+    mkdirSync(join(dir, '.claude', 'projects'), { recursive: true });
+    const session = join(dir, '.claude/projects/session.jsonl');
+    writeFileSync(session, '{"turn":1}\n');
+    writeFileSync(join(dir, 'README.md'), 'x');
+    execFileSync('git', ['add', '.claude/projects/session.jsonl', 'README.md'], { cwd: dir });
+    writeFileSync(session, '{"turn":1}\n{"turn":2}\n');
+    const realCwd = process.cwd();
+    process.chdir(dir);
+    try {
+        const repo = openRepo();
+        unstagePaths(repo, ['.claude/projects/session.jsonl']);
+        assert.deepEqual(stagedPaths(repo), ['README.md']);
+        assert.equal(readFileSync(session, 'utf8'), '{"turn":1}\n{"turn":2}\n');
+    } finally {
+        process.chdir(realCwd);
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('policy path reads survive GIT_LITERAL_PATHSPECS in the environment', () => {
+    // `git --literal-pathspecs <cmd>` sets this for its hooks, so it arrives
+    // through ordinary use and not only a hostile environment. It disables
+    // pathspec magic globally, which turned `:(top,literal)<path>` into a
+    // literal filename no repository contains: git matched nothing and exited
+    // 0, and the read could not tell that apart from the policy being absent.
+    const dir = freshRepo();
+    const previous = process.env.GIT_LITERAL_PATHSPECS;
+    process.env.GIT_LITERAL_PATHSPECS = '1';
+    try {
+        const policy = '{"schema_version":1,"profile":"strict"}\n';
+        writeFileSync(join(dir, '.aimhooman.json'), policy);
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+        const repo = openRepo(dir);
+        const staged = readStagedPath(repo, '.aimhooman.json');
+        assert.equal(staged.status, 'present');
+        assert.equal(staged.content.toString(), policy);
+
+        commit(dir, 'add policy');
+        const committed = readCommitPath(repo, 'HEAD', '.aimhooman.json');
+        assert.equal(committed.status, 'present');
+        assert.equal(committed.content.toString(), policy);
+    } finally {
+        if (previous === undefined) delete process.env.GIT_LITERAL_PATHSPECS;
+        else process.env.GIT_LITERAL_PATHSPECS = previous;
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('stagedPaths returns the destination of a staged rename', () => {
     const dir = freshRepo();
     try {
@@ -164,6 +222,33 @@ test('stagedPaths returns the destination of a staged rename', () => {
         assert.equal(entry.type, 'blob');
         assert.equal(entry.size, 1);
         assert.match(entry.oid, /^[0-9a-f]{40,64}$/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('a low-similarity rename pairs its source instead of restoring every staged deletion', () => {
+    // Git reads a threshold without a % sign as a fraction, so --find-renames=1
+    // is 0.1, or 10%. A 3%-similar rename stays an add plus a delete there,
+    // which trips the zero-similarity fallback and drags every unrelated staged
+    // deletion back with it. 1% is the real floor and pairs the rename, so the
+    // fallback never runs.
+    const dir = freshRepo();
+    try {
+        const shared = Array.from({ length: 200 }, (_, i) => `common line number ${i}\n`);
+        writeFileSync(join(dir, 'notes.txt'), shared.join(''));
+        writeFileSync(join(dir, 'legacy.js'), 'dead module\n');
+        execFileSync('git', ['add', 'notes.txt', 'legacy.js'], { cwd: dir });
+        commit(dir, 'add fixture');
+
+        rmSync(join(dir, 'notes.txt'));
+        writeFileSync(join(dir, '.env'), shared.slice(0, 10).join('')
+            + Array.from({ length: 190 }, (_, i) => `zzzz totally different payload ${i}\n`).join(''));
+        execFileSync('git', ['add', '-A'], { cwd: dir });
+        execFileSync('git', ['rm', '-q', 'legacy.js'], { cwd: dir });
+
+        const repo = openRepo(dir);
+        assert.deepEqual(stagedRenameSources(repo, ['.env']), ['notes.txt']);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

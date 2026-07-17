@@ -10,8 +10,10 @@ import coverageThresholdReporter, {
     productionSourceFiles,
 } from '../scripts/coverage-threshold.mjs';
 
-function record(root, path, coveredBranchPercent) {
-    return { path: join(root, path), coveredBranchPercent };
+function record(root, path, coveredBranchPercent, coveredLinePercent = 100, coveredFunctionPercent = 100) {
+    return {
+        path: join(root, path), coveredBranchPercent, coveredLinePercent, coveredFunctionPercent,
+    };
 }
 
 test('coverage command limits aggregate metrics to production and attaches the per-file gate', () => {
@@ -72,6 +74,26 @@ test('production coverage fails for low, missing, invalid, and duplicate file re
         'src/scan.mjs: duplicate coverage record',
     ]);
     assert.deepEqual(evaluateCoverage(null).failures, ['coverage report has no file records']);
+});
+
+// Node's --test-coverage-lines and --test-coverage-functions are whole-project totals,
+// so a well-covered majority carries a bare file over them. Only a per-file floor can
+// see a function that stopped running, and branch coverage cannot stand in for one: V8
+// collapses an unexecuted function into a single uncovered range without enumerating
+// the branches inside it, so the branch number barely moves.
+test('production coverage floors lines and functions per file, not only branches', () => {
+    const root = join(tmpdir(), 'coverage-root');
+    const result = evaluateCoverage({
+        files: [record(root, 'src/scan.mjs', 88.24, 45.39, 55.56)],
+    }, {
+        root,
+        expectedFiles: ['src/scan.mjs'],
+    });
+
+    assert.deepEqual(result.failures, [
+        'src/scan.mjs: function coverage 55.56% is below 75%',
+        'src/scan.mjs: line coverage 45.39% is below 75%',
+    ]);
 });
 
 test('source discovery includes nested JavaScript files and ignores other files', () => {

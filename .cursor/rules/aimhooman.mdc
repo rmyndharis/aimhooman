@@ -11,7 +11,7 @@ This repository uses aimhooman to keep AI tooling artifacts out of Git history.
 Its policy:
 
 - Never stage or commit local AI session/state files. Examples include
-  `.claude.json`, `.claude/.credentials.json`, `.claude/session*.json`,
+  `.claude.json`, `.claude/session*.json`,
   `.claude/history*`, `.claude/todos/*`, `.claude/shell-snapshots/*`,
   `.claude/statsig/*`, `.claude/projects/*`, `.claude/logs/*`,
   `.codex/sessions/*`, `.codex/history*`, `.codex/log/*`, `.codex/logs/*`,
@@ -21,8 +21,10 @@ Its policy:
   exhaustive; the packaged `rules/paths.json` is the detection source of truth.
   If one is staged, unstage it and keep it out of Git instead.
 - Never commit secrets: a real `.env` (not `.env.example`), private keys
-  (`id_rsa` and files containing a private-key header), `.aws/credentials`, or
-  service-account keys. Public certificates are allowed.
+  (`id_rsa` and files containing a private-key header), `.aws/credentials`,
+  `.claude/.credentials.json`, service-account keys, or a provider API key
+  (GitHub, GitLab, npm, Slack, Anthropic, OpenAI, Google, Stripe, Hugging Face,
+  SendGrid). Public certificates are allowed.
 - Never add AI attribution to commit messages: no `Co-authored-by` trailer naming
   an AI (Claude, Copilot, Codex), no "Generated with/by <AI>" lines, no AI-service
   noreply emails. A commit message reads as if a human wrote it.

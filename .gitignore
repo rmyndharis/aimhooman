@@ -2,6 +2,7 @@ node_modules/
 
 # Local release-review working papers must never leave the workstation.
 docs/reviews/
+_docs/
 
 *.log
 .DS_Store

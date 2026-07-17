@@ -200,7 +200,7 @@ export function unmergedPaths(repo) {
 export function stagedRenameSources(repo, destinations) {
     const selected = new Set(destinations);
     if (!selected.size) return [];
-    const entries = diffEntries(repo, ['--cached'], 1);
+    const entries = diffEntries(repo, ['--cached'], '1%');
     const sources = new Set(entries
         .filter((entry) => entry.status === 'R' && selected.has(entry.path) && entry.sourcePath)
         .map((entry) => entry.sourcePath));
@@ -210,7 +210,9 @@ export function stagedRenameSources(repo, destinations) {
     // there is no exact source to recover. When a blocked destination remains an
     // add even at the lowest similarity threshold, conservatively restore every
     // staged deletion. This may unstage an unrelated deletion, but it never lets
-    // automatic repair silently commit half of a possible rename.
+    // automatic repair silently commit half of a possible rename. That threshold
+    // carries a % sign because git reads a bare 1 as the fraction 0.1, so -M1
+    // asks for 10% and leaves a 3%-similar rename here as an add plus a delete.
     if (entries.some((entry) => entry.status === 'A' && selected.has(entry.path))) {
         for (const entry of entries) {
             if (entry.status === 'D') sources.add(entry.path);
@@ -226,8 +228,13 @@ export function readStagedPath(repo, path) {
     const target = 'staged';
     let records;
     try {
+        // The --literal-pathspecs flag rather than :(top,literal) magic: magic
+        // parsing is disabled by GIT_LITERAL_PATHSPECS in the environment, which
+        // would leave the pathspec a literal filename no repository contains, so
+        // git matched nothing and the read reported the policy absent. cwd is
+        // already repo.root, which is what the top magic was for.
         records = nulStrings(gitBuf([
-            'ls-files', '--stage', '-z', '--', `:(top,literal)${path}`,
+            '--literal-pathspecs', 'ls-files', '--stage', '-z', '--', path,
         ], repo.root));
     } catch (error) {
         throw new GitTargetReadError(target, path, gitErrorDetail(error), error);
@@ -274,7 +281,7 @@ export function readCommitPath(repo, revision, path) {
     let records;
     try {
         records = nulStrings(gitBuf([
-            'ls-tree', '--full-tree', '-z', oid, '--', `:(top,literal)${path}`,
+            '--literal-pathspecs', 'ls-tree', '--full-tree', '-z', oid, '--', path,
         ], repo.root));
     } catch (error) {
         throw new GitTargetReadError(target, path, gitErrorDetail(error), error);
@@ -483,8 +490,13 @@ export function unstagePaths(repo, paths) {
             '--pathspec-from-file=-', '--pathspec-file-nul',
         ], opts);
     } else {
+        // -f waives only the check that the staged blob still matches the file
+        // on disk. With no HEAD that check has nothing else to pass against, so
+        // an artifact appended to between `git add` and `git commit` could never
+        // be unstaged. --cached leaves the worktree alone either way, and the
+        // sibling `restore --staged` branch enforces no equivalent check.
         execFileSync('git', [
-            '--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch',
+            '--literal-pathspecs', 'rm', '--cached', '-f', '--quiet', '--ignore-unmatch',
             '--pathspec-from-file=-', '--pathspec-file-nul',
         ], opts);
     }

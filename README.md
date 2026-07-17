@@ -154,8 +154,11 @@ ignores `.git/hooks`. Repository `init` installs and chains predecessors only wh
 that directory is absent or is proven to be owned by the repository: inside it and
 not tracked by Git. It refuses to modify a global, shared, external, or tracked
 hook directory, because a dispatcher committed from one machine names paths that
-exist only on that machine. In that case, integrate
-aimhooman into the existing hook manager or remove the override before retrying.
+exist only on that machine. Those repositories are not guarded, and there is no
+way to guard them today. Calling `aimhooman precommit` from an existing hook
+manager runs the check but registers no managed guard, so the agent hook still
+refuses the commit. Remove the override before retrying, or accept that the
+repository is unguarded and do not run `init` there.
 
 Repository `init` installs `pre-commit`, `pre-merge-commit`, `commit-msg`, and
 `reference-transaction`, and preserves an existing hook as a predecessor. For
@@ -238,7 +241,8 @@ files automatically.
   `.agent/`. [`rules/paths.json`](rules/paths.json) is the complete catalog.
 - **Secrets**: a real `.env` (not `.env.example`), private-key content,
   `.aws/credentials`, service-account private keys, recognized AWS secret/session
-  assignments, and provider token prefixes for GitHub, GitLab, npm, and Slack.
+  assignments, and provider token prefixes for GitHub, GitLab, npm, Slack,
+  Anthropic, OpenAI, Google, Stripe, Hugging Face, and SendGrid.
   Public certificates are allowed.
 - **AI attribution** in commit messages: known AI `Co-authored-by:` identities,
   exact "Generated with/by ..." lines, and AI-service noreply attribution trailers.
