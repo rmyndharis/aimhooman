@@ -331,7 +331,11 @@ function hookPreToolUse(input) {
         }
     }
     let eng;
+    // diagnosticWarning is about the rule pack and drives the messages below;
+    // hygieneWarning is housekeeping that never touches the decision. Kept apart
+    // so the "invalid local pack skipped" wording stays true.
     let diagnosticWarning = '';
+    let hygieneWarning = '';
     try {
         const loaded = repo
             ? engineForPolicy(repo, policy, policy.head)
@@ -344,7 +348,6 @@ function hookPreToolUse(input) {
                 return emitDecision('deny', `aimhooman strict policy could not load local rules: ${diagnosticWarning}`);
             }
         }
-        if (repo) applyExclude(repo.excludeFile, patternsForRules(eng.rules));
     } catch (e) {
         const reason = e?.name === 'LocalOverridesError'
             ? `aimhooman cannot load local overrides: ${e.message}`
@@ -352,6 +355,17 @@ function hookPreToolUse(input) {
         if (e?.name === 'LocalOverridesError') return emitDecision('deny', reason);
         if (profile === 'strict') return emitDecision('deny', reason);
         return emitDecision('allow', `${reason}; continuing because profile=${profile}`);
+    }
+    // Refreshing the excludes is gitignore hygiene, not part of the verdict:
+    // pre-commit never writes them and still answers. Kept out of the block
+    // above so a read-only .git/info (CI checkout, read-only volume, a
+    // repository owned by another user) cannot decide what is allowed.
+    if (repo) {
+        try {
+            applyExclude(repo.excludeFile, patternsForRules(eng.rules));
+        } catch (e) {
+            hygieneWarning = `could not refresh ${repo.excludeFile}: ${e.message}`;
+        }
     }
     // A strict policy cannot make a meaningful guarantee if Git's own guards
     // are explicitly bypassed. Deny before the shell can stage-and-commit in a
@@ -469,6 +483,9 @@ function hookPreToolUse(input) {
         if (diagnosticWarning) {
             return emitDecision('allow', `aimhooman warning: ${diagnosticWarning}; invalid local pack skipped`);
         }
+        if (hygieneWarning) {
+            return emitDecision('allow', `aimhooman warning: ${hygieneWarning}`);
+        }
         return 0;
     }
 
@@ -496,10 +513,8 @@ function hookPreToolUse(input) {
     }
     const guarded = repo && !bypassed && installedHooks(repo).includes('pre-commit');
     const advisory = advisoryReason(blocks, guarded, bypassed ? bypassContext : '');
-    return emitDecision(
-        'allow',
-        diagnosticWarning ? `${advisory} Warning: ${diagnosticWarning}.` : advisory
-    );
+    const notes = [diagnosticWarning, hygieneWarning].filter(Boolean).join('; ');
+    return emitDecision('allow', notes ? `${advisory} Warning: ${notes}.` : advisory);
 }
 
 function toolName(i) {

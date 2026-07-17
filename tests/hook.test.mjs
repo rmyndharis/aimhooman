@@ -2431,3 +2431,30 @@ async function invokePreToolUseRaw(cwd, rawPayload) {
     }
     return writes.length ? JSON.parse(writes.join('')) : null;
 }
+
+test('a failed .git/info/exclude refresh does not turn the staged verdict into allow', async () => {
+    // Refreshing .git/info/exclude is gitignore hygiene: pre-commit never writes
+    // it and still answers. A write failure there must not decide whether a
+    // command is allowed. A read-only .git/info is ordinary — CI checkouts,
+    // read-only volumes, a repository owned by another user.
+    const dir = makeHookRepo('clean', 'aim-hook-exclude-ro-');
+    const info = join(dir, '.git', 'info');
+    const command = 'git commit --no-verify -m x';
+    try {
+        writeFileSync(join(dir, '.env'), `AWS_SECRET_ACCESS_KEY=${'a'.repeat(40)}\n`);
+        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+
+        const control = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+        assert.equal(control.permissionDecision, 'deny', 'control: the guard sees the staged secret');
+
+        chmodSync(info, 0o500);
+        const readOnly = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+        assert.equal(readOnly.permissionDecision, 'deny', readOnly.permissionDecisionReason);
+        assert.match(readOnly.permissionDecisionReason, /secret\.dotenv|secret\.aws-key-content/);
+        // The rules loaded fine; only the housekeeping write failed.
+        assert.doesNotMatch(readOnly.permissionDecisionReason, /could not load policy rules/);
+    } finally {
+        try { chmodSync(info, 0o700); } catch { /* best effort */ }
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
