@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, lstatSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
 import { newEngineWithDiagnostics } from '../src/scan.mjs';
 import { exitCode, human, jsonReport, visible } from '../src/report.mjs';
 import {
@@ -47,6 +48,7 @@ function currentRepositoryIsBare() {
         return execFileSync('git', ['rev-parse', '--is-bare-repository'], {
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: GIT_TIMEOUT_MS,
         }).trim() === 'true';
     } catch {
         return false;
@@ -199,6 +201,7 @@ function gitConfigAtScope(root, scope, key) {
             cwd: root,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: GIT_TIMEOUT_MS,
         }).trim();
     } catch {
         return '';
@@ -206,7 +209,7 @@ function gitConfigAtScope(root, scope, key) {
 }
 
 function gitVersion() {
-    try { return execFileSync('git', ['--version'], { encoding: 'utf8' }).trim(); }
+    try { return execFileSync('git', ['--version'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim(); }
     catch { return 'Git unavailable'; }
 }
 
@@ -656,7 +659,7 @@ function cmdInit(args) {
         const aimDir = globalHooksDir();
         let existing = '';
         try {
-            existing = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+            existing = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
         } catch { /* unset */ }
         if (existing && existing !== aimDir) {
             console.error(
@@ -669,7 +672,7 @@ function cmdInit(args) {
         // could silently disable a system-wide hook manager, so refuse here too.
         let systemHooksPath = '';
         try {
-            systemHooksPath = execFileSync('git', ['config', '--system', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+            systemHooksPath = execFileSync('git', ['config', '--system', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
         } catch { /* unset or no system config */ }
         if (systemHooksPath) {
             console.error(
@@ -693,7 +696,7 @@ function cmdInit(args) {
                 console.error('aimhooman: global hook installation aborted; core.hooksPath was not changed');
                 return 20;
             }
-            execFileSync('git', ['config', '--global', 'core.hooksPath', rep.dir]);
+            execFileSync('git', ['config', '--global', 'core.hooksPath', rep.dir], { timeout: GIT_TIMEOUT_MS });
         } catch (error) {
             const rollbackFailures = [];
             for (const snapshot of hookSnapshots.reverse()) {
@@ -703,8 +706,8 @@ function cmdInit(args) {
                 }
             }
             try {
-                if (existing) execFileSync('git', ['config', '--global', 'core.hooksPath', existing]);
-                else execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: 'ignore' });
+                if (existing) execFileSync('git', ['config', '--global', 'core.hooksPath', existing], { timeout: GIT_TIMEOUT_MS });
+                else execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
             } catch (rollbackError) {
                 rollbackFailures.push(`global core.hooksPath: ${rollbackError.message}`);
             }
@@ -1492,7 +1495,7 @@ function cmdUninstall(args) {
         const aimDir = globalHooksDir();
         const readGlobalHooksPath = () => {
             try {
-                return execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+                return execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
             } catch { return ''; }
         };
         const current = readGlobalHooksPath();
@@ -1500,7 +1503,7 @@ function cmdUninstall(args) {
         if (current === aimDir) {
             unsetAttempted = true;
             try {
-                execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: ['ignore', 'ignore', 'ignore'] });
+                execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: ['ignore', 'ignore', 'ignore'], timeout: GIT_TIMEOUT_MS });
             } catch { /* may have failed; re-verify below */ }
             // A read-only or locked ~/.gitconfig can make --unset fail silently.
             // Do not remove the dispatchers while core.hooksPath still resolves to
@@ -1576,6 +1579,7 @@ function cmdUninstall(args) {
     try {
         globalHooksPath = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], {
             encoding: 'utf8',
+            timeout: GIT_TIMEOUT_MS,
         }).trim();
     } catch { /* unset */ }
     if (globalHooksPath === aimDir) {

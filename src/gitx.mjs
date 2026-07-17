@@ -458,8 +458,23 @@ export function unstagePaths(repo, paths) {
     };
     let hasHead = true;
     try {
-        execFileSync('git', ['rev-parse', '--verify', 'HEAD'], opts);
-    } catch {
+        // Deliberately not `opts`: rev-parse never reads stdin, so feeding it the
+        // pathspec makes git exit before draining the pipe, and a pathspec over the
+        // ~64 KiB pipe buffer fails the write with EPIPE. That read as "no HEAD" and
+        // sent a repository that has one down the `rm --cached` branch, staging the
+        // deletion of every tracked path this was asked to restore.
+        execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+            cwd: repo.root,
+            env: gitEnvironment(),
+            timeout: GIT_TIMEOUT_MS,
+            stdio: ['ignore', 'ignore', 'pipe'],
+        });
+    } catch (error) {
+        // Only git's own verdict may select the branch. An unborn HEAD exits 128;
+        // a timeout or a missing git carries no exit status, and guessing "no HEAD"
+        // there would delete instead of restore. Fail closed and let the caller stop
+        // the commit rather than silently rewrite the index.
+        if (typeof error?.status !== 'number') throw error;
         hasHead = false;
     }
     if (hasHead) {

@@ -24,6 +24,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Unstaging residue no longer stages the deletion of tracked files. The HEAD probe
+  reused the options object carrying the pathspec on stdin, and `git rev-parse`
+  never reads stdin, so once the pathspec passed the 64 KiB pipe buffer the write
+  failed with `EPIPE`. The catch read that as "this repository has no HEAD" and ran
+  `git rm --cached` where `git restore --staged` was meant, staging the deletion of
+  every tracked path it had been asked to restore, printing "unstaged N AI
+  artifact(s)", and exiting 0 so the commit carried the deletions into history. It
+  takes roughly 470 paths to cross that buffer, which a tracked `.claude/projects/`
+  tree passes without trying, and the repair loop could not see it: the staged
+  deletions read as still-staged, so it retried, made no progress, and reported
+  success anyway. The probe no longer receives the pathspec, and only git's own exit
+  status may pick the branch — a timeout or a missing git stops the commit instead
+  of guessing that HEAD is absent. Present since 0.1.0.
+- A stuck `git` no longer holds a repository open indefinitely. `execFileSync` has
+  no default timeout, so a child that never exited blocked its caller for as long as
+  it lived, with nothing printed and nothing logged; one held a CI runner for six
+  hours and died to the platform's ceiling rather than to anything here. Every child
+  process now carries a bound: 120 seconds for git, far above any real call, and 5
+  seconds for the `ps` identity probe, which runs inside the lock retry loop and only
+  on macOS and BSD (Linux reads `/proc`, Windows returns early). Both throw into the
+  handling that was already there, so a bounded failure degrades the way a missing
+  git already did instead of hanging. A test walks `src/` and `bin/` and fails on any
+  child process without a bound.
 - Renaming or moving a repository no longer freezes it. The dispatcher bakes
   absolute paths, so a move changes the `CHAINED` value it carries, and ownership
   was decided by comparing that string — overruling the SHA-256 fingerprint on the
@@ -60,8 +83,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported cause ("could not load policy rules") named the wrong thing. Refreshing
   the excludes is gitignore hygiene, which `pre-commit` never does and still
   answers correctly, so it now runs outside the verdict and reports as a warning.
-
-### Fixed
 
 - A local rule pack that cannot load no longer produces a report claiming a
   complete scan. `strict` already failed closed, but `clean` and `compliance`
