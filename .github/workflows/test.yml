@@ -74,3 +74,19 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/scan-ci-history.mjs
+
+  # The only required status check. It stands in for the whole matrix, so matrix
+  # entries can come and go without editing branch protection.
+  gate:
+    needs: test
+    # Without always(), a failed matrix skips this job, and a skipped required
+    # check never reports: the pull request would wait forever instead of failing.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every test job to succeed
+        env:
+          RESULT: ${{ needs.test.result }}
+        run: |
+          [ "$RESULT" = success ] || { echo "test matrix: $RESULT"; exit 1; }
