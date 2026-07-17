@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GIT_TIMEOUT_MS } from './git-environment.mjs';
 import { newEngineWithDiagnostics } from './scan.mjs';
 import { openRepo, stagedEntries } from './gitx.mjs';
 import { applyExclude, patternsForRules } from './exclude.mjs';
@@ -1228,7 +1229,12 @@ function configuredPushReceiver(repo) {
         return execFileSync(
             'git',
             ['config', '--get-regexp', '^remote\\..*\\.receivepack$'],
-            { cwd: repo.root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+            {
+                cwd: repo.root,
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+                timeout: GIT_TIMEOUT_MS,
+            },
         ).trim().length > 0;
     } catch (error) {
         if (error?.status === 1) return false;
@@ -1463,6 +1469,7 @@ function readGitAlias(cwd, name) {
             cwd,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: GIT_TIMEOUT_MS,
         }).trim();
     } catch {
         return null;

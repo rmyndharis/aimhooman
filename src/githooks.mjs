@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { GIT_TIMEOUT_MS } from './git-environment.mjs';
 import {
     accessSync,
     chmodSync,
@@ -98,7 +99,7 @@ function trackedPath(repo, path) {
         return execFileSync(
             'git',
             ['--literal-pathspecs', 'ls-files', '-z', '--', String(path)],
-            { cwd: repo.root, encoding: 'utf8' }
+            { cwd: repo.root, encoding: 'utf8', timeout: GIT_TIMEOUT_MS }
         ).length > 0;
     } catch {
         return true;
@@ -128,13 +129,14 @@ function effectiveHooksDir(repo) {
         return execFileSync(
             'git',
             ['rev-parse', '--path-format=absolute', '--git-path', 'hooks'],
-            { cwd: repo.root, encoding: 'utf8' }
+            { cwd: repo.root, encoding: 'utf8', timeout: GIT_TIMEOUT_MS }
         ).trim();
     } catch {
         try {
             const path = execFileSync('git', ['rev-parse', '--git-path', 'hooks'], {
                 cwd: repo.root,
                 encoding: 'utf8',
+                timeout: GIT_TIMEOUT_MS,
             }).trim();
             return isAbsolute(path) ? path : resolve(repo.root, path);
         } catch {
@@ -148,6 +150,7 @@ function configScope(repo, key) {
         const line = execFileSync('git', ['config', '--show-scope', '--get', key], {
             cwd: repo.root,
             encoding: 'utf8',
+            timeout: GIT_TIMEOUT_MS,
         }).trim();
         return line.split(/\s/, 1)[0];
     } catch {
@@ -158,6 +161,7 @@ function configScope(repo, key) {
             execFileSync('git', ['config', '--local', '--get', key], {
                 cwd: repo.root,
                 stdio: ['ignore', 'ignore', 'ignore'],
+                timeout: GIT_TIMEOUT_MS,
             });
             return 'local';
         } catch {
