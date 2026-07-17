@@ -318,6 +318,43 @@ test('tracked entries read the current index', () => {
     }
 });
 
+// The companion test below stages the same volume but on paths absent from HEAD,
+// where restoring and removing converge on an empty index diff. Tracking them
+// first separates the two: restore --staged returns the file to its committed
+// content, while rm --cached stages its deletion.
+test('unstagePaths restores tracked files rather than deleting them when the pathspec exceeds the pipe buffer', () => {
+    const dir = freshRepo();
+    try {
+        const paths = [];
+        for (let i = 0; i < 500; i++) {
+            const path = `tracked-${String(i).padStart(3, '0')}-${'x'.repeat(128)}`;
+            paths.push(path);
+            writeFileSync(join(dir, path), 'committed');
+        }
+        const pathspecs = Buffer.from(paths.join('\0') + '\0');
+        assert.ok(pathspecs.length > 65536, 'fixture must exceed the 64 KiB pipe buffer');
+        const stage = () => execFileSync('git', [
+            '--literal-pathspecs', 'add', '--pathspec-from-file=-', '--pathspec-file-nul',
+        ], { cwd: dir, input: pathspecs });
+
+        stage();
+        commit(dir, 'track the fixture');
+        for (const path of paths) writeFileSync(join(dir, path), 'staged edit');
+        stage();
+
+        const repo = openRepo(dir);
+        assert.deepEqual(unstagePaths(repo, paths), paths);
+
+        const deletions = execFileSync('git', [
+            'diff', '--cached', '--name-only', '--diff-filter=D',
+        ], { cwd: dir, encoding: 'utf8' }).trim();
+        assert.equal(deletions, '', 'unstaging must not stage deletions of tracked files');
+        assert.deepEqual(stagedPaths(repo), []);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('unstagePaths streams a path collection larger than the Windows command-line limit', () => {
     const dir = freshRepo();
     try {
