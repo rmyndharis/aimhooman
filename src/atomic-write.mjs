@@ -259,18 +259,34 @@ export function withLock(lockPath, fn, options = {}) {
     let held = false;
     let published = false;
     let primaryError = null;
+    // Between the mkdir above and the first publication below this contender owns
+    // no file in the queue, so a concurrent cleanup that removes empty queue
+    // directories — `aimhooman uninstall` sweeps them — can delete it out from
+    // under us. The gap is wide enough to lose: building the candidate probes the
+    // process identity, which spawns `ps` on macOS and BSD. Recreate and retry
+    // once rather than failing the caller with a bare ENOENT. Once a candidate is
+    // published the directory is no longer empty, so no cleanup can remove it.
+    const publish = () => {
+        try {
+            publishCandidate(candidatePath, candidate, options.candidateOperations);
+        } catch (error) {
+            if (error?.code !== 'ENOENT') throw error;
+            mkdirSync(queueDir, { recursive: true });
+            publishCandidate(candidatePath, candidate, options.candidateOperations);
+        }
+    };
     try {
         // Own the UUID pathname before publication begins. If the rename lands
         // but its directory fsync fails, finally still removes the candidate;
         // unlinking ENOENT is harmless when publication failed earlier.
         published = true;
-        publishCandidate(candidatePath, candidate, options.candidateOperations);
+        publish();
         const observed = queueCandidates(queueDir, staleMs);
         candidate.ticket = observed.reduce((maximum, peer) => (
             peer.ticket === null ? maximum : Math.max(maximum, peer.ticket)
         ), 0) + 1;
         candidate.choosing = false;
-        publishCandidate(candidatePath, candidate, options.candidateOperations);
+        publish();
 
         for (let attempt = 0; attempt < retries; attempt += 1) {
             // A file at the pre-queue lock path may belong to a concurrently

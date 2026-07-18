@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { chmodSync, lstatSync, readFileSync, rmdirSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
@@ -372,7 +372,7 @@ function cmdPrecommit(args) {
         emptied = stagedBefore !== null
             && stagedBefore.every((path) => unstageTargets.has(path));
         process.stderr.write(
-            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (kept in your working tree)${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
+            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (index only; nothing on disk was deleted)${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
         );
     } catch (e) {
         process.stderr.write(
@@ -1700,9 +1700,29 @@ function cmdUninstall(args) {
     ]) {
         try { rmdirSync(queue); } catch { /* held by another aimhooman, or already gone */ }
     }
-    // A one-commit-ago attribution backup that git's next COMMIT_EDITMSG makes stale.
-    try { rmSync(join(repo.commonDir, 'COMMIT_EDITMSG.aimhooman-bak'), { force: true }); }
-    catch { /* nothing to remove */ }
+    // The attribution backup is the user's only copy of the lines stripped from
+    // their last message — commit-msg already clears the previous one, so what
+    // survives here is current, not stale. A plain uninstall says "state kept"
+    // and must not delete it; only --purge-state, which promises to remove
+    // everything, sweeps it. Git names the message file per operation
+    // (COMMIT_EDITMSG, MERGE_MSG, ...) and the backup inherits that name, so
+    // match the suffix rather than one filename. It lands beside that file, in
+    // the per-worktree git directory rather than the common one, and uninstall
+    // disarms every worktree at once — so cover the main one and each linked.
+    if (purge) {
+        const messageDirs = [repo.commonDir];
+        try {
+            const linked = join(repo.commonDir, 'worktrees');
+            for (const name of readdirSync(linked)) messageDirs.push(join(linked, name));
+        } catch { /* no linked worktrees */ }
+        for (const dir of messageDirs) {
+            try {
+                for (const name of readdirSync(dir)) {
+                    if (name.endsWith('.aimhooman-bak')) rmSync(join(dir, name), { force: true });
+                }
+            } catch { /* directory missing or unreadable */ }
+        }
+    }
     return exitStatus;
 }
 
