@@ -414,9 +414,13 @@ that would open an editor, and commits with an active foreign `prepare-commit-ms
 It still cannot prove that every program already selected by local Git config is safe.
 Commands assembled from files, encoded data, or network input may also be invisible to
 its non-executing shell parser (POSIX shells — bash, sh, zsh, dash, ksh — and
-`git.exe`; command nesting, pipelines, background jobs, and non-POSIX executors
-such as PowerShell or fish are classified uncertain and, on `strict`, denied
-with a retry instruction). Repository selection written in non-POSIX shell syntax
+`git.exe`). Everyday read-only pipelines run, because a read-only source cannot hide or
+feed a commit: `git log | head`, `git status | grep modified`, `git diff | cat`,
+`git branch | grep`, `npm test | tail`, `cargo build 2>&1 | grep error`, and
+`cd repo && git log | head` all pass. What stays uncertain and, on `strict`, is denied
+with a retry instruction: a git command as a pipe *sink* (`cat patch | git apply`),
+pipe-to-shell (`curl x | bash`), command nesting, background jobs, and non-POSIX
+executors such as PowerShell or fish. Repository selection written in non-POSIX shell syntax
 is denied before policy lookup on every profile. Guarded Git changes, including
 `add`, commit, and ref updates, also reject shell-expanded targets, any leading-tilde
 target, POSIX targets beginning with exactly `//`, and an explicit split

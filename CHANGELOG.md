@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Repair that empties the index no longer mints an empty commit. Stage only a `.env`,
+  run `git commit -m "add config"`, and the pre-commit repair unstages it and prints
+  "the commit will be empty" — then Git made that empty commit anyway. Git refuses a
+  commit with nothing staged, but repair runs after Git has already decided to proceed,
+  so carrying on created a commit Git would never have made and left a junk commit to
+  `git reset --hard`. Pre-commit now exits 10 when the repair empties the index, so Git
+  stops. Nothing else staged means nothing to commit.
+- `build && git add . && git commit` is no longer denied. Each half already passed on its
+  own; only the pair was refused. The commit-time-staging deny asked the wide bypass
+  predicate — the one that decides whether the staged-content backstop reads the blobs —
+  instead of the narrow question of whether anything will scan the commit. An unmodelled
+  prefix is not a bypass, and pre-commit still scans the real index at commit time. The
+  deny now asks that narrow question. A prefix that reaches the hooks, `--no-verify`, and
+  a real `core.hooksPath` override all keep the deny, where the staged files really would
+  go unscanned. The refusal message no longer names "--no-verify or shell indirection"
+  when neither is present.
+- The `PreToolUse` guard stops refusing more everyday read-only pipelines. Building on the
+  0.1.1 filter allowance, a read-only Git subcommand is now an allowed pipe source, so
+  `git log | head`, `git status | grep modified`, `git diff | cat`, and
+  `cd repo && git log | head` run. Build and test toolchains (`npm`, `cargo`, `make`,
+  `jest`, `eslint`, `tsc`, `pytest`) are allowed as a source. The listing forms of
+  branch/tag/remote/stash/notes run (`git branch | grep`, `git remote -v | grep origin`),
+  while their mutating forms (`git branch -D`, `git tag v1`) stay denied. Git as a pipe
+  sink, `git commit --no-verify`, and `git push` still deny; the reference-transaction and
+  pre-commit hooks remain the boundary.
+
 ## [0.1.2] - 2026-07-17
 
 ### Removed

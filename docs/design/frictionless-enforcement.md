@@ -65,6 +65,30 @@ Git 2.54 also emits an earlier `preparing` reference-transaction callback. The
 hook checks dispatcher integrity there without scanning unresolved references,
 then keeps the full-scan veto at `prepared`, after Git has locked them.
 
+### Frictionless agent guard (the everyday commands run)
+
+The layer-2 PreToolUse guard reports paths and refuses unprovable protected Git
+mutations. It does not stand between a developer and the commands they run to read a
+repository. A read-only Git subcommand piped to a filter is a source: `git log | head`,
+`git status | grep modified`, `git diff | cat`, and the `cd repo && git log | head`
+prefix produce stdout for the downstream filter and cannot hide or feed a commit, so
+they run with no refusal. Build and test toolchains (`npm`, `cargo`, `make`, `jest`,
+`eslint`, `tsc`, `pytest`, ...) are allowed as a source for the same reason. The listing
+forms of branch/tag/remote/stash/notes move no ref and run; their mutating forms
+(`git branch -D`, `git tag v1`) still reach the reference-transaction guard. A commit
+made of already-safe halves runs as a whole: `build && git add . && git commit` is
+allowed, because an unmodelled prefix is not a bypass and pre-commit still scans the real
+index at commit time.
+
+What stays refused is what can actually get past the scan. Git as a pipe sink
+(`cat patch | git apply`) reads stdin, which can drive `apply`/`am`/`hash-object`.
+Pipe-to-shell, subshells, `eval`, command substitution, and readers that execute their
+own input stay opaque. `git commit --no-verify`, an explicit `core.hooksPath` override,
+and `git push` refuse on the tiers that own them. The boundary that decides whether a
+commit is scanned is the pre-commit and reference-transaction hook, never a denial of the
+shell line that reads the repo. Refusing the read taught agents to drop the `&&` gate
+rather than run the command on its own, which is the friction this tier exists to avoid.
+
 ### Components
 
 1. **Rule catalog** — `rules/paths.json`, `rules/attribution.json`,
@@ -118,6 +142,10 @@ means local rules only add restrictions and can never override a core block.
   transparent in unsupported bare repositories.
 - **HEAD-safe unstage.** `git restore --staged` needs HEAD; on a repository's
   initial commit it falls back to `git rm --cached --ignore-unmatch`.
+- **Repair never mints an empty commit.** When the pre-commit repair unstages the last
+  staged path (stage only a `.env`, then `git commit`), it exits 10 so Git stops, the
+  same outcome as committing with nothing staged. Carrying on would create a commit Git
+  itself would have refused and leave the developer a junk commit to `git reset --hard`.
 - **Anchored attribution rules.** The AI-noreply rule is anchored to trailer
   lines (`*-by:`) so it never strips a prose line that merely mentions the email.
 - **`compliance` keeps disclosure.** AI-attribution rules resolve to `allow`
