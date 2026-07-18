@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-07-18
+
+### Fixed
+
+- AWS's own published example key no longer blocks a commit. 0.1.4 began matching bare
+  `AKIA…`/`ASIA…` access key IDs, which also matched `AKIAIOSFODNN7EXAMPLE` — the value AWS
+  prints in its own documentation, and one that lands in READMEs, Terraform samples, and test
+  fixtures. Because the rule's category is `secret`, neither a rule allow nor a plain path
+  allow is accepted, so a documentation example became an unconditional block on every profile
+  with only a per-file escape. Every AWS example key ends in `EXAMPLE`, so the pattern now
+  excludes that suffix and keeps blocking real keys. Path scoping was deliberately not used:
+  excluding `docs/` or `tests/` from secret scanning would hide genuine keys in the places they
+  most often leak.
+- `uninstall --purge-state` no longer leaves a backup behind in a linked worktree. Git writes
+  the commit message file into the per-worktree Git directory, so 0.1.4's sweep — which looked
+  only in the common directory — printed "state purged" with `COMMIT_EDITMSG.aimhooman-bak`
+  still on disk. Uninstall disarms every worktree at once, so it now sweeps the main Git
+  directory and each linked one, and matches the `.aimhooman-bak` suffix so a backup left by a
+  merge goes with it.
+- A plain `uninstall` keeps the attribution backup. It printed "state kept" and then deleted
+  the one file holding the lines stripped from the last commit message. Only `--purge-state`,
+  which promises to remove everything, takes it now.
+- Sweeping an empty lock queue can no longer stop a concurrent `aimhooman init`. Between its
+  `mkdir` and its first publication a lock contender owns no file in the queue, so the sweep
+  saw an empty directory and removed it, and the contender then failed on a bare `ENOENT`. The
+  window is wide enough to lose because building the candidate probes the process identity,
+  which spawns `ps` on macOS and BSD. Publication now recreates the directory and retries once.
+- The unstage summary no longer claims the files were "kept in your working tree". That is
+  false when a path was staged and then deleted before the commit, and when a staged deletion
+  is unstaged — the file is absent either way, though aimhooman never removed it. Unstaging
+  only ever touches the index, so the note says that instead of guessing where the file is.
+
+### Changed
+
+- An ordinary commit no longer pays a Node cold start for a phase that does nothing. Git fires
+  `reference-transaction` twice per commit, and `refcheck` returns immediately for `committed`
+  and `aborted`, so the dispatcher now short-circuits those phases in the shell — after the
+  chained-hook call, so a chained hook still sees every phase. Measured locally, an ordinary
+  commit drops from about 870ms to about 710ms. The `prepared` scan, and the `--no-verify`
+  backstop that rides on it, are unchanged. A repository installed with an earlier release
+  keeps a valid dispatcher; re-run `aimhooman init` to pick up the faster one.
+- The attribution backup no longer lingers indefinitely. `commit-msg` clears the previous run's
+  backup before it may write its own, so at most one exists at a time and a later clean commit
+  leaves none. The recovery window is now until your next commit rather than unbounded.
+
 ## [0.1.4] - 2026-07-18
 
 ### Fixed

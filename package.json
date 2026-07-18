@@ -1,6 +1,6 @@
 {
     "name": "@rmyndharis/aimhooman",
-    "version": "0.1.4",
+    "version": "0.1.5",
     "description": "AI works. Hoomans ship. Keep AI session files, secrets, and attribution out of your commits.",
     "homepage": "https://github.com/rmyndharis/aimhooman#readme",
     "repository": {
