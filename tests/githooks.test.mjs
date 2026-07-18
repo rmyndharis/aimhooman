@@ -1615,12 +1615,18 @@ test('a chained predecessor sees the original $0, so $(dirname "$0") resolves to
             assert.ok(dirLine, `probe missing dirname line: ${probe}`);
             const observedZero = zeroLine.slice('$0='.length);
             const observedDir = dirLine.slice('dirname='.length);
+            // Normalise to forward slashes before comparing: Git Bash reports $0
+            // with forward slashes even on Windows (C:/.../pre-commit), while
+            // Node's path.join produces backslashes there (C:\...\pre-commit).
+            // Without normalisation the strictEqual fails on Windows purely on
+            // the separator, not on the path itself.
+            const norm = (p) => p.replaceAll('\\', '/');
             assert.equal(
-                observedZero, join(hooks, 'pre-commit'),
+                norm(observedZero), norm(join(hooks, 'pre-commit')),
                 `predecessor $0 must be the original hook path, got: ${observedZero}`,
             );
             assert.equal(
-                observedDir, hooks,
+                norm(observedDir), norm(hooks),
                 `$(dirname "$0") must resolve to the original hooks dir, got: ${observedDir}`,
             );
             // The sibling helper ran, proving the relative resolution works.
