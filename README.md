@@ -9,7 +9,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/rmyndharis/aimhooman/test.yml?branch=main&label=CI" alt="CI">
-  <img src="https://img.shields.io/badge/version-v0.1.6-blue" alt="v0.1.6">
+  <img src="https://img.shields.io/badge/version-v0.1.7-blue" alt="v0.1.7">
   <img src="https://img.shields.io/badge/node-%E2%89%A522.8-339933?logo=node.js&logoColor=white" alt="Node 22.8+">
   <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="Zero dependencies">
   <img src="https://img.shields.io/badge/license-MIT-111111" alt="MIT">
