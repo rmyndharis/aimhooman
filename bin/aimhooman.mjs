@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { chmodSync, lstatSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, readFileSync, rmdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
@@ -20,7 +20,7 @@ import {
 } from '../src/gitx.mjs';
 import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, saveConfig, saveOverrides } from '../src/state.mjs';
 import { applyExclude, inspectExclude, patternsForRules, removeExclude } from '../src/exclude.mjs';
-import { hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
+import { effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
@@ -1615,7 +1615,8 @@ function cmdUninstall(args) {
         console.error('aimhooman: not a git repository');
         return 30;
     }
-    return withLock(join(repo.commonDir, 'aimhooman-lifecycle.lock'), () => {
+    const lifecycleLock = join(repo.commonDir, 'aimhooman-lifecycle.lock');
+    const exitStatus = withLock(lifecycleLock, () => {
     const rep = uninstallHooks(repo);
     // The irreversible work is already done above, and the report is still
     // below. A throw from here unwound past all of it, so a damaged marker was
@@ -1683,6 +1684,22 @@ function cmdUninstall(args) {
     // the uninstall is genuinely incomplete and 30 is the honest answer.
     return remaining.length || rep.failures?.length || unrestored.length || excludeFailure ? 30 : 0;
     }, LIFECYCLE_LOCK_OPTIONS);
+    // Sweep the operational residue the guard authored in .git, so uninstall leaves
+    // no aimhooman fingerprints behind — the same tooling residue this tool exists
+    // to remove. rmdirSync deletes only an empty directory, so a live contender's
+    // queue is never touched; the lifecycle queue becomes removable only now, after
+    // its own lock above has released.
+    for (const queue of [
+        `${lifecycleLock}.queue`,
+        `${repo.excludeFile}.aimhooman.lock.queue`,
+        join(effectiveHooksDir(repo), '.aimhooman-hooks.lock.queue'),
+    ]) {
+        try { rmdirSync(queue); } catch { /* held by another aimhooman, or already gone */ }
+    }
+    // A one-commit-ago attribution backup that git's next COMMIT_EDITMSG makes stale.
+    try { rmSync(join(repo.commonDir, 'COMMIT_EDITMSG.aimhooman-bak'), { force: true }); }
+    catch { /* nothing to remove */ }
+    return exitStatus;
 }
 
 function usage() {

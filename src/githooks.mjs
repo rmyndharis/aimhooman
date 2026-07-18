@@ -124,7 +124,7 @@ function canonicalPath(path) {
 
 // Ask Git for the path it actually uses. In a linked worktree this resolves to
 // the common repository hooks directory, not <gitDir>/hooks.
-function effectiveHooksDir(repo) {
+export function effectiveHooksDir(repo) {
     try {
         return execFileSync(
             'git',
