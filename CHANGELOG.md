@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-07-18
+
+### Fixed
+
+- A tracked file over the per-file scan budget no longer blocks every commit in
+  the repository. 0.1.5 content-scanned the whole tree on every commit, so a 3 MiB
+  vendored bundle that crossed the 2 MiB default budget wedged every later commit
+  with `scan incomplete (size-limit=1)` — even one-line edits to an unrelated file
+  — and the only way out was to raise the budget above the largest tracked file.
+  Path rules still run on the full tree, so a staged `.env` stays blocked, but the
+  content scan now reads only the files a commit actually changes. Editing the
+  oversized file itself still fails the commit until the budget is raised.
+- An oversized file that is binary now skips as `binary` (complete) instead of
+  `size-limit` (incomplete). A PSD, WOFF, or PNG cannot hide the text-pattern
+  secrets the content scan looks for, so it was never really an incomplete scan.
+  The first 8 KB of each oversized file is probed for a NUL byte to tell binary
+  from text; files above 16 MiB stay `size-limit` without probing, because
+  `cat-file --batch` reads the whole blob into memory and probing a 500 MB file
+  just to check for NULs is not worth it. A text file over budget stays a real
+  `size-limit` skip, and the owner must raise `AIMHOOMAN_MAX_FILE_BYTES` to cover
+  it.
+- `secret.dotenv` now excepts `*.minimal`. A `.env.minimal` shipped as a template
+  was blocked by the same rule that catches a real `.env`, because `*.sample`,
+  `*.template`, `*.dist`, and `*.defaults` were excepted but `*.minimal` was not.
+  The rule's version bumps to 4.
+
+### Added
+
+- Incomplete-scan messages name the files that were dropped and why. A budget
+  miss used to print a count (`size-limit=3`) with no path, so the owner had to
+  hunt for the offender. The CLI now lists up to five skipped paths with their
+  sizes and reason, and the JSON scan report carries a `skippedPaths` object so a
+  caller can see every dropped file the same way. The schema documents the field.
+- `aimhooman explain` prints a rule's `except` clause when it has one, so an
+  `allow`/`deny` override can be reasoned about without opening the rule pack.
+
 ## [0.1.5] - 2026-07-18
 
 ### Fixed
