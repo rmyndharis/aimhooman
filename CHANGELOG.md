@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-07-18
+
+### Fixed
+
+- Uninstall no longer leaves aimhooman artifacts in `.git`. Every atomic write takes a
+  lock whose `<lock>.queue` directory was created but never removed — the release path
+  only unlinked its own candidate file — and `--purge-state` cleared just the state
+  directory. So `.git` kept the queue directories and the `COMMIT_EDITMSG.aimhooman-bak`
+  attribution backup while the command printed "state purged". Uninstall now sweeps this
+  residue once the lifecycle lock releases; `rmdirSync` removes only an empty directory,
+  so a concurrent contender's queue is never touched, and the lifecycle queue is removable
+  precisely because its own lock has already released. A plain uninstall keeps policy
+  state and drops the operational residue; `--purge-state` leaves no aimhooman fingerprints.
+- A bare AWS access key ID is now detected. `secret.aws-key-content` fired only when an
+  `aws_secret_access_key` or `aws_session_token` name sat beside the value, so an
+  `AKIA…`/`ASIA…` access key ID committed on its own passed clean. The rule now matches the
+  access-key-ID prefixes directly — the fixed-prefix, highest-confidence AWS indicator. The
+  16-character body and word boundaries keep short lookalikes such as `AKIA123` from matching.
+
 ## [0.1.3] - 2026-07-18
 
 ### Fixed
