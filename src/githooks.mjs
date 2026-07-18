@@ -642,6 +642,14 @@ function hookScript(name, cmd, cliPath, chainedPath) {
     const aimInvocation = name === 'reference-transaction'
         ? `printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | run_aimhooman ${aimCommand} || exit $?`
         : `run_aimhooman ${aimCommand} || exit $?`;
+    // committed/aborted fire only after refs are locked in, and refcheck can do
+    // nothing but return 0 for them (see cmdRefcheck). Short-circuit in the shell
+    // so an ordinary commit no longer pays a Node cold start for the committed
+    // phase. Placed after the chained-hook call, so a chained hook still sees
+    // every phase.
+    const phaseShortCircuit = name === 'reference-transaction'
+        ? 'case "$1" in committed|aborted) exit 0 ;; esac\n'
+        : '';
     const template = `#!/bin/sh -p
 ${MARKER} (${name})
 # aimhooman-hook-version: ${HOOK_FORMAT_VERSION}
@@ -691,7 +699,7 @@ fi
 if [ -x "$CHAINED" ]; then
 ${chainedInvocation}
 fi
-${aimInvocation}
+${phaseShortCircuit}${aimInvocation}
 `;
     const fingerprint = hookFingerprint(template);
     return template.replace(FINGERPRINT_PLACEHOLDER, fingerprint);

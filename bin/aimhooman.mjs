@@ -372,7 +372,7 @@ function cmdPrecommit(args) {
         emptied = stagedBefore !== null
             && stagedBefore.every((path) => unstageTargets.has(path));
         process.stderr.write(
-            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')}${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
+            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (kept in your working tree)${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
         );
     } catch (e) {
         process.stderr.write(
@@ -409,6 +409,10 @@ function cmdCommitmsg(args) {
     const file = positionals[0];
     const repo = tryRepo();
     if (!repo) { console.error('aimhooman: not a git repository'); return 30; }
+    // A .aimhooman-bak from an earlier commit went stale the moment that commit
+    // finished, and git reuses this message path. Clear the previous run's backup
+    // now, before this run may write its own, so at most one ever lingers.
+    try { rmSync(`${file}.aimhooman-bak`, { force: true }); } catch { /* best effort */ }
     // Frictionless profiles (clean/compliance) never cancel a commit merely
     // because the message file cannot be read; only strict fails closed.
     let hookProfile = 'clean';

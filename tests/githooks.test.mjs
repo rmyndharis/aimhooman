@@ -463,6 +463,9 @@ test('generated dispatchers use builtin ref capture and accept safe Git updates'
             assert.match(referenceHook, /while IFS= read -r AIMHOOMAN_REF_UPDATE/);
             assert.doesNotMatch(referenceHook, /while AIMHOOMAN_REF_UPDATE=/);
             assert.doesNotMatch(referenceHook, /PATH="\$AIMHOOMAN_PATH" cat/);
+            // committed/aborted short-circuit before the Node spawn, so an ordinary
+            // commit does not pay a cold start for a phase refcheck only no-ops.
+            assert.match(referenceHook, /case "\$1" in committed\|aborted\) exit 0 ;; esac/);
 
             writeFileSync(join(root, 'safe.txt'), 'safe\n');
             git(root, ['add', 'safe.txt']);
