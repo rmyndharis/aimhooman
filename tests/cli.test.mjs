@@ -1022,6 +1022,30 @@ test('versioned project policy overrides the per-clone profile', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// status resolves the enforcing policy from the index, so a worktree
+// .aimhooman.json the developer forgot to `git add` cannot advertise a profile
+// the pre-commit hook will not apply. The staged (enforced) profile is reported
+// and the drift is named with the remedy.
+test('status reports the enforced staged profile and warns when the worktree policy is not staged', () => {
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'strict' }));
+        // Not staged: the hook will fall back to the local clean profile.
+        const status = result('status', [], dir);
+        assert.equal(status.status, 0, status.stderr);
+        assert.match(status.stdout, /profile:\s+clean \(worktree: strict\)/);
+        assert.match(status.stdout, /worktree \.aimhooman\.json is not staged/);
+        assert.match(status.stdout, /git add \.aimhooman\.json/);
+
+        // Once staged, the enforced profile becomes strict and the drift clears.
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+        const applied = result('status', [], dir);
+        assert.equal(applied.status, 0, applied.stderr);
+        assert.match(applied.stdout, /profile:\s+strict\n/);
+        assert.doesNotMatch(applied.stdout, /is not staged/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('an unstaged malformed worktree policy does not replace the staged target policy', () => {
     const dir = makeRepo('clean');
     try {

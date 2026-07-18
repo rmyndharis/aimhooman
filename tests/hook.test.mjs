@@ -1627,7 +1627,14 @@ test('a prefix that names the hooks path still stops the commit', async () => {
         ]) {
             const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
             assert.equal(out?.permissionDecision, 'deny', command);
-            assert.match(out.permissionDecisionReason, /earlier unmodelled command/, command);
+            // A commit-bearing prefix names the staged snapshot; a pure pipeline
+            // into a shell (cat script.sh | bash) is refused for being opaque.
+            // Both stop the commit; the reason text reflects which shape it was.
+            assert.match(
+                out.permissionDecisionReason,
+                /earlier unmodelled command|cannot prove this pipeline is read-only/,
+                command,
+            );
         }
     } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -1649,6 +1656,69 @@ test('an ordinary prefix before staging and committing is not treated as a bypas
         ]) {
             const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
             assert.equal(out, null, `denied an everyday commit: ${command}`);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// `time`, `timeout`, and `nice` only measure or schedule the inner command: they
+// run it with the same argv in the same place, so they cannot hide a --no-verify
+// the way eval/sudo/bash -c can. Treating them as direct (not opaque shell
+// indirection) lets a developer time a commit instead of being told to drop the
+// wrapper. The carve-out is lost the moment the wrapper carries real risk.
+test('a timing or scheduling prefix is treated as a direct commit, not a bypass', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-prefix-time-');
+    try {
+        for (const command of [
+            'time git commit -m x',
+            'timeout 30 git commit -m x',
+            'nice -n 5 git commit -m x',
+            'ionice git commit -m x',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out, null, `a benign prefix was denied: ${command}`);
+        }
+
+        // A staged secret committed through a timing prefix with --no-verify is
+        // still stopped: the prefix is transparent, so it does not launder the
+        // bypass or the unscanned blob past the guard.
+        writeFileSync(join(dir, '.env'), 'SECRET=x\n');
+        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        const bypass = await invokePreToolUse(dir, {
+            tool_name: 'Bash',
+            tool_input: { command: 'time git commit --no-verify -m x' },
+        });
+        assert.equal(bypass?.permissionDecision, 'deny', 'time did not preserve --no-verify');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// A pipeline into a shell with no commit in it is still refused (the sink can
+// run arbitrary commands), but the reason names the real shape — a pipeline that
+// cannot be proved read-only — instead of telling the developer to retry a
+// commit they never wrote.
+test('an opaque pipeline with no commit is refused with a pipeline reason, not a commit reason', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-opaque-pipe-');
+    try {
+        for (const command of [
+            'echo harmless | bash',
+            'cat README.md | bash',
+            'gh api repos/x/y --jq .full_name | bash',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', `allowed an opaque pipeline: ${command}`);
+            assert.match(
+                out.permissionDecisionReason,
+                /cannot prove this pipeline is read-only/,
+                `wrong reason for ${command}`,
+            );
+            assert.doesNotMatch(
+                out.permissionDecisionReason,
+                /retry the commit/,
+                `commit-themed reason leaked into a non-commit pipeline: ${command}`,
+            );
         }
     } finally {
         rmSync(dir, { recursive: true, force: true });

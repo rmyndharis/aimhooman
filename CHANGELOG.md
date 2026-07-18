@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The final reference guard no longer holds a branch hostage to a file already
+  in its history. A commit was scanned against the full tree it inherited, so a
+  path allowed in once and then un-allowed blocked every later commit on the
+  branch, even one-line edits to an unrelated file — and the only way out was to
+  rewrite history. The guard now judges a commit by what it changes: a newly
+  staged `.env` still stops the commit, while a file the commit merely carries
+  forward from its parent stays silent. A secret already in history is not
+  forgotten — `aimhooman check --tracked` still names it — but it no longer
+  bricks the branch.
+- Imported history no longer trips the attribution guard. `gh pr checkout` and
+  `git fetch` bring in other people's commits, whose messages a local developer
+  cannot edit; scanning them for AI co-author trailers blocked the checkout
+  whenever a PR commit carried one. The guard now scopes attribution and marker
+  rules to commits written in the repository (a plain commit, an `--amend`, a
+  local merge), and leaves imported commits' messages alone. A locally authored
+  `git commit --no-verify` that smuggles the same trailer is still stopped at the
+  final guard.
+- `aimhooman status` no longer advertises a profile the hooks are not applying.
+  The enforcing guards resolve the project policy from the index, so a worktree
+  `.aimhooman.json` that has not been `git add`ed was invisible to them — yet
+  `status` reported its profile as active. `status` now shows the staged profile
+  the hooks actually enforce, prints the worktree value alongside when the two
+  differ, and names the remedy (`git add .aimhooman.json`).
+- A pipeline into a shell with no commit in it is still refused, but the reason
+  no longer tells the developer to retry a commit they never wrote. The deny
+  text for `echo x | bash` and similar now names the real shape — a pipeline
+  whose sink can run arbitrary commands — instead of reusing the commit-themed
+  message.
+- A timing or scheduling prefix no longer reads as a hook bypass. `time`,
+  `timeout`, `nice`, and `ionice` run the inner command with the same argv in the
+  same place, so `time git commit` is judged like `git commit` instead of being
+  refused as opaque shell indirection. The carve-out only applies when nothing
+  else injects risk; a `--no-verify` or a hooks-path override wrapped in the
+  prefix is still caught.
+
 ## [0.1.6] - 2026-07-18
 
 ### Fixed

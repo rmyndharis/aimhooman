@@ -55,15 +55,18 @@ enforcement requires local or global hook setup.
 | 2. Agent guard | PreToolUse reports paths and rejects unprovable protected Git mutations | plugin | advisory for paths; fail-closed for boundary bypass |
 | 3. Strict policy | `strict` profile blocks instead of repairing (exit 10) | both | block |
 | 4. Pinned tree | `commit-msg` checks the exact would-be tree and message | git hook | blocks a remaining violation or incomplete scan |
-| 5. Final ref check | prepared `reference-transaction` full-scans every commit introduced to `HEAD` or a branch | git hook | blocks a violation or incomplete scan |
+| 5. Final ref check | prepared `reference-transaction` scans what each commit introduced to `HEAD` or a branch changes (and the message of commits authored locally) | git hook | blocks a violation or incomplete scan |
 
 Default profile `clean` uses layers 0, 1, 2, 4, and 5. Successful repair keeps the
 ordinary path low-friction. The pinned-tree and final-ref scans deliberately stop if
-a block remains, including a pre-existing tracked block that was not part of the
-current diff, or if any scan is incomplete.
+a block remains on a path the commit actually changes, or if any scan is incomplete.
+A file already in history is not re-tried on every later commit: the final ref check
+judges a commit by its change set, so an inherited path no longer blocks unrelated
+work. Use `aimhooman check --tracked` (or scan the PR range in CI) to surface legacy
+secrets without bricking the branch.
 Git 2.54 also emits an earlier `preparing` reference-transaction callback. The
 hook checks dispatcher integrity there without scanning unresolved references,
-then keeps the full-scan veto at `prepared`, after Git has locked them.
+then keeps the scan veto at `prepared`, after Git has locked them.
 
 ### Frictionless agent guard (the everyday commands run)
 

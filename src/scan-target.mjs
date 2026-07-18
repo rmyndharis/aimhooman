@@ -215,21 +215,39 @@ function scanCommit(repo, options) {
     if (floor && !isVersionedStrict(rawPolicy)) {
         accumulator.add([protectedPolicyFinding(rawPolicy, policy, snapshot)]);
     }
-    scanEntryGroup(repo, loaded.engine, snapshot.entries, policy, accumulator, {
+    // A commit is judged by what it changes, not by the whole tree it inherits.
+    // Scanning snapshot.entries (a full `ls-tree`) re-applied path rules to
+    // every file the commit merely carried forward from its parent, so a path
+    // allowed into history once (under an override that was later removed, or
+    // before the guard existed) blocked every later commit on the branch. The
+    // change set already drives content scanning; routing path rules through it
+    // too means a newly added `.env` still fires while an inherited one stays
+    // silent, matching how scanRange has always judged history.
+    scanEntryGroup(repo, loaded.engine, snapshot.changes, policy, accumulator, {
         reviewPathEntries: snapshot.changes,
         contentEntries: snapshot.changes,
         allowMissingPolicy: acknowledged && !rawPolicy.policy_object_id,
         transition: snapshot.commit,
     });
-    accumulator.add(loaded.engine.checkMessage(snapshot.message)
-        .map((finding) => decorate(finding, snapshot, policy)));
-    accumulator.addSkipped(loaded.engine.takeSkipped());
+    // The message is the author's words, so it is scanned for attribution and
+    // markers only when the commit was written here. Fetched history (a PR
+    // checked out for review, a branch pulled from a remote) carries other
+    // people's commit text that a local developer cannot edit, so flagging it
+    // only blocks the review. cmdRefcheck passes messageScope='changes-only'
+    // for commits that were imported rather than authored; a direct `aimhooman
+    // check --commit` still defaults to scanning the message.
+    const scanMessageText = options.messageScope !== 'changes-only';
+    if (scanMessageText) {
+        accumulator.add(loaded.engine.checkMessage(snapshot.message)
+            .map((finding) => decorate(finding, snapshot, policy)));
+        accumulator.addSkipped(loaded.engine.takeSkipped());
+    }
     return result({
         target: `commit:${snapshot.commit}`,
         policy,
         accumulator,
         diagnostics,
-        messageScanned: true,
+        messageScanned: scanMessageText,
         commit: snapshot.commit,
     });
 }
