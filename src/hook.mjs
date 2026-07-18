@@ -443,6 +443,14 @@ function hookPreToolUse(input) {
             : '--no-verify or shell indirection bypasses the pre-commit guard';
     const unmodelledPrefixReason =
         'aimhooman cannot verify the final staged snapshot or Git hooks after an earlier unmodelled command; run that command separately, then retry the commit.';
+    // A pipeline whose sink can execute code (a shell, an interpreter fed on
+    // stdin) can hide a commit or run arbitrary commands, and there is no argv
+    // to read a --no-verify out of. The earlier message reused the commit text
+    // above, which told a developer to "retry the commit" for a command that
+    // was not a commit at all — this names the real shape instead.
+    const opaquePipelineReason = commit
+        ? unmodelledPrefixReason
+        : 'aimhooman cannot prove this pipeline is read-only: a shell or code-executing segment can hide a commit or run arbitrary commands. Drop that segment (for example the `| bash`) and run the pieces separately.';
     const blocks = [];
     // potentialCommit treats a command as leading to a commit. uncertainShell
     // was too broad: it flagged any pipe, so a benign read-only pipeline
@@ -522,7 +530,7 @@ function hookPreToolUse(input) {
         if (profile !== 'strict' && potentialCommit && prefixHookBypass) {
             return emitDecision(
                 'deny',
-                unmodelledPrefixReason,
+                opaquePipelineReason,
             );
         }
         // Nothing found and nothing to object to, so emit nothing and leave the
@@ -552,7 +560,7 @@ function hookPreToolUse(input) {
     if (profile !== 'strict' && potentialCommit && prefixHookBypass) {
         return emitDecision(
             'deny',
-            unmodelledPrefixReason,
+            opaquePipelineReason,
         );
     }
     const guarded = repo && !bypassed && installedHooks(repo).includes('pre-commit');
@@ -861,6 +869,41 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                     environmentRisk,
                     'git',
                 );
+                // A passthrough prefix (time, timeout, nice, ...) execs the inner
+                // command with the same argv in the same place, so it cannot
+                // inject a flag or hide a --no-verify the way eval/sudo/bash -c
+                // can. Re-parse the inner command from its `git` token so the
+                // commit is judged exactly as if the prefix were not there
+                // (--no-verify still denied, a clean commit still allowed). The
+                // carve-out only applies when nothing else injects risk;
+                // otherwise the wrapper falls back to the closed uncertain path.
+                const passthroughExecutable = PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(g0))
+                    && environmentRisk.length === 0
+                    && !targetEnvironmentRisk
+                    && !indirectTargetEnvironmentRisk
+                    && !commandTargetUncertain
+                    && !indirect.targetUncertain
+                    && !indirect.pathDialectUncertain
+                    && !commandPathDialectUncertain
+                    && !unwrapped.uncertain
+                    ? shellExecutable(g0)
+                    : null;
+                if (passthroughExecutable) {
+                    const gitIndex = toks.findIndex((token, index) => (
+                        index > 0 && isGitExecutable(token.replace(/^\(+/, '').replace(/\)+$/, ''))
+                    ));
+                    if (gitIndex > 0) {
+                        const inner = parseGit(toks.slice(gitIndex).join(' '), unwrapped.cwd);
+                        commit ||= inner.commit;
+                        noVerify ||= inner.noVerify;
+                        bypassHooks ||= inner.bypassHooks;
+                        uncertainShell ||= inner.uncertainShell;
+                        addPaths.push(...inner.addPaths);
+                        commands.push(...inner.commands);
+                        sawAdd ||= inner.addPaths.length > 0;
+                        continue;
+                    }
+                }
                 commit = true;
                 uncertainShell = true;
                 commands.push({
@@ -883,7 +926,8 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                         || indirect.pathDialectUncertain,
                 });
             }
-            if (!READ_ONLY_SHELL_COMMANDS.has(basename(g0))) {
+            if (!READ_ONLY_SHELL_COMMANDS.has(basename(g0))
+                && !PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(g0))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
                 prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
                 prefixRisk = true;
@@ -2685,6 +2729,19 @@ const UNCERTAIN_TARGET_INDIRECT_EXECUTORS = new Set([
     'gdb', 'iex', 'invoke-expression', 'nsenter', 'parallel', 'powershell',
     'pwsh', 'runuser', 'script', 'start', 'start-process', 'su', 'sudo',
     'systemd-run', 'unshare', 'watch', 'wsl', 'xargs',
+]);
+
+// Passthrough prefixes exec the inner command verbatim: the same argv, the same
+// cwd, the same target. `time`, `timeout`, `nice`, `ionice` and friends only
+// measure or schedule — they cannot inject a flag, rewrite the command line, or
+// hide a --no-verify the way eval/sudo/bash -c can. An indirect commit seen
+// through one of these is therefore treated as direct, so `time git commit` is
+// judged like `git commit` instead of being refused as opaque indirection. The
+// carve-out only applies when nothing else is risky (no environment override,
+// no uncertain target); otherwise the wrapper falls back to the closed path.
+const PASSTHROUGH_PREFIX_EXECUTORS = new Set([
+    'time', 'timeout', 'nice', 'ionice', 'chrt', 'taskset', 'numactl',
+    'stdbuf', 'setsid', 'nohup', 'prlimit', 'faketime',
 ]);
 
 function indirectCommitInvocation(words, initialCwd) {

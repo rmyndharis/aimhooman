@@ -599,8 +599,23 @@ function cmdRefcheck(args) {
     let commits;
     try {
         const contextsByCommit = new Map();
+        // A commit's message belongs to whoever wrote it. Attribution and marker
+        // rules police the text a local developer can edit, so they are scoped
+        // to commits authored here: an update that introduces exactly one new
+        // commit on top of a non-zero old tip (a plain commit, an --amend, or a
+        // local --no-ff merge of an already-gated branch). Anything else — a new
+        // branch pulled in by `gh pr checkout` or `git fetch`, a merge of fetched
+        // history — imports other people's commit text the developer cannot
+        // change, and scanning it only blocks the review.
+        const localAuthorTips = new Set();
         for (const update of updates) {
-            for (const revision of introducedCommits(repo, [update])) {
+            const introduced = introducedCommits(repo, [update]);
+            if (!/^0+$/.test(update.oldObjectId)
+                && introduced.length === 1
+                && introduced[0] === update.newObjectId) {
+                localAuthorTips.add(update.newObjectId);
+            }
+            for (const revision of introduced) {
                 const contexts = contextsByCommit.get(revision) || [];
                 contexts.push({
                     head: update.newObjectId,
@@ -624,14 +639,18 @@ function cmdRefcheck(args) {
                 contextsByCommit.set(revision, contexts);
             }
         }
-        commits = [...contextsByCommit];
+        commits = [...contextsByCommit].map(([revision, reviewContexts]) => [
+            revision,
+            reviewContexts,
+            localAuthorTips.has(revision),
+        ]);
     }
     catch (error) {
         console.error(`aimhooman: cannot resolve proposed commits: ${error.message}`);
         return 30;
     }
     const limits = scanLimits();
-    for (const [revision, reviewContexts] of commits) {
+    for (const [revision, reviewContexts, authoredLocally] of commits) {
         let scan;
         try {
             scan = scanGitTarget(repo, {
@@ -640,6 +659,7 @@ function cmdRefcheck(args) {
                 reviewContexts,
                 policyMigrationContexts: reviewContexts,
                 limits,
+                messageScope: authoredLocally ? 'commit' : 'changes-only',
             });
         }
         catch (error) {
@@ -927,9 +947,17 @@ function cmdStatus(args) {
         return 30;
     }
     let policy;
+    let stagedPolicy;
     let overrides;
     try {
+        // `policy` describes the worktree file as written; `stagedPolicy` is the
+        // one the enforcing hooks actually read (they resolve from the index, so
+        // a worktree profile that has not been staged is invisible to them).
+        // Reporting the worktree value alone used to advertise a profile the
+        // guard was not applying, so the two are compared below and the
+        // mismatch is named when they disagree.
         policy = resolvePolicy(repo, { target: 'worktree' });
+        stagedPolicy = resolvePolicy(repo, { target: 'staged' });
         overrides = loadOverrides(repo.stateDir);
     } catch (e) {
         console.error(`aimhooman: cannot load enforcement state: ${e.message}`);
@@ -952,9 +980,25 @@ function cmdStatus(args) {
         excludeError = e.message;
         excludes = { current: false, installed: false };
     }
-    const policyLabel = policy.source === 'worktree-policy' ? 'project' : policy.source;
-    console.log(`profile:  ${policy.profile}`);
-    console.log(`policy:   ${policyLabel} (${policy.source}, object=${policy.policy_object_id || 'none'})`);
+    // The pre-commit and reference-transaction guards resolve the policy from
+    // the index, so the staged profile is what is actually enforced. Report it
+    // first; the worktree file is shown alongside so an edit that has not been
+    // staged (or a file that was never `git add`ed) cannot masquerade as active.
+    const policyLabelOf = (resolved) => (
+        resolved.source === 'worktree-policy'
+        || resolved.source === 'staged-policy'
+        || resolved.source === 'commit-policy'
+    ) ? 'project' : resolved.source;
+    const enforced = stagedPolicy.profile;
+    const enforcedLabel = policyLabelOf(stagedPolicy);
+    const worktreeLabel = policyLabelOf(policy);
+    const policyDrift = policy.profile !== stagedPolicy.profile
+        || policy.policy_object_id !== stagedPolicy.policy_object_id;
+    console.log(`profile:  ${enforced}${policyDrift ? ` (worktree: ${policy.profile})` : ''}`);
+    console.log(`policy:   ${enforcedLabel} (${stagedPolicy.source}, object=${stagedPolicy.policy_object_id || 'none'})${policyDrift ? `; worktree ${worktreeLabel} (${policy.source}, object=${policy.policy_object_id || 'none'})` : ''}`);
+    if (policyDrift) {
+        console.log(`warning:  worktree .aimhooman.json is not staged, so the hooks enforce the staged profile (${enforced}); run \`git add .aimhooman.json\` to apply ${policy.profile}`);
+    }
     console.log(`hooks:    ${hooksComplete ? installed.join(', ') : installed.length ? `${installed.join(', ')} (incomplete; run: aimhooman init)` : 'not installed (run: aimhooman init)'}`);
     for (const hook of hooks) {
         console.log(`hook ${hook.name}: ${hook.managed ? 'managed' : 'not managed'}, ${hook.executable ? 'executable' : 'not executable'}, ${hook.reachable ? 'reachable' : hook.reason}`);

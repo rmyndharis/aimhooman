@@ -76,7 +76,7 @@ flowchart TD
     DIRECT([Sequencer or direct ref path<br/>cherry-pick · rebase · fetch · worktree · update-ref]) --> REF
     PRE -->|clean: safe repair| MSG["commit-msg snapshots would-be tree,<br/>runs predecessor, then checks<br/>the message and pinned full tree"]
     PRE -->|strict violation, incomplete scan,<br/>or failed repair| BLOCK([Operation stops])
-    MSG -->|message and tree accepted| REF["reference-transaction prepared<br/>full-scans every introduced commit"]
+    MSG -->|message and tree accepted| REF["reference-transaction prepared<br/>scans what each introduced commit changes<br/>(messages of locally authored commits only)"]
     MSG -->|unsafe or unrepairable| BLOCK
     REF -->|accepted| SHIP([Ref update commits])
     REF -->|violation or incomplete scan| BLOCK

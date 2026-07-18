@@ -1056,8 +1056,8 @@ test('final reference scan rechecks an identical no-verify retry from another Gi
     }
 });
 
-test('final reference scan checks unchanged tracked files under a newly enabled strict policy', () => {
-    const base = mkdtempSync(join(tmpdir(), 'aim-ref-full-snapshot-'));
+test('final reference scan judges a commit by what it changes, while audit still flags legacy tracked secrets', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-change-snapshot-'));
     try {
         isolatedGitConfig(base, () => {
             const root = makeRepo(base);
@@ -1075,13 +1075,133 @@ test('final reference scan checks unchanged tracked files under a newly enabled 
             ], { cwd: root });
             const before = git(root, ['rev-parse', 'HEAD']);
 
-            const commit = spawnSync('git', ['commit', '-m', 'enable strict'], {
+            // A commit that does not touch the legacy .env is no longer held
+            // hostage to it: the file already lives in history, and blocking an
+            // unrelated commit could not remove it. The commit lands.
+            const enabling = spawnSync('git', ['commit', '-m', 'enable strict'], {
                 cwd: root,
                 encoding: 'utf8',
             });
-            assert.notEqual(commit.status, 0, commit.stderr);
-            assert.equal(git(root, ['rev-parse', 'HEAD']), before);
-            assert.match(commit.stderr, /secret\.dotenv|rejected before refs changed/);
+            assert.equal(enabling.status, 0, enabling.stderr);
+            assert.notEqual(git(root, ['rev-parse', 'HEAD']), before);
+
+            // The legacy secret is not silently forgotten: a tracked audit still
+            // names it, so the team is told to clean it up without being bricked.
+            const audit = spawnSync(process.execPath, [CLI, 'check', '--tracked'], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.notEqual(audit.status, 0, audit.stderr);
+            assert.match(audit.stderr, /secret\.dotenv/);
+
+            // A commit that introduces a NEW secret path is still stopped at the
+            // final guard, even with --no-verify, because the path is in the
+            // change set the guard scans.
+            writeFileSync(join(root, '.env.fresh'), 'SECRET=brand-new\n');
+            git(root, ['add', '-f', '.env.fresh']);
+            const smuggling = spawnSync('git', ['commit', '--no-verify', '-m', 'smuggle fresh'], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.notEqual(smuggling.status, 0, smuggling.stderr);
+            assert.match(smuggling.stderr, /secret\.dotenv|rejected before refs changed/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// `gh pr checkout` and `git fetch` import other people's commits. Their messages
+// are not the local developer's to edit, so an AI co-author trailer on a fetched
+// commit can no longer veto the checkout. A locally-authored commit keeps its
+// message scanned, so --no-verify cannot smuggle attribution past the final guard.
+test('reference transaction ignores attribution on imported commits but still scans local ones', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-imported-message-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+
+            // A commit carrying AI attribution, authored out-of-band (as a PR
+            // commit would be) and imported into a new branch for review.
+            const before = git(root, ['rev-parse', 'HEAD']);
+            const tree = git(root, ['rev-parse', 'HEAD^{tree}']);
+            const imported = execFileSync(
+                'git',
+                ['commit-tree', tree, '-p', before, '-m', 'fix\n\nCo-authored-by: Claude <noreply@anthropic.com>'],
+                { cwd: root, encoding: 'utf8' },
+            ).trim();
+            const fetchBranch = 'pr-under-review';
+            const fetched = spawnSync(
+                'git',
+                ['fetch', '.', `${imported}:refs/heads/${fetchBranch}`],
+                { cwd: root, encoding: 'utf8' },
+            );
+            assert.equal(fetched.status, 0, fetched.stderr);
+            assert.equal(
+                git(root, ['rev-parse', `refs/heads/${fetchBranch}`]),
+                imported,
+                'the imported branch must land so the PR can be reviewed',
+            );
+
+            // A locally-authored commit that smuggles the same trailer past
+            // commit-msg with --no-verify is still stopped at the final guard.
+            writeFileSync(join(root, 'note.md'), 'review\n');
+            git(root, ['add', 'note.md']);
+            const localBefore = git(root, ['rev-parse', 'HEAD']);
+            const local = spawnSync(
+                'git',
+                ['commit', '--no-verify', '-m', 'local\n\nCo-authored-by: Claude <noreply@anthropic.com>'],
+                { cwd: root, encoding: 'utf8' },
+            );
+            assert.notEqual(local.status, 0, local.stderr);
+            assert.equal(git(root, ['rev-parse', 'HEAD']), localBefore);
+            assert.match(local.stderr, /attribution\.claude-coauthor|rejected before refs changed/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// A secret path allowed in once (then un-allowed) used to block every later
+// commit on the branch, because the full-tree scan re-tried the inherited file
+// on each new commit. Judging by the change set instead means an unrelated edit
+// lands; the secret stays visible to a tracked audit for cleanup.
+test('removing a secret-path override no longer blocks unrelated later commits', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-override-removal-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+            writeFileSync(join(root, '.env.local'), 'TOKEN=fixture\n');
+            git(root, ['add', '-f', '.env.local']);
+            execFileSync(process.execPath, [
+                CLI, 'allow', '.env.local', '--scope', 'secret-path', '--reason', 'fixture',
+            ], { cwd: root });
+            git(root, ['commit', '-q', '-m', 'add fixture env']);
+            execFileSync(process.execPath, [CLI, 'override', 'reset', '--all'], { cwd: root });
+
+            // Override is gone, but a commit that does not re-stage .env.local
+            // must still land: the file is already history, blocking will not
+            // remove it.
+            writeFileSync(join(root, 'README.md'), 'changed\n');
+            git(root, ['add', 'README.md']);
+            const after = spawnSync('git', ['commit', '-m', 'unrelated edit'], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.equal(after.status, 0, after.stderr);
+
+            // Re-staging the secret path is still caught, so the override removal
+            // is not a way to add more of the same secret.
+            writeFileSync(join(root, '.env.local'), 'TOKEN=changed\n');
+            git(root, ['add', '-f', '.env.local']);
+            const restage = spawnSync('git', ['commit', '-m', 'touch fixture'], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.notEqual(restage.status, 0, restage.stderr);
+            assert.match(restage.stderr, /secret\.dotenv|rejected before refs changed/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
