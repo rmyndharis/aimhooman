@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { chmodSync, lstatSync, readFileSync, rmdirSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
@@ -372,7 +372,7 @@ function cmdPrecommit(args) {
         emptied = stagedBefore !== null
             && stagedBefore.every((path) => unstageTargets.has(path));
         process.stderr.write(
-            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (kept in your working tree)${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
+            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (index only; nothing on disk was deleted)${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
         );
     } catch (e) {
         process.stderr.write(
@@ -1700,9 +1700,20 @@ function cmdUninstall(args) {
     ]) {
         try { rmdirSync(queue); } catch { /* held by another aimhooman, or already gone */ }
     }
-    // A one-commit-ago attribution backup that git's next COMMIT_EDITMSG makes stale.
-    try { rmSync(join(repo.commonDir, 'COMMIT_EDITMSG.aimhooman-bak'), { force: true }); }
-    catch { /* nothing to remove */ }
+    // A one-commit-ago attribution backup that git's next COMMIT_EDITMSG makes
+    // stale. It lands beside git's message file, which lives in the per-worktree
+    // git directory — not the common one. Uninstall disarms every worktree at
+    // once, so sweep the main git directory and each linked worktree, or
+    // "state purged" stays a lie for whichever worktree last stripped a message.
+    const messageDirs = [repo.commonDir];
+    try {
+        const linked = join(repo.commonDir, 'worktrees');
+        for (const name of readdirSync(linked)) messageDirs.push(join(linked, name));
+    } catch { /* no linked worktrees */ }
+    for (const dir of messageDirs) {
+        try { rmSync(join(dir, 'COMMIT_EDITMSG.aimhooman-bak'), { force: true }); }
+        catch { /* nothing to remove */ }
+    }
     return exitStatus;
 }
 

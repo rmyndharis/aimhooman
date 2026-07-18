@@ -170,6 +170,32 @@ test('every built-in rule has a positive and a meaningful near-miss contract', (
     }
 });
 
+test('aws access key IDs are blocked, but AWS\'s published example keys are not', () => {
+    const engine = newEngine('clean');
+    const matched = (text) => Boolean(
+        matchFor(engine.checkContent('infra/main.tf', text), 'secret.aws-key-content')
+    );
+
+    // Split so this file never carries a literal that trips the rule it tests.
+    const body = 'Q7QQVQ3ZK4WQ2XYZ';
+
+    // A real access key ID carries no naming context, which the aws_secret_access_key
+    // pattern needs, so the prefix has to stand on its own.
+    assert.ok(matched(`provider "aws" { access_key = "AKIA${body}" }`));
+    assert.ok(matched(`AWS_SESSION_ID=ASIA${body}`), 'STS keys use the ASIA prefix');
+
+    // AWS publishes these in its own docs, and they land in READMEs, Terraform
+    // samples, and test fixtures. Blocking them stops legitimate commits.
+    assert.equal(matched('access_key = "AKIAIOSFODNN7EXAMPLE"'), false);
+    assert.equal(matched('access_key = "ASIAIOSFODNN7EXAMPLE"'), false);
+    assert.equal(matched('access_key = "AKIAI44QH8DHBEXAMPLE"'), false);
+
+    // Word boundaries keep the prefix from matching a shorter or longer run.
+    assert.equal(matched('const region = "AKIA123";'), false);
+    assert.equal(matched(`token=XAKIA${body}`), false);
+    assert.equal(matched(`token=AKIA${body}9`), false);
+});
+
 test('source markers stay out of documentation, tests, dependencies, and generated output', () => {
     const engine = newEngine('strict');
     const excludedPaths = [
