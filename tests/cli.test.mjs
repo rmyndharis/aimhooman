@@ -99,6 +99,25 @@ test('help lists command aliases and mutually exclusive lifecycle forms', () => 
     assert.doesNotMatch(help.stdout, /uninstall[^\n]*--purge-state[^\n]*--global/);
 });
 
+// W10: `aimhooman <subcommand> --help` used to fall into the subcommand's strict
+// argument parser, which rejects --help as an unknown option and exits 20. A
+// leading --help/-h/help on any known subcommand now routes to usage() with
+// exit 0. Covers override (the originally-reported form), init, status, and a
+// representative alias (-h).
+test('subcommand --help prints usage and exits 0 instead of erroring on the unknown option', () => {
+    for (const cmd of ['override', 'init', 'status', 'check', 'allow', 'deny', 'review']) {
+        const out = result(cmd, ['--help'], process.cwd());
+        assert.equal(out.status, 0, `${cmd} --help exited ${out.status}: ${out.stderr}`);
+        assert.match(out.stdout, /aimhooman audit\|scan/, `${cmd} --help did not print usage`);
+    }
+    const shortFlag = result('override', ['-h'], process.cwd());
+    assert.equal(shortFlag.status, 0, `override -h exited ${shortFlag.status}: ${shortFlag.stderr}`);
+    assert.match(shortFlag.stdout, /aimhooman audit\|scan/, 'override -h did not print usage');
+    // The help word form too.
+    const wordForm = result('init', ['help'], process.cwd());
+    assert.equal(wordForm.status, 0, `init help exited ${wordForm.status}: ${wordForm.stderr}`);
+});
+
 test('refcheck accepts Git 2.54 preparing phase without running the prepared scan', () => {
     const preparing = result('refcheck', ['preparing'], process.cwd(), 'malformed ref input\n');
     assert.equal(preparing.status, 0, preparing.stderr);

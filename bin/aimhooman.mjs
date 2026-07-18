@@ -118,6 +118,22 @@ function configuredEngine(profile, repo) {
 
 function main(argv) {
     const [cmd, ...rest] = argv;
+    // Subcommand-level --help: `aimhooman override --help` (or `init -h`, etc.)
+    // previously fell into the subcommand's strict argument parser, which rejects
+    // --help as an unknown option and exits 20. Recognise a leading help flag on
+    // any real subcommand and route to usage() instead, so help works everywhere.
+    // The top-level help forms (cmd itself is help/--help/-h) are handled in the
+    // switch below.
+    const SUBCOMMAND_HELP_FLAGS = new Set(['--help', '-h', 'help']);
+    const knownSubcommands = new Set([
+        'check', 'audit', 'scan', 'precommit', 'commitmsg', 'refcheck', 'init',
+        'status', 'explain', 'allow', 'deny', 'override', 'review',
+        'policy-review', 'fix', 'doctor', 'uninstall',
+    ]);
+    if (knownSubcommands.has(cmd) && rest.length && SUBCOMMAND_HELP_FLAGS.has(rest[0])) {
+        usage();
+        return 0;
+    }
     switch (cmd) {
         case 'check':
             return cmdCheck(rest);
@@ -777,71 +793,71 @@ function cmdInit(args) {
             return 20;
         }
         return withLock(join(globalHooksDir(), 'lifecycle.lock'), () => {
-        const aimDir = globalHooksDir();
-        let existing = '';
-        try {
-            existing = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
-        } catch { /* unset */ }
-        if (existing && existing !== aimDir) {
-            console.error(
-                `aimhooman: core.hooksPath is already set to '${existing}'; refusing to overwrite. ` +
-                'Unset it (git config --global --unset core.hooksPath) or choose a different setup.'
-            );
-            return 20;
-        }
-        // A --system hooksPath would be shadowed by the --global write below and
-        // could silently disable a system-wide hook manager, so refuse here too.
-        let systemHooksPath = '';
-        try {
-            systemHooksPath = execFileSync('git', ['config', '--system', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
-        } catch { /* unset or no system config */ }
-        if (systemHooksPath) {
-            console.error(
-                `aimhooman: core.hooksPath is set at --system scope to '${systemHooksPath}'; ` +
-                'a --global install would shadow it. Unset it or choose a different setup.'
-            );
-            return 20;
-        }
-        const localRepo = tryRepo();
-        const localHooksPath = localRepo ? gitConfigAtScope(localRepo.root, '--local', 'core.hooksPath') : '';
-        if (localHooksPath) {
-            console.error(`aimhooman: warning: this repository has local core.hooksPath="${localHooksPath}", which overrides the global guard here`);
-        }
-        const hookSnapshots = REQUIRED_GIT_HOOKS
-            .map((name) => snapshotFile(join(aimDir, name)));
-        let rep;
-        try {
-            rep = installGlobalHooks(CLI_PATH);
-            if (rep.skipped?.length) {
-                for (const warning of rep.warnings || []) console.error(`aimhooman: ${warning}`);
-                console.error('aimhooman: global hook installation aborted; core.hooksPath was not changed');
+            const aimDir = globalHooksDir();
+            let existing = '';
+            try {
+                existing = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
+            } catch { /* unset */ }
+            if (existing && existing !== aimDir) {
+                console.error(
+                    `aimhooman: core.hooksPath is already set to '${existing}'; refusing to overwrite. ` +
+                    'Unset it (git config --global --unset core.hooksPath) or choose a different setup.'
+                );
                 return 20;
             }
-            execFileSync('git', ['config', '--global', 'core.hooksPath', rep.dir], { timeout: GIT_TIMEOUT_MS });
-        } catch (error) {
-            const rollbackFailures = [];
-            for (const snapshot of hookSnapshots.reverse()) {
-                try { restoreSnapshot(snapshot); }
-                catch (rollbackError) {
-                    rollbackFailures.push(`${snapshot.path}: ${rollbackError.message}`);
-                }
-            }
+            // A --system hooksPath would be shadowed by the --global write below and
+            // could silently disable a system-wide hook manager, so refuse here too.
+            let systemHooksPath = '';
             try {
-                if (existing) execFileSync('git', ['config', '--global', 'core.hooksPath', existing], { timeout: GIT_TIMEOUT_MS });
-                else execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
-            } catch (rollbackError) {
-                rollbackFailures.push(`global core.hooksPath: ${rollbackError.message}`);
+                systemHooksPath = execFileSync('git', ['config', '--system', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
+            } catch { /* unset or no system config */ }
+            if (systemHooksPath) {
+                console.error(
+                    `aimhooman: core.hooksPath is set at --system scope to '${systemHooksPath}'; ` +
+                    'a --global install would shadow it. Unset it or choose a different setup.'
+                );
+                return 20;
             }
-            console.error(`aimhooman: global hook installation failed: ${error.message}`);
-            if (rollbackFailures.length) {
-                console.error(`aimhooman: rollback incomplete: ${rollbackFailures.join('; ')}`);
+            const localRepo = tryRepo();
+            const localHooksPath = localRepo ? gitConfigAtScope(localRepo.root, '--local', 'core.hooksPath') : '';
+            if (localHooksPath) {
+                console.error(`aimhooman: warning: this repository has local core.hooksPath="${localHooksPath}", which overrides the global guard here`);
             }
-            return 30;
-        }
-        console.log(`aimhooman: global hooks at ${rep.dir} (core.hooksPath set)`);
-        for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
-        console.log('  note: this replaces the default .git/hooks directory in non-bare repositories that inherit the global setting; local/worktree core.hooksPath overrides it.');
-        return 0;
+            const hookSnapshots = REQUIRED_GIT_HOOKS
+                .map((name) => snapshotFile(join(aimDir, name)));
+            let rep;
+            try {
+                rep = installGlobalHooks(CLI_PATH);
+                if (rep.skipped?.length) {
+                    for (const warning of rep.warnings || []) console.error(`aimhooman: ${warning}`);
+                    console.error('aimhooman: global hook installation aborted; core.hooksPath was not changed');
+                    return 20;
+                }
+                execFileSync('git', ['config', '--global', 'core.hooksPath', rep.dir], { timeout: GIT_TIMEOUT_MS });
+            } catch (error) {
+                const rollbackFailures = [];
+                for (const snapshot of hookSnapshots.reverse()) {
+                    try { restoreSnapshot(snapshot); }
+                    catch (rollbackError) {
+                        rollbackFailures.push(`${snapshot.path}: ${rollbackError.message}`);
+                    }
+                }
+                try {
+                    if (existing) execFileSync('git', ['config', '--global', 'core.hooksPath', existing], { timeout: GIT_TIMEOUT_MS });
+                    else execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
+                } catch (rollbackError) {
+                    rollbackFailures.push(`global core.hooksPath: ${rollbackError.message}`);
+                }
+                console.error(`aimhooman: global hook installation failed: ${error.message}`);
+                if (rollbackFailures.length) {
+                    console.error(`aimhooman: rollback incomplete: ${rollbackFailures.join('; ')}`);
+                }
+                return 30;
+            }
+            console.log(`aimhooman: global hooks at ${rep.dir} (core.hooksPath set)`);
+            for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
+            console.log('  note: this replaces the default .git/hooks directory in non-bare repositories that inherit the global setting; local/worktree core.hooksPath overrides it.');
+            return 0;
         }, LIFECYCLE_LOCK_OPTIONS);
     }
     if (options.yes) throw new ArgumentError('--yes is only valid with --global');
@@ -853,97 +869,97 @@ function cmdInit(args) {
         return 30;
     }
     return withLock(join(repo.commonDir, 'aimhooman-lifecycle.lock'), () => {
-    let projectPolicy;
-    try {
-        projectPolicy = loadProjectPolicy(repo.root);
-    } catch (e) {
-        console.error(`aimhooman: cannot load project policy: ${e.message}`);
-        return 20;
-    }
-    if (projectPolicy) {
-        if (profileExplicit && profile !== projectPolicy.profile) {
-            console.error(
-                `aimhooman: project policy requires profile "${projectPolicy.profile}"; ` +
-                'edit .aimhooman.json to change the team baseline'
-            );
+        let projectPolicy;
+        try {
+            projectPolicy = loadProjectPolicy(repo.root);
+        } catch (e) {
+            console.error(`aimhooman: cannot load project policy: ${e.message}`);
             return 20;
         }
-        profile = projectPolicy.profile;
-    }
-    let eng;
-    try {
-        eng = configuredEngine(profile, repo);
-    } catch (e) {
-        console.error(`aimhooman: cannot initialise policy: ${e.message}`);
-        return 20;
-    }
-    const hookState = hookDiagnostics(repo);
-    const hookFiles = hookState.some((hook) => hook.shared)
-        ? []
-        : [...new Set(hookState.flatMap((hook) => [hook.path, hook.chainedPath]))];
-    let snapshots = [];
-    let rep;
-    try {
-        snapshots = [join(repo.stateDir, 'config.json'), repo.excludeFile, ...hookFiles]
-            .map(snapshotFile);
-        rep = installHooks(repo, CLI_PATH);
-        const activeHooks = installedHooks(repo);
-        if (!REQUIRED_GIT_HOOKS.every((name) => activeHooks.includes(name))) {
-            // installHooks declines rather than throws when the hooks directory is
-            // not ours, and its warnings are the only record of why. They are
-            // printed on the success path only, so carry them into the failure or
-            // the user is told nothing but "incomplete". The prefix is load-bearing:
-            // the exit-code branch below matches on it.
-            const cause = rep.shared && rep.warnings.length ? `${rep.warnings.join('; ')}; ` : '';
-            // When the decline is because the hooks path is shared/tracked (or,
-            // after B2, worktree content the next add would commit), name the two
-            // ways out so the user is not stuck: let aimhooman use the default
-            // .git/hooks, or — for a worktree hooks path kept local — exclude it
-            // first. The uninstall hint lets them undo this init attempt.
-            const remedy = rep.shared
-                ? ' To proceed, either unset core.hooksPath so aimhooman uses the default .git/hooks, or (for a worktree hooks path you keep local) add it to .gitignore or .git/info/exclude and retry. Run "aimhooman uninstall" to undo this init attempt.'
-                : '';
-            throw new Error(`hook installation incomplete; ${cause}repository guard is not active.${remedy}`);
-        }
-        saveConfig(repo.stateDir, { profile });
-        applyExclude(repo.excludeFile, patternsForRules(eng.rules));
-        const saved = loadConfig(repo.stateDir);
-        const excludes = inspectExclude(repo.excludeFile, patternsForRules(eng.rules));
-        if (saved.profile !== profile || !excludes.current) {
-            throw new Error('post-install state verification failed');
-        }
-    } catch (error) {
-        const rollbackFailures = [];
-        try {
-            const uninstalled = uninstallHooks(repo);
-            rollbackFailures.push(...(uninstalled.failures || []));
-        } catch (rollbackError) {
-            rollbackFailures.push(`hook uninstall: ${rollbackError.message}`);
-        }
-        const hookSet = new Set(hookFiles);
-        const restoreHooks = Boolean(rep?.installed?.length || rep?.chained?.length);
-        for (const snapshot of snapshots.reverse()) {
-            if (!restoreHooks && hookSet.has(snapshot.path)) continue;
-            try { restoreSnapshot(snapshot); }
-            catch (rollbackError) {
-                rollbackFailures.push(`${snapshot.path}: ${rollbackError.message}`);
+        if (projectPolicy) {
+            if (profileExplicit && profile !== projectPolicy.profile) {
+                console.error(
+                    `aimhooman: project policy requires profile "${projectPolicy.profile}"; ` +
+                    'edit .aimhooman.json to change the team baseline'
+                );
+                return 20;
             }
+            profile = projectPolicy.profile;
         }
-        if (rollbackFailures.length) {
-            console.error(`aimhooman: initialisation failed: ${error.message}`);
-            console.error(`aimhooman: rollback incomplete: ${rollbackFailures.join('; ')}`);
-            return 30;
+        let eng;
+        try {
+            eng = configuredEngine(profile, repo);
+        } catch (e) {
+            console.error(`aimhooman: cannot initialise policy: ${e.message}`);
+            return 20;
         }
-        console.error(`aimhooman: initialisation failed and prior files were restored: ${error.message}`);
-        return /hook installation incomplete/.test(error.message) ? 20 : expectedErrorCode(error);
-    }
-    console.log(`aimhooman: initialised (profile: ${profile})`);
-    console.log(`  state:    ${repo.stateDir}`);
-    console.log(`  excludes: ${repo.excludeFile}`);
-    if (rep.installed.length) console.log(`  hooks:    ${rep.installed.join(', ')}`);
-    if (rep.chained.length) console.log(`  chained:  ${rep.chained.join(', ')} (existing hooks preserved)`);
-    for (const warning of rep.warnings) console.log(`  warning:  ${warning}`);
-    return 0;
+        const hookState = hookDiagnostics(repo);
+        const hookFiles = hookState.some((hook) => hook.shared)
+            ? []
+            : [...new Set(hookState.flatMap((hook) => [hook.path, hook.chainedPath]))];
+        let snapshots = [];
+        let rep;
+        try {
+            snapshots = [join(repo.stateDir, 'config.json'), repo.excludeFile, ...hookFiles]
+                .map(snapshotFile);
+            rep = installHooks(repo, CLI_PATH);
+            const activeHooks = installedHooks(repo);
+            if (!REQUIRED_GIT_HOOKS.every((name) => activeHooks.includes(name))) {
+                // installHooks declines rather than throws when the hooks directory is
+                // not ours, and its warnings are the only record of why. They are
+                // printed on the success path only, so carry them into the failure or
+                // the user is told nothing but "incomplete". The prefix is load-bearing:
+                // the exit-code branch below matches on it.
+                const cause = rep.shared && rep.warnings.length ? `${rep.warnings.join('; ')}; ` : '';
+                // When the decline is because the hooks path is shared/tracked (or,
+                // after B2, worktree content the next add would commit), name the two
+                // ways out so the user is not stuck: let aimhooman use the default
+                // .git/hooks, or — for a worktree hooks path kept local — exclude it
+                // first. The uninstall hint lets them undo this init attempt.
+                const remedy = rep.shared
+                    ? ' To proceed, either unset core.hooksPath so aimhooman uses the default .git/hooks, or (for a worktree hooks path you keep local) add it to .gitignore or .git/info/exclude and retry. Run "aimhooman uninstall" to undo this init attempt.'
+                    : '';
+                throw new Error(`hook installation incomplete; ${cause}repository guard is not active.${remedy}`);
+            }
+            saveConfig(repo.stateDir, { profile });
+            applyExclude(repo.excludeFile, patternsForRules(eng.rules));
+            const saved = loadConfig(repo.stateDir);
+            const excludes = inspectExclude(repo.excludeFile, patternsForRules(eng.rules));
+            if (saved.profile !== profile || !excludes.current) {
+                throw new Error('post-install state verification failed');
+            }
+        } catch (error) {
+            const rollbackFailures = [];
+            try {
+                const uninstalled = uninstallHooks(repo);
+                rollbackFailures.push(...(uninstalled.failures || []));
+            } catch (rollbackError) {
+                rollbackFailures.push(`hook uninstall: ${rollbackError.message}`);
+            }
+            const hookSet = new Set(hookFiles);
+            const restoreHooks = Boolean(rep?.installed?.length || rep?.chained?.length);
+            for (const snapshot of snapshots.reverse()) {
+                if (!restoreHooks && hookSet.has(snapshot.path)) continue;
+                try { restoreSnapshot(snapshot); }
+                catch (rollbackError) {
+                    rollbackFailures.push(`${snapshot.path}: ${rollbackError.message}`);
+                }
+            }
+            if (rollbackFailures.length) {
+                console.error(`aimhooman: initialisation failed: ${error.message}`);
+                console.error(`aimhooman: rollback incomplete: ${rollbackFailures.join('; ')}`);
+                return 30;
+            }
+            console.error(`aimhooman: initialisation failed and prior files were restored: ${error.message}`);
+            return /hook installation incomplete/.test(error.message) ? 20 : expectedErrorCode(error);
+        }
+        console.log(`aimhooman: initialised (profile: ${profile})`);
+        console.log(`  state:    ${repo.stateDir}`);
+        console.log(`  excludes: ${repo.excludeFile}`);
+        if (rep.installed.length) console.log(`  hooks:    ${rep.installed.join(', ')}`);
+        if (rep.chained.length) console.log(`  chained:  ${rep.chained.join(', ')} (existing hooks preserved)`);
+        for (const warning of rep.warnings) console.log(`  warning:  ${warning}`);
+        return 0;
     }, LIFECYCLE_LOCK_OPTIONS);
 }
 
@@ -1646,41 +1662,41 @@ function cmdUninstall(args) {
     });
     if (options.global) {
         return withLock(join(globalHooksDir(), 'lifecycle.lock'), () => {
-        const aimDir = globalHooksDir();
-        const readGlobalHooksPath = () => {
-            try {
-                return execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
-            } catch { return ''; }
-        };
-        const current = readGlobalHooksPath();
-        let unsetAttempted = false;
-        if (current === aimDir) {
-            unsetAttempted = true;
-            try {
-                execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: ['ignore', 'ignore', 'ignore'], timeout: GIT_TIMEOUT_MS });
-            } catch { /* may have failed; re-verify below */ }
-            // A read-only or locked ~/.gitconfig can make --unset fail silently.
-            // Do not remove the dispatchers while core.hooksPath still resolves to
-            // them, or every repository inheriting this setting would run zero
-            // hooks with no warning. Preserve the working dispatchers until the
-            // config can be cleaned.
-            if (readGlobalHooksPath() === aimDir) {
-                console.error('aimhooman: could not unset global core.hooksPath (read-only or locked ~/.gitconfig); leaving dispatchers in place.');
-                console.error('  Fix the config permissions and run `aimhooman uninstall --global` again.');
-                return 30;
+            const aimDir = globalHooksDir();
+            const readGlobalHooksPath = () => {
+                try {
+                    return execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
+                } catch { return ''; }
+            };
+            const current = readGlobalHooksPath();
+            let unsetAttempted = false;
+            if (current === aimDir) {
+                unsetAttempted = true;
+                try {
+                    execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: ['ignore', 'ignore', 'ignore'], timeout: GIT_TIMEOUT_MS });
+                } catch { /* may have failed; re-verify below */ }
+                // A read-only or locked ~/.gitconfig can make --unset fail silently.
+                // Do not remove the dispatchers while core.hooksPath still resolves to
+                // them, or every repository inheriting this setting would run zero
+                // hooks with no warning. Preserve the working dispatchers until the
+                // config can be cleaned.
+                if (readGlobalHooksPath() === aimDir) {
+                    console.error('aimhooman: could not unset global core.hooksPath (read-only or locked ~/.gitconfig); leaving dispatchers in place.');
+                    console.error('  Fix the config permissions and run `aimhooman uninstall --global` again.');
+                    return 30;
+                }
             }
-        }
-        const rep = uninstallGlobalHooks();
-        console.log('aimhooman: global hooks uninstalled');
-        if (current && current !== aimDir) {
-            console.log(`  core.hooksPath kept at "${current}" (not owned by aimhooman)`);
-        } else {
-            console.log(`  core.hooksPath ${unsetAttempted ? 'unset' : 'was already unset'}`);
-        }
-        if (rep.removed.length) console.log(`  dispatchers removed: ${rep.removed.join(', ')}`);
-        for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
-        console.log(`  dir kept at ${rep.dir}`);
-        return 0;
+            const rep = uninstallGlobalHooks();
+            console.log('aimhooman: global hooks uninstalled');
+            if (current && current !== aimDir) {
+                console.log(`  core.hooksPath kept at "${current}" (not owned by aimhooman)`);
+            } else {
+                console.log(`  core.hooksPath ${unsetAttempted ? 'unset' : 'was already unset'}`);
+            }
+            if (rep.removed.length) console.log(`  dispatchers removed: ${rep.removed.join(', ')}`);
+            for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
+            console.log(`  dir kept at ${rep.dir}`);
+            return 0;
         }, LIFECYCLE_LOCK_OPTIONS);
     }
     const purge = Boolean(options.purgeState);
@@ -1691,72 +1707,72 @@ function cmdUninstall(args) {
     }
     const lifecycleLock = join(repo.commonDir, 'aimhooman-lifecycle.lock');
     const exitStatus = withLock(lifecycleLock, () => {
-    const rep = uninstallHooks(repo);
-    // The irreversible work is already done above, and the report is still
-    // below. A throw from here unwound past all of it, so a damaged marker was
-    // the only thing the user heard while four dispatchers kept guarding every
-    // commit. Report the failure beside the removal report instead of in place
-    // of it. Nothing is swallowed: this is also where the symlink and permission
-    // guards surface, and their messages still reach the user and still exit 30.
-    let excludeFailure = '';
-    try {
-        removeExclude(repo.excludeFile);
-    } catch (error) {
-        excludeFailure = `exclude block left in ${repo.excludeFile}: ${error.message}`;
-    }
-    // Trust the directory, not the report. Every refusal below leaves a working
-    // dispatcher behind, and one printed under "uninstalled" reads as done.
-    const remaining = remainingDispatchers(repo);
-    if (remaining.length) {
-        console.error('aimhooman: NOT uninstalled; leaving dispatchers in place:');
-        for (const path of remaining) console.error(`  ${path}`);
-        console.error('  These still guard every commit. Remove them by hand to finish uninstalling.');
-    } else {
-        console.log('aimhooman: uninstalled');
-    }
-    if (rep.removed.length) console.log(`  hooks removed:  ${rep.removed.join(', ')}`);
-    if (rep.restored.length) console.log(`  hooks restored: ${rep.restored.join(', ')}`);
-    for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
-    for (const f of rep.failures || []) console.error(`  failure: ${f}`);
-    if (excludeFailure) console.error(`  failure: ${excludeFailure}`);
-    const unrestored = purge ? unrestoredChainedBackups(repo) : [];
-    if (purge) {
-        // Never wipe stateDir while a predecessor hook backup is still on disk:
-        // a per-hook restore failure leaves the user's original hook existing
-        // only in <stateDir>/chained, so purging would destroy it irrecoverably.
-        if (unrestored.length || rep.failures?.length) {
-            console.error(
-                'aimhooman: state NOT purged — '
-                + `${unrestored.length} chained hook backup(s) remain unrestored`
-                + `${rep.failures?.length ? ` (failures: ${rep.failures.join('; ')})` : ''}; `
-                + "re-run 'aimhooman uninstall' to retry restore before purging."
-            );
-        } else {
-            rmSync(repo.stateDir, { recursive: true, force: true });
-            console.log('  state purged');
+        const rep = uninstallHooks(repo);
+        // The irreversible work is already done above, and the report is still
+        // below. A throw from here unwound past all of it, so a damaged marker was
+        // the only thing the user heard while four dispatchers kept guarding every
+        // commit. Report the failure beside the removal report instead of in place
+        // of it. Nothing is swallowed: this is also where the symlink and permission
+        // guards surface, and their messages still reach the user and still exit 30.
+        let excludeFailure = '';
+        try {
+            removeExclude(repo.excludeFile);
+        } catch (error) {
+            excludeFailure = `exclude block left in ${repo.excludeFile}: ${error.message}`;
         }
-    } else {
-        console.log(`  state kept at ${repo.stateDir} (use --purge-state to remove)`);
-    }
-    // Surface when a global core.hooksPath still enforces aimhooman, so a local
-    // uninstall cannot be mistaken for full removal. Foreign hooksPath values
-    // are left to the generic "not modified" warning emitted above.
-    const aimDir = globalHooksDir();
-    let globalHooksPath = '';
-    try {
-        globalHooksPath = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], {
-            encoding: 'utf8',
-            timeout: GIT_TIMEOUT_MS,
-        }).trim();
-    } catch { /* unset */ }
-    if (globalHooksPath === aimDir) {
-        console.log('aimhooman: global Git guard is still active');
-        console.log('  eligible non-bare repositories that inherit core.hooksPath are still guarded.');
-        console.log('  run `aimhooman uninstall --global` to remove it.');
-    }
-    // The managed block is still in the exclude file and still ignoring paths, so
-    // the uninstall is genuinely incomplete and 30 is the honest answer.
-    return remaining.length || rep.failures?.length || unrestored.length || excludeFailure ? 30 : 0;
+        // Trust the directory, not the report. Every refusal below leaves a working
+        // dispatcher behind, and one printed under "uninstalled" reads as done.
+        const remaining = remainingDispatchers(repo);
+        if (remaining.length) {
+            console.error('aimhooman: NOT uninstalled; leaving dispatchers in place:');
+            for (const path of remaining) console.error(`  ${path}`);
+            console.error('  These still guard every commit. Remove them by hand to finish uninstalling.');
+        } else {
+            console.log('aimhooman: uninstalled');
+        }
+        if (rep.removed.length) console.log(`  hooks removed:  ${rep.removed.join(', ')}`);
+        if (rep.restored.length) console.log(`  hooks restored: ${rep.restored.join(', ')}`);
+        for (const w of rep.warnings || []) console.log(`  warning: ${w}`);
+        for (const f of rep.failures || []) console.error(`  failure: ${f}`);
+        if (excludeFailure) console.error(`  failure: ${excludeFailure}`);
+        const unrestored = purge ? unrestoredChainedBackups(repo) : [];
+        if (purge) {
+            // Never wipe stateDir while a predecessor hook backup is still on disk:
+            // a per-hook restore failure leaves the user's original hook existing
+            // only in <stateDir>/chained, so purging would destroy it irrecoverably.
+            if (unrestored.length || rep.failures?.length) {
+                console.error(
+                    'aimhooman: state NOT purged — '
+                    + `${unrestored.length} chained hook backup(s) remain unrestored`
+                    + `${rep.failures?.length ? ` (failures: ${rep.failures.join('; ')})` : ''}; `
+                    + "re-run 'aimhooman uninstall' to retry restore before purging."
+                );
+            } else {
+                rmSync(repo.stateDir, { recursive: true, force: true });
+                console.log('  state purged');
+            }
+        } else {
+            console.log(`  state kept at ${repo.stateDir} (use --purge-state to remove)`);
+        }
+        // Surface when a global core.hooksPath still enforces aimhooman, so a local
+        // uninstall cannot be mistaken for full removal. Foreign hooksPath values
+        // are left to the generic "not modified" warning emitted above.
+        const aimDir = globalHooksDir();
+        let globalHooksPath = '';
+        try {
+            globalHooksPath = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], {
+                encoding: 'utf8',
+                timeout: GIT_TIMEOUT_MS,
+            }).trim();
+        } catch { /* unset */ }
+        if (globalHooksPath === aimDir) {
+            console.log('aimhooman: global Git guard is still active');
+            console.log('  eligible non-bare repositories that inherit core.hooksPath are still guarded.');
+            console.log('  run `aimhooman uninstall --global` to remove it.');
+        }
+        // The managed block is still in the exclude file and still ignoring paths, so
+        // the uninstall is genuinely incomplete and 30 is the honest answer.
+        return remaining.length || rep.failures?.length || unrestored.length || excludeFailure ? 30 : 0;
     }, LIFECYCLE_LOCK_OPTIONS);
     // Sweep the operational residue the guard authored in .git, so uninstall leaves
     // no aimhooman fingerprints behind — the same tooling residue this tool exists

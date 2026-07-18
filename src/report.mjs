@@ -1,5 +1,12 @@
 // Human-facing and JSON reporting for aimhooman findings.
 
+// HUMAN_FINDING_CAP bounds the per-invocation stderr output. A scan that fires
+// many findings of the same rule (a vendored OpenSSL corpus can produce 99) used
+// to emit hundreds of near-identical lines with no truncation marker. The cap
+// prints the first HUMAN_FINDING_CAP finding blocks, then a single summary line
+// for the rest. The JSON report (aimhooman review / --json) is never capped.
+const HUMAN_FINDING_CAP = 20;
+
 export function human(findings, tone) {
     if (!findings.length) return '';
     let out = tone === 'professional' ? '\n' : '\nnot very hooman.\n\n';
@@ -8,6 +15,13 @@ export function human(findings, tone) {
     for (const f of findings) {
         if (f.decision === 'block') block += 1;
         else if (f.decision === 'review') review += 1;
+    }
+    // Render findings in order up to the cap, then collapse the rest into one
+    // summary line. Keeps the first findings fully visible (the actionable ones)
+    // while bounding stderr for repeated-rule scans.
+    const shown = findings.slice(0, HUMAN_FINDING_CAP);
+    const hidden = findings.length - shown.length;
+    for (const f of shown) {
         const loc = f.path
             ? `${visible(f.path)}${f.line ? `:${f.line}` : ''}`
             : (f.line ? `commit message line ${f.line}` : '');
@@ -18,10 +32,21 @@ export function human(findings, tone) {
         if (f.text && f.text.trim()) {
             out += `       > ${isSensitive(f) ? '[redacted]' : visible(f.text.trim())}\n`;
         }
-        if (f.remediation?.length) out += `       fix: ${f.remediation[0]}\n`;
+        // Render the whole remediation array, not just the first entry. Several
+        // rules carry a second line (e.g. "rotate the key if it was ever exposed")
+        // that the previous single-index render dropped silently.
+        for (const remedy of (f.remediation || [])) {
+            out += `       fix: ${remedy}\n`;
+        }
         out += '\n';
     }
-    out += `${findings.length} findings: ${block} block, ${review} review\n`;
+    if (hidden > 0) {
+        out += `… and ${hidden} more ${hidden === 1 ? 'finding' : 'findings'} (run 'aimhooman review' for the full list)\n\n`;
+    }
+    const findingWord = findings.length === 1 ? 'finding' : 'findings';
+    const blockWord = block === 1 ? 'block' : 'blocks';
+    const reviewWord = review === 1 ? 'review' : 'reviews';
+    out += `${findings.length} ${findingWord}: ${block} ${blockWord}, ${review} ${reviewWord}\n`;
     return out;
 }
 

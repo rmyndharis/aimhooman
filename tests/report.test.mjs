@@ -155,6 +155,61 @@ test('human report escapes control characters in paths', () => {
     assert.match(cr, /bell\\x07end\\x7f/);
 });
 
+// W6: only remediation[0] used to render, so a rule whose remediation array
+// carried a second line (e.g. "rotate the key if it was ever exposed") lost it
+// silently. The whole array now renders, one `fix:` line per entry.
+test('human report renders every remediation entry, not just the first', () => {
+    const finding = {
+        ...secretFinding,
+        remediation: ['remove the value', 'rotate the key if it was ever exposed', 'use the secret store'],
+    };
+    const report = human([finding], 'professional');
+    assert.match(report, /fix: remove the value/);
+    assert.match(report, /fix: rotate the key if it was ever exposed/);
+    assert.match(report, /fix: use the secret store/);
+    const fixLines = report.split('\n').filter((line) => line.startsWith('       fix:'));
+    assert.equal(fixLines.length, 3, `expected 3 fix lines, got ${fixLines.length}`);
+});
+
+// W7: the summary line was always "findings" even for a single finding, and the
+// block/review nouns did not agree either. Singular/plural now applied to all
+// three counts.
+test('human report summary line agrees on number for one vs many findings', () => {
+    const one = human([secretFinding], 'professional');
+    assert.match(one, /1 finding: 1 block, 0 reviews/);
+    const reviewFinding = {
+        ...secretFinding,
+        decision: 'review',
+        matchedRules: secretFinding.matchedRules.map((match) => ({ ...match, decision: 'review' })),
+    };
+    const two = human([secretFinding, reviewFinding], 'professional');
+    assert.match(two, /2 findings: 1 block, 1 review/);
+});
+
+// W8: a scan that fires many findings (a vendored OpenSSL corpus can produce 99)
+// used to emit hundreds of near-identical stderr lines with no truncation
+// marker. The human report now caps the printed blocks and collapses the rest
+// into one summary line; the JSON report is never capped.
+test('human report caps printed findings and signals truncation; JSON is uncapped', () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+        ...secretFinding,
+        path: `file${i}.txt`,
+        line: i + 1,
+    }));
+    const report = human(many, 'professional');
+    // The cap is 20, so 10 findings are hidden behind a single truncation line.
+    assert.match(report, /… and 10 more findings \(run 'aimhooman review' for the full list\)/);
+    // The full count is still reported in the summary.
+    assert.match(report, /30 findings:/);
+    // Only the first 20 paths are printed; file25.txt (index 25) is beyond the cap.
+    assert.doesNotMatch(report, /file25\.txt/);
+    assert.match(report, /file19\.txt/);
+    // The JSON report carries all 30 findings uncapped.
+    const json = jsonReport(many);
+    const parsed = JSON.parse(json);
+    assert.equal(parsed.findings.length, 30);
+});
+
 test('JSON report includes metadata and redacts secret text', () => {
     const metadata = {
         tool_version: '0.1.0-rc.1',

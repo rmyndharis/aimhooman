@@ -253,7 +253,7 @@
     },
     {
         "id": "secret.private-key",
-        "version": 2,
+        "version": 3,
         "provider": "generic",
         "category": "secret",
         "confidence": "high",
@@ -274,10 +274,11 @@
             "strict": "block",
             "compliance": "block"
         },
-        "reason": "Private key material must never be committed.",
+        "reason": "A path matching a private-key filename (id_rsa, id_ed25519, *.p12, *.pfx, ...) is blocked by name — content is not inspected. If this is a real key, it must never be committed; if the name is coincidental, rename the file.",
         "remediation": [
             "git restore --staged <path>",
-            "rotate the key if it was ever exposed"
+            "if this is a real key, rotate it if it was ever exposed",
+            "if the name is coincidental (a fixture, a doc), rename the file so it no longer matches a private-key pattern"
         ]
     },
     {
@@ -391,10 +392,22 @@
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "path_case": "insensitive", "paths": [".playwright-mcp/**", "**/.playwright-mcp/**"] },
-        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                ".playwright-mcp/**",
+                "**/.playwright-mcp/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
         "reason": "Playwright MCP session artifacts are local, not repository content.",
-        "remediation": ["git restore --staged <path>"]
+        "remediation": [
+            "git restore --staged <path>"
+        ]
     },
     {
         "id": "remember.state",
@@ -403,10 +416,22 @@
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "path_case": "insensitive", "paths": [".remember/**", "**/.remember/**"] },
-        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                ".remember/**",
+                "**/.remember/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
         "reason": "Remember second-brain data is local, not repository content.",
-        "remediation": ["git restore --staged <path>"]
+        "remediation": [
+            "git restore --staged <path>"
+        ]
     },
     {
         "id": "superpowers.state",
@@ -415,10 +440,22 @@
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "path_case": "insensitive", "paths": [".superpowers/**", "**/.superpowers/**"] },
-        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                ".superpowers/**",
+                "**/.superpowers/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
         "reason": "Superpowers plugin state is local, not repository content.",
-        "remediation": ["git restore --staged <path>"]
+        "remediation": [
+            "git restore --staged <path>"
+        ]
     },
     {
         "id": "agent.state",
@@ -427,9 +464,21 @@
         "category": "ephemeral-state",
         "confidence": "high",
         "kind": "path",
-        "match": { "path_case": "insensitive", "paths": [".agent/**", "**/.agent/**"] },
-        "actions": { "clean": "block", "strict": "block", "compliance": "block" },
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                ".agent/**",
+                "**/.agent/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
         "reason": "Generic agent state is local, not repository content.",
-        "remediation": ["git restore --staged <path>"]
+        "remediation": [
+            "git restore --staged <path>"
+        ]
     }
 ]
