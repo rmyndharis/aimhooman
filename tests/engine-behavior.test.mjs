@@ -139,6 +139,69 @@ test('review-scoped allows require the exact reviewed blob object', () => {
     }), []);
 });
 
+// W11 (F2): on clean/compliance, review is ADVISORY (a stderr message, exit 0),
+// so re-surfacing it on every edit of a reviewed agent-instruction file is pure
+// friction. A live-file review (newObjectId set) therefore persists per path +
+// rule across edits on clean/compliance. Strict keeps the exact-OID binding (the
+// test above). Tombstones keep the exact match in every profile.
+test('review-scoped allows persist per path on clean/compliance, not strict (W11 hybrid)', () => {
+    const reviewed = 'a'.repeat(40);
+    const transition = 'c'.repeat(40);
+    const entry = {
+        target: 'AGENTS.md',
+        ruleId: 'generic.agent-instructions',
+        transition,
+        newObjectId: reviewed,
+        newMode: '100644',
+    };
+    const ctx = { transition, objectId: reviewed, mode: '100644' };
+
+    // Strict: a changed blob is NOT covered — exact-OID binding holds.
+    const strict = newEngine('strict');
+    strict.setOverrides([], [], [entry]);
+    assert.equal(
+        strict.checkPaths(['AGENTS.md'], { ...ctx, objectId: 'b'.repeat(40) })[0]?.decision,
+        'block',
+        'strict keeps exact-OID binding — a changed blob must re-review',
+    );
+
+    // Clean/compliance: a changed blob IS covered — the advisory persists per path.
+    for (const profile of ['clean', 'compliance']) {
+        const engine = newEngine(profile);
+        engine.setOverrides([], [], [entry]);
+        assert.deepEqual(
+            engine.checkPaths(['AGENTS.md'], { ...ctx, objectId: 'b'.repeat(40) }),
+            [],
+            `${profile}: a reviewed path suppresses the advisory across blob edits`,
+        );
+        assert.deepEqual(
+            engine.checkPaths(['AGENTS.md'], { ...ctx, transition: 'd'.repeat(40) }),
+            [],
+            `${profile}: a reviewed path suppresses the advisory across transitions`,
+        );
+        // A DIFFERENT path is not covered — the match is path-specific. The
+        // uncovered decision is the rule's base decision in this profile
+        // (review for clean/compliance, block for strict).
+        assert.equal(
+            engine.checkPaths(['CLAUDE.md'], ctx)[0]?.decision,
+            profile === 'strict' ? 'block' : 'review',
+            `${profile}: a review for AGENTS.md does not cover a different path`,
+        );
+    }
+
+    // Tombstone (reviewed deletion): exact match in every profile. A re-added
+    // file (non-null blob) must NOT be covered by a deletion review.
+    for (const profile of ['clean', 'compliance', 'strict']) {
+        const engine = newEngine(profile);
+        engine.setOverrides([], [], [{ ...entry, newObjectId: null, newMode: null }]);
+        assert.equal(
+            engine.checkPaths(['AGENTS.md'], { transition, objectId: 'b'.repeat(40), mode: '100644' })[0]?.decision,
+            profile === 'strict' ? 'block' : 'review',
+            `${profile}: a tombstone review does not cover a re-added file`,
+        );
+    }
+});
+
 test('a bound one-snapshot allow cannot override an explicit local deny', () => {
     const engine = newEngine('strict');
     const context = { transientAllowRules: new Set(['generic.project-policy']) };

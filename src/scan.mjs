@@ -51,13 +51,35 @@ export class Engine {
     decide(base, target, rule, context = {}) {
         if (this.denyPaths.has(target) || this.denyRules.has(rule.id)) return 'block';
         if (context.transientAllowRules?.has(rule.id)) return 'allow';
-        if (this.scopedAllow.some((entry) => (
-            entry.target === target
-            && entry.ruleId === rule.id
-            && entry.transition === context.transition
-            && entry.newObjectId === context.objectId
-            && entry.newMode === context.mode
-        ))) return 'allow';
+        // W11 (F2): review binding is profile-dependent.
+        //   - strict: review binds the EXACT reviewed blob. A changed/copied/
+        //     symlinked/mode-flipped target is NOT covered — it must be re-
+        //     reviewed. This is the security property the strict lifecycle tests
+        //     pin, and strict is the profile that exits 11 on review.
+        //   - clean/compliance: review is ADVISORY (a stderr message, exit 0),
+        //     so re-surfacing it on every edit of a reviewed agent-instruction
+        //     file (CLAUDE.md, AGENTS.md) is pure friction with no security
+        //     payoff — the security boundary is secret scanning, strict blocks,
+        //     and reference-transaction. A LIVE-FILE review (newObjectId set)
+        //     therefore persists per path + rule across edits. A TOMBSTONE
+        //     review (newObjectId null — a reviewed deletion) keeps the exact
+        //     match in every profile: a deletion review must not silently cover
+        //     a later re-adding of the file.
+        const strictReview = this.profile === 'strict';
+        if (this.scopedAllow.some((entry) => {
+            if (entry.target !== target || entry.ruleId !== rule.id) return false;
+            if (entry.newObjectId === null) {
+                // Tombstone: exact match in every profile.
+                return entry.transition === context.transition
+                    && entry.newObjectId === context.objectId
+                    && entry.newMode === context.mode;
+            }
+            // Live-file review: exact in strict; path-anchored in clean/compliance.
+            return !strictReview
+                || (entry.transition === context.transition
+                    && entry.newObjectId === context.objectId
+                    && entry.newMode === context.mode);
+        })) return 'allow';
         // A rule-level allow cannot bypass the secret-category guard that the
         // path-level allow below enforces: secret rules require an explicit
         // --scope secret-path override on a specific path, never a blanket rule allow.
