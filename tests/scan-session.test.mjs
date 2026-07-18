@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { openRepo, trackedEntries } from '../src/gitx.mjs';
 import { newEngine } from '../src/scan.mjs';
 import { scanEntries } from '../src/scan-session.mjs';
+import { commitChanges } from '../src/history-scan.mjs';
 
 function fixture() {
     const dir = mkdtempSync(join(tmpdir(), 'aim-session-'));
@@ -180,6 +181,95 @@ test('NUL-classified blobs still run every secret signature in every profile', (
                 finding.matchedRuleIds.includes('secret.provider-token')
             )), true, profile);
         }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// 12d-F1: scanEntries used to read the full blob, so a file that contained a
+// secret-bearing line ELSEWHERE (a PEM header inside a test string on line 10)
+// blocked a commit that only edited line 1. With hunk-narrowing (W4), only the
+// changed line ranges reach checkContent, so an unrelated edit no longer trips
+// a header that lives outside the diff. Entries here come from commitChanges,
+// which carries the parent commit needed to compute the changed hunks.
+function repositoryWithBase(file, content) {
+    const dir = mkdtempSync(join(tmpdir(), 'aim-hunk-'));
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    writeFileSync(join(dir, file), content);
+    execFileSync('git', ['add', file], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: dir });
+    return dir;
+}
+
+function headAndParent(dir) {
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    const parent = execFileSync('git', ['rev-parse', 'HEAD~'], { cwd: dir, encoding: 'utf8' }).trim();
+    return { head, parent };
+}
+
+test('hunk-narrowing: an unrelated edit does not trip a PEM header elsewhere in the file', () => {
+    // Base file: a PEM private-key header on line 8 (inside a test fixture).
+    // The second commit edits line 1 only (an unrelated comment). The PEM
+    // header is NOT in the changed hunk, so it must not produce a finding.
+    // PEM markers are built from parts so this test file never carries a
+    // literal that trips secret.private-key-content on itself.
+    const begin = '-----BEGIN ' + 'RSA PRIVATE KEY' + '-----';
+    const end = '-----END ' + 'RSA PRIVATE KEY' + '-----';
+    const lines = [
+        '// top of file',
+        'package main',
+        '',
+        'func TestKey(t *testing.T) {',
+        '  const fixture = `',
+        begin,
+        'MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn',
+        end,
+        '`',
+        '}',
+    ];
+    const dir = repositoryWithBase('keypair_test.go', `${lines.join('\n')}\n`);
+    try {
+        // Edit line 1 only (the unrelated comment).
+        writeFileSync(join(dir, 'keypair_test.go'), '// edited top of file\n' + lines.slice(1).join('\n') + '\n');
+        execFileSync('git', ['add', 'keypair_test.go'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'edit comment'], { cwd: dir });
+
+        const repo = openRepo(dir);
+        const { head, parent } = headAndParent(dir);
+        const changes = commitChanges(repo, head, head, [parent]);
+        const result = scanEntries(repo, newEngine('strict'), changes.entries);
+        const pem = result.findings.filter((f) => f.matchedRuleIds.includes('secret.private-key-content'));
+        assert.equal(pem.length, 0, 'an unrelated edit must not trip a PEM header outside the changed hunk');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('hunk-narrowing: a PEM header inside the changed hunk still blocks (guardrail)', () => {
+    // Base file: a benign comment. The second commit ADDS a line with a PEM
+    // private-key header. That header IS in the changed hunk, so it must still
+    // produce a finding. This is the regression guard against over-narrowing:
+    // the fix must not open a hole for a secret added in the diff.
+    // PEM markers built from parts (see the test above) so this file does not
+    // trip secret.private-key-content on itself.
+    const begin = '-----BEGIN ' + 'RSA PRIVATE KEY' + '-----';
+    const end = '-----END ' + 'RSA PRIVATE KEY' + '-----';
+    const dir = repositoryWithBase('keypair.go', '// benign base\npackage main\n');
+    try {
+        writeFileSync(join(dir, 'keypair.go'), `// benign base\npackage main\n${begin}\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n${end}\n`);
+        execFileSync('git', ['add', 'keypair.go'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'add key'], { cwd: dir });
+
+        const repo = openRepo(dir);
+        const { head, parent } = headAndParent(dir);
+        const changes = commitChanges(repo, head, head, [parent]);
+        const result = scanEntries(repo, newEngine('strict'), changes.entries);
+        const pem = result.findings.filter((f) => f.matchedRuleIds.includes('secret.private-key-content'));
+        assert.ok(pem.length >= 1, 'a PEM header inside the changed hunk must still block');
+        // The finding must be anchored to the actual added header line, not line 1.
+        assert.equal(pem.every((f) => f.line >= 3), true, 'PEM finding must anchor to the added header line');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
