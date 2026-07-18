@@ -274,3 +274,60 @@ test('hunk-narrowing: a PEM header inside the changed hunk still blocks (guardra
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+// Regression guard for the batched collectLineRanges (one diff per commit, not
+// one per file). A commit that touches MULTIPLE files must narrow each file to
+// its own changed hunks independently: a PEM header added in file A must block,
+// while an unrelated edit in file B (whose OWN content is clean) must not trip
+// a PEM header that lives in file B elsewhere. If the batched path-attribution
+// were wrong (e.g. hunks attributed to the wrong file), this would catch it.
+test('hunk-narrowing: batched multi-file diff attributes each file its own hunks', () => {
+    // File A: a clean base. Commit adds a PEM header (must block).
+    // File B: base contains a PEM header on line 8 (in a test fixture). Commit
+    // edits line 1 only (must NOT block — the header is outside B's hunk).
+    const begin = '-----BEGIN ' + 'RSA PRIVATE KEY' + '-----';
+    const end = '-----END ' + 'RSA PRIVATE KEY' + '-----';
+    const baseB = [
+        '// top of file B',
+        'package main',
+        '',
+        'func TestKey(t *testing.T) {',
+        '  const fixture = `',
+        begin,
+        'MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn',
+        end,
+        '`',
+        '}',
+    ].join('\n') + '\n';
+    const dir = mkdtempSync(join(tmpdir(), 'aim-hunk-batch-'));
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+        execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+        // Base commit: A is benign, B has the PEM header.
+        writeFileSync(join(dir, 'a.go'), '// benign A\npackage main\n');
+        writeFileSync(join(dir, 'b.go'), baseB);
+        execFileSync('git', ['add', 'a.go', 'b.go'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: dir });
+
+        // Second commit: A gets a PEM header added (block); B's line 1 edited (no block).
+        writeFileSync(join(dir, 'a.go'), `// benign A\npackage main\n${begin}\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n${end}\n`);
+        writeFileSync(join(dir, 'b.go'), '// edited top of file B\n' + baseB.split('\n').slice(1).join('\n') + '\n');
+        execFileSync('git', ['add', 'a.go', 'b.go'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'edit both'], { cwd: dir });
+
+        const repo = openRepo(dir);
+        const { head, parent } = headAndParent(dir);
+        const changes = commitChanges(repo, head, head, [parent]);
+        const result = scanEntries(repo, newEngine('strict'), changes.entries);
+        const pem = result.findings.filter((f) => f.matchedRuleIds.includes('secret.private-key-content'));
+        // Exactly one PEM finding: from a.go (where the header was added), not b.go
+        // (where the header lives outside the edited hunk). If batching mis-attributed
+        // b.go's hunks to a.go or vice versa, this count or the path would be wrong.
+        const pemPaths = [...new Set(pem.map((f) => f.path))];
+        assert.ok(pem.length >= 1, 'the PEM header added to a.go must block');
+        assert.deepEqual(pemPaths, ['a.go'], 'only a.go (the file whose hunk added the header) should report; b.go must not');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});

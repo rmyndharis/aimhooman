@@ -86,6 +86,11 @@ export function scanEntries(repo, engine, entries, options = {}) {
     stats.objects_read = batch.objects.size;
     for (const failure of batch.failures) increment(stats.skipped, failure.reason);
 
+    // Precompute changed-line ranges for all text candidates in ONE batched
+    // diff per (commit, parent) pair (W4 + perf). A missing path key means
+    // "scan the whole blob" (staged/snapshot/root entries, or a diff failure).
+    const lineRanges = collectLineRanges(repo, candidates);
+
     const findings = [];
     for (const entry of candidates) {
         const blob = batch.objects.get(entry.oid);
@@ -110,9 +115,9 @@ export function scanEntries(repo, engine, entries, options = {}) {
             });
         } else {
             stats.files_scanned += 1;
-            const ranges = changedLineRanges(repo, entry);
+            const ranges = lineRanges.get(entry.path);
             matched = engine.checkContent(entry.path, blob.toString('utf8'),
-                ranges ? { lineRanges: ranges } : {});
+                ranges && ranges.length ? { lineRanges: ranges } : {});
         }
         stats.findings_total += matched.length;
         for (const finding of matched) {
@@ -239,49 +244,71 @@ function isBinary(buffer) {
     return false;
 }
 
-// changedLineRanges returns the NEW-side line ranges that changed between the
-// entry's parent and its commit, as inclusive 1-based {start,end} pairs. Used
-// to narrow content scanning to changed hunks (W4, bug 12d-F1): a file that
-// contains a secret-bearing line ELSEWHERE (a PEM header inside a test string
-// on line 200) must not block a commit that only edited line 50.
+// collectLineRanges builds a Map<path, ranges[]> for all entries whose content
+// scan can be narrowed to changed hunks (W4, bug 12d-F1). It batches the work
+// into ONE `git diff --unified=0` per (commit, parent) pair rather than one diff
+// per file — a commit touching 50 files would otherwise pay ~650ms of per-file
+// git subprocess startup. Entries are grouped by their first parent; a normal
+// commit (single parent) is a single diff call covering every file.
 //
-// Returns null when ranges cannot be computed (no parent/commit, no parent
-// blob, git diff failure, or the diff is empty). The caller treats null as
-// "scan the whole blob" — the safe side for a secret scanner is to scan MORE,
-// not less, so a failure to compute hunks falls back to the pre-W4 behaviour.
-//
-// Pure deletions (new-side count 0) produce no new content to scan and are
-// skipped. A new-side count of 1 is implied when the count is omitted
-// (`@@ -10 +12 @@`).
-function changedLineRanges(repo, entry) {
-    if (!entry.commit || !entry.parents?.length) return null;
-    const parent = entry.parents[0];
-    if (!parent) return null;
-    let output;
-    try {
-        output = execFileSync('git', [
-            'diff', '--unified=0', '--no-color', '--no-prefix',
-            parent, entry.commit, '--', entry.path,
-        ], {
-            cwd: repo.root,
-            env: gitEnvironment(),
-            encoding: 'utf8',
-            timeout: GIT_TIMEOUT_MS,
-            maxBuffer: 4 * 1024 * 1024,
-            stdio: ['pipe', 'pipe', 'pipe'],
-        });
-    } catch {
-        return null;
+// Entries without commit/parents (tracked snapshots, staged views, root
+// commits) are omitted from the map; the caller treats a missing key as "scan
+// the whole blob" — the safe side for a secret scanner is to scan MORE, not
+// less, so a failure to compute hunks falls back to the pre-W4 behaviour.
+function collectLineRanges(repo, entries) {
+    // Group text-candidate entries by their first parent to batch the diffs.
+    // Key by `${commit}\0${parent}` so a merge with multiple parents produces
+    // one diff per distinct (commit, parent) pair.
+    const groups = new Map();
+    for (const entry of entries) {
+        if (entry.type === 'blob' && !entry.commit) continue; // staged/snapshot: no diff
+        const parent = entry.parents?.[0];
+        if (!entry.commit || !parent) continue; // root commit or no parent: whole-blob
+        const key = `${entry.commit}\0${parent}`;
+        if (!groups.has(key)) groups.set(key, { commit: entry.commit, parent });
     }
-    const ranges = [];
-    for (const line of output.split('\n')) {
-        // Hunk header: @@ -old_start[,old_count] +new_start[,new_count] @@ ...
-        const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-        if (!match) continue;
-        const start = Number(match[1]);
-        const count = match[2] === undefined ? 1 : Number(match[2]);
-        if (start === 0 || count === 0) continue; // pure deletion, no new content
-        ranges.push({ start, end: start + count - 1 });
+    const byPath = new Map();
+    for (const { commit, parent } of groups.values()) {
+        let output;
+        try {
+            output = execFileSync('git', [
+                '-c', 'core.quotePath=false',
+                'diff', '--unified=0', '--no-color', '--no-prefix',
+                parent, commit,
+            ], {
+                cwd: repo.root,
+                env: gitEnvironment(),
+                encoding: 'utf8',
+                timeout: GIT_TIMEOUT_MS,
+                maxBuffer: 16 * 1024 * 1024,
+                stdio: ['pipe', 'pipe', 'pipe'],
+            });
+        } catch {
+            continue; // diff failed → those paths stay absent → whole-blob scan
+        }
+        // Parse the multi-file diff: track the current file from the `+++ path`
+        // line, and attribute each `@@` hunk header to it. core.quotePath=false
+        // keeps spaces and non-ASCII paths literal so they match entry.path (which
+        // comes from git diff --raw -z, also unquoted). Paths containing newlines
+        // are not handled, but they fall back to a whole-blob scan (safe).
+        let currentPath = null;
+        for (const line of output.split('\n')) {
+            // With --no-prefix the +++ line is `+++ path` (no b/ prefix).
+            const plusMatch = /^\+\+\+ (.+)$/.exec(line);
+            if (plusMatch) {
+                currentPath = plusMatch[1] === '/dev/null' ? null : plusMatch[1];
+                continue;
+            }
+            const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+            if (!match || !currentPath) continue;
+            const start = Number(match[1]);
+            const count = match[2] === undefined ? 1 : Number(match[2]);
+            if (start === 0 || count === 0) continue; // pure deletion, no new content
+            const range = { start, end: start + count - 1 };
+            const existing = byPath.get(currentPath);
+            if (existing) existing.push(range);
+            else byPath.set(currentPath, [range]);
+        }
     }
-    return ranges.length ? ranges : null;
+    return byPath;
 }
