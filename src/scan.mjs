@@ -119,7 +119,18 @@ export class Engine {
         const categories = Array.isArray(options.categories)
             ? new Set(options.categories)
             : null;
+        // lineRanges narrows content scanning to changed hunks (W4, bug 12d-F1).
+        // When provided (an array of inclusive 1-based {start,end} ranges), only
+        // lines falling in a range are evaluated; this stops a file that contains
+        // a secret-bearing line ELSEWHERE (a PEM header inside a test string on
+        // line 200) from blocking a commit that only edited line 50. Findings
+        // keep their real line numbers because lineRecords already anchors them.
+        // Absent = scan every line (the pre-W4 behaviour).
+        const ranges = Array.isArray(options.lineRanges) && options.lineRanges.length
+            ? options.lineRanges
+            : null;
         for (const record of lineRecords(String(content))) {
+            if (ranges && !ranges.some((range) => record.line >= range.start && record.line <= range.end)) continue;
             this.#markLocalInputSkip('code', p, record.text, categories);
             const result = this.#evaluate('code', p, record.text, { categories });
             if (result) out.push(finding(result, { path: p, line: record.line, text: record.text }));

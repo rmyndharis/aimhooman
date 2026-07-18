@@ -110,7 +110,9 @@ export function scanEntries(repo, engine, entries, options = {}) {
             });
         } else {
             stats.files_scanned += 1;
-            matched = engine.checkContent(entry.path, blob.toString('utf8'));
+            const ranges = changedLineRanges(repo, entry);
+            matched = engine.checkContent(entry.path, blob.toString('utf8'),
+                ranges ? { lineRanges: ranges } : {});
         }
         stats.findings_total += matched.length;
         for (const finding of matched) {
@@ -235,4 +237,51 @@ function isBinary(buffer) {
     const length = Math.min(buffer.length, 8000);
     for (let index = 0; index < length; index++) if (buffer[index] === 0) return true;
     return false;
+}
+
+// changedLineRanges returns the NEW-side line ranges that changed between the
+// entry's parent and its commit, as inclusive 1-based {start,end} pairs. Used
+// to narrow content scanning to changed hunks (W4, bug 12d-F1): a file that
+// contains a secret-bearing line ELSEWHERE (a PEM header inside a test string
+// on line 200) must not block a commit that only edited line 50.
+//
+// Returns null when ranges cannot be computed (no parent/commit, no parent
+// blob, git diff failure, or the diff is empty). The caller treats null as
+// "scan the whole blob" — the safe side for a secret scanner is to scan MORE,
+// not less, so a failure to compute hunks falls back to the pre-W4 behaviour.
+//
+// Pure deletions (new-side count 0) produce no new content to scan and are
+// skipped. A new-side count of 1 is implied when the count is omitted
+// (`@@ -10 +12 @@`).
+function changedLineRanges(repo, entry) {
+    if (!entry.commit || !entry.parents?.length) return null;
+    const parent = entry.parents[0];
+    if (!parent) return null;
+    let output;
+    try {
+        output = execFileSync('git', [
+            'diff', '--unified=0', '--no-color', '--no-prefix',
+            parent, entry.commit, '--', entry.path,
+        ], {
+            cwd: repo.root,
+            env: gitEnvironment(),
+            encoding: 'utf8',
+            timeout: GIT_TIMEOUT_MS,
+            maxBuffer: 4 * 1024 * 1024,
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+    } catch {
+        return null;
+    }
+    const ranges = [];
+    for (const line of output.split('\n')) {
+        // Hunk header: @@ -old_start[,old_count] +new_start[,new_count] @@ ...
+        const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+        if (!match) continue;
+        const start = Number(match[1]);
+        const count = match[2] === undefined ? 1 : Number(match[2]);
+        if (start === 0 || count === 0) continue; // pure deletion, no new content
+        ranges.push({ start, end: start + count - 1 });
+    }
+    return ranges.length ? ranges : null;
 }
