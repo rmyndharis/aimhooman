@@ -2329,6 +2329,93 @@ test('uncertain shell syntax remains advisory outside strict', async () => {
     }
 });
 
+// W1 (B-F1, B-F2): unquoted braces in a POSIX shell command were flagged as
+// opaque commit-hiding syntax, which denied read-only commands copied verbatim
+// from `gh`'s own docs — `gh api repos/{owner}/{repo}/pulls` — with no pipe, no
+// Git, and no commit. The closing probe is `ls {owner}`: not `gh`, not `git`,
+// not a pipe. If that is no longer opaque, the trigger was the brace character
+// itself, not anything downstream. Brace expansion (`{a,b}`, `{owner}`,
+// `x.{js,ts}`) only expands to arguments for the same command and cannot feed
+// code into a pipe sink, so it must not make a command opaque. Brace groups
+// (`{ list; }`) and PowerShell script blocks stay opaque — the latter via the
+// non-POSIX executor path, the former via isBraceGroupToken.
+test('brace expansion is not opaque commit-hiding; brace groups and pwsh blocks are', () => {
+    // Brace expansion in everyday read-only commands: none of these hide a
+    // commit or feed a pipe sink, so none are opaque. These are the B-F1 probes.
+    for (const command of [
+        'gh api repos/{owner}/{repo}/pulls',          // P5c5 — the original complaint
+        'gh api repos/owner/repo/pulls',              // P5c12 — baseline, no braces
+        'gh api "repos/{owner}/{repo}/pulls"',        // P5c14 — quoted
+        'ls {owner}',                                  // P5c13 — the disambiguator
+        'curl -o f.txt https://example.com/items/{id}',
+        'npm run {task}',
+        'cp x.{js,ts}',
+        'echo {a}',
+        'mkdir -p src/{a,b,c}',
+        'rm src/{a,b}/old.txt',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, false, command);
+        assert.equal(parseGit(command).uncertainShell, false, command);
+    }
+    // Brace groups are control flow and stay opaque. The `{` stands as its own
+    // token (whitespace/separator before, whitespace or `;` after).
+    for (const command of [
+        '{ ls; }',
+        '{ rm -rf x; }',
+        'echo done && { git commit --no-verify -m x; }',
+        '{ git commit --no-verify; }',
+    ]) {
+        assert.equal(parseGit(command).uncertainShell, true, command);
+    }
+    // Brace expansion reaching a pipe sink that executes code is still denied —
+    // not by the brace, but by the pipe-to-shell. Regression guard against
+    // over-loosening: the fix must not open a bypass through brace expansion.
+    for (const command of [
+        'echo {a,b,c} | bash',
+        "printf '%s\\0' {src,tests} | xargs -0 rm -rf",
+        'cat {a,b}.sh | sh',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, true, command);
+    }
+    // PowerShell script blocks stay opaque via the non-POSIX executor path,
+    // independent of the POSIX brace distinction. Confirms the fix did not
+    // loosen pwsh `{ ... }` treatment.
+    for (const command of [
+        'Invoke-Command { git commit --no-verify }',
+        '& { git commit --no-verify }',
+    ]) {
+        assert.equal(parseGit(command).uncertainShell, true, command);
+    }
+});
+
+// W1 (B-F2): the opaque deny message always named a pipe and `| bash` even when
+// the command had no pipe, sending the developer looking for a segment that did
+// not exist. The message is now conditional on whether a pipe is present.
+test('opaque deny message does not mention a pipe when the command has no pipe', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-opaque-msg-');
+    try {
+        // A brace group with no pipe is opaque (control flow) and, on a clean
+        // repo with a bypass prefix, hits the opaque-pipeline deny path. The
+        // message must not tell the developer to drop a `| bash` segment.
+        const out = await invokePreToolUse(dir, {
+            tool_name: 'Bash',
+            tool_input: { command: 'true && { git commit --no-verify -m x; }' },
+        });
+        assert.equal(out?.permissionDecision, 'deny', 'brace-group bypass should deny');
+        const reason = out?.permissionDecisionReason || '';
+        assert.ok(
+            !reason.includes('| bash'),
+            `pipe-less deny must not mention \`| bash\`: ${reason}`,
+        );
+        assert.ok(
+            !reason.includes('pipeline'),
+            `pipe-less deny must not mention "pipeline": ${reason}`,
+        );
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('literal indirection into a strict target is denied from a clean repository', async () => {
     const root = mkdtempSync(join(tmpdir(), 'aim-hook-cross-target-'));
     const clean = join(root, 'clean');

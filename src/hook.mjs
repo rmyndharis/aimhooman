@@ -447,10 +447,16 @@ function hookPreToolUse(input) {
     // stdin) can hide a commit or run arbitrary commands, and there is no argv
     // to read a --no-verify out of. The earlier message reused the commit text
     // above, which told a developer to "retry the commit" for a command that
-    // was not a commit at all — this names the real shape instead.
+    // was not a commit at all — this names the real shape instead. The message
+    // is conditional on whether a pipe is actually present: opaque syntax
+    // without a pipe (a subshell, a brace group, command substitution) should
+    // not tell the developer to "drop the `| bash` segment" on a command that
+    // has no `|`.
     const opaquePipelineReason = commit
         ? unmodelledPrefixReason
-        : 'aimhooman cannot prove this pipeline is read-only: a shell or code-executing segment can hide a commit or run arbitrary commands. Drop that segment (for example the `| bash`) and run the pieces separately.';
+        : hasUnquotedPipe(executorCommand)
+            ? 'aimhooman cannot prove this pipeline is read-only: a shell or code-executing segment can hide a commit or run arbitrary commands. Drop that segment (for example the `| bash`) and run the pieces separately.'
+            : 'aimhooman cannot prove this command is read-only: it uses shell syntax (a subshell, command substitution, script-feed redirect, background job, or brace group) that can hide a commit or run arbitrary commands. Run the pieces separately.';
     const blocks = [];
     // potentialCommit treats a command as leading to a commit. uncertainShell
     // was too broad: it flagged any pipe, so a benign read-only pipeline
@@ -1961,7 +1967,18 @@ function hasUncertainShellSyntax(command) {
             quote = char;
             continue;
         }
-        if (char === '`' || char === '(' || char === ')' || char === '{' || char === '}' || char === '<' || char === '>') return true;
+        // `{`/`}` are ambiguous: brace expansion (`{a,b}`, `{owner}`, `x.{js,ts}`)
+        // is argument-level and cannot hide a commit or feed code into a pipe
+        // sink, while a brace group (`{ list; }`) is control flow and can. Brace
+        // expansion touches the surrounding word (no separator before the `{`, no
+        // space/`;` after it); a brace-group `{` stands as its own token. PowerShell
+        // `{ }` script blocks are handled separately via the non-POSIX executor
+        // path, so this POSIX distinction never loosens that.
+        if (char === '{' || char === '}') {
+            if (isBraceGroupToken(command, i)) return true;
+            continue;
+        }
+        if (char === '`' || char === '(' || char === ')' || char === '<' || char === '>') return true;
         if (char === '|' && command[i + 1] !== '|') return true;
         if (char === '&' && command[i + 1] !== '&' && command[i - 1] !== '&') return true;
     }
@@ -1969,6 +1986,57 @@ function hasUncertainShellSyntax(command) {
         const words = shellWords(unit.text.trim());
         return SHELL_CONTROL_WORDS.has(words[0]);
     });
+}
+
+// BRACE_GROUP_LEAD chars may appear immediately before a brace-group token.
+// `:` is included so `cmd: { ... }` is handled, though it is not POSIX shell.
+const BRACE_GROUP_LEAD = new Set(['', ' ', '\t', '\n', ';', '&', '|', '(', ')']);
+// BRACE_GROUP_OPEN_TRAIL chars may follow a `{` that opens a brace group: the
+// reserved word `{` must be followed by whitespace, `;`, or end of string.
+const BRACE_GROUP_OPEN_TRAIL = new Set([' ', '\t', '\n', ';', '']);
+// BRACE_GROUP_CLOSE_LEAD chars precede a `}` that closes a brace group: the
+// closer must follow `;` or whitespace (the end of the group body).
+const BRACE_GROUP_CLOSE_LEAD = new Set([' ', '\t', '\n', ';', '']);
+
+// isBraceGroupToken reports whether `{`/`}` at position i in command is a
+// POSIX brace-group token (reserved-word `{` or its closer `}`) rather than a
+// brace-expansion character. Brace expansion `{a,b}` / `{owner}` / `x.{js,ts}`
+// is argument-level and cannot feed code into a pipe sink or run a subcommand,
+// so it must not make a command "opaque". A brace group `{ list; }` is
+// control flow and can, so it stays opaque. PowerShell script blocks are
+// handled by the non-POSIX executor path, not here.
+function isBraceGroupToken(command, i) {
+    const char = command[i];
+    const prev = command[i - 1] ?? '';
+    const next = command[i + 1] ?? '';
+    if (char === '{') {
+        if (!BRACE_GROUP_LEAD.has(prev)) return false;
+        if (!BRACE_GROUP_OPEN_TRAIL.has(next)) return false;
+        return true;
+    }
+    // `}` closer: must follow `;` or whitespace.
+    return BRACE_GROUP_CLOSE_LEAD.has(prev);
+}
+
+// hasUnquotedPipe reports whether command contains a pipe `|` that is not
+// `||`, outside of any quote. Used to decide whether the opaque-pipeline deny
+// message should mention a pipe at all — the original message always named
+// `| bash` even for commands with no pipe.
+function hasUnquotedPipe(command) {
+    let quote = '';
+    let escaped = false;
+    for (let i = 0; i < command.length; i += 1) {
+        const char = command[i];
+        if (escaped) { escaped = false; continue; }
+        if (char === '\\' && quote !== "'") { escaped = true; continue; }
+        if (quote) {
+            if (char === quote) quote = '';
+            continue;
+        }
+        if (char === "'" || char === '"') { quote = char; continue; }
+        if (char === '|' && command[i + 1] !== '|') return true;
+    }
+    return false;
 }
 
 function shellUnits(s) {
@@ -2146,7 +2214,14 @@ function containsOpaquePipeLexeme(command) {
             continue;
         }
         if (char === "'" || char === '"') { quote = char; continue; }
-        if (char === '`' || char === '(' || char === ')' || char === '{' || char === '}') return true;
+        // Brace expansion (`{a,b}`, `{owner}`) is not opaque: it only expands to
+        // arguments for the same command and cannot feed code into a pipe sink.
+        // Brace groups (`{ list; }`) are opaque. See isBraceGroupToken.
+        if (char === '{' || char === '}') {
+            if (isBraceGroupToken(command, i)) return true;
+            continue;
+        }
+        if (char === '`' || char === '(' || char === ')') return true;
         if (char === '$' && (next === '(' || next === '{')) return true;
         if (char === '<' || char === ';') return true;
         if (char === '&' && next !== '&' && prev !== '&' && prev !== '>' && prev !== '<') return true;
