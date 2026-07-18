@@ -177,6 +177,16 @@ export function stagedPaths(repo) {
     ], repo.root));
 }
 
+// stagedTreeSha writes the index to a tree object and returns its SHA, the same
+// value `git write-tree` produces in the commit-msg dispatcher. Used by the
+// pre-commit/commit-msg marker dedup (W5): pre-commit records this sha when it
+// scans clean, and commit-msg skips its duplicate tree scan when the sha still
+// matches. The index is unchanged between the two hooks in a normal commit, so
+// the sha is stable; any staging mutation invalidates it automatically.
+export function stagedTreeSha(repo) {
+    return gitStr(['write-tree'], repo.root);
+}
+
 // Unmerged index entries have only stages 1-3 and are omitted by the ordinary
 // cached diff. Expose their paths so callers cannot mistake a conflicted index
 // for a complete, clean staged snapshot.

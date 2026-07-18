@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { chmodSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, readdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
@@ -15,6 +15,7 @@ import {
     readStagedPath,
     stagedPaths,
     stagedRenameSources,
+    stagedTreeSha,
     unstagePaths,
     withIndexFromTree,
 } from '../src/gitx.mjs';
@@ -327,6 +328,49 @@ function dispatchHooksChanged(repo, profile) {
     return true;
 }
 
+// W5 pre-commit/commit-msg marker dedup. pre-commit writes a marker after a
+// clean, complete scan of the staged tree; commit-msg reads it and skips its
+// duplicate ~170ms tree scan when the staged tree sha, profile, and
+// completeness all match. The marker lives in stateDir (gitignored plumbing).
+// It is self-invalidating: any index mutation between the two hooks changes the
+// tree sha, so a stale marker never matches. A missing/corrupt/mismatched
+// marker makes commit-msg fall back to the full scan, so this is purely an
+// optimization and never weakens the guard.
+const PRECOMMIT_CLEAN_VERSION = 1;
+function precommitCleanPath(repo) {
+    return join(repo.stateDir, 'precommit-clean.json');
+}
+function recordPrecommitClean(repo, profile) {
+    let treeSha;
+    try {
+        treeSha = stagedTreeSha(repo);
+    } catch {
+        return; // cannot compute the sha → do not record; commit-msg will scan
+    }
+    try {
+        writeFileSync(precommitCleanPath(repo), JSON.stringify({
+            version: PRECOMMIT_CLEAN_VERSION,
+            tree: treeSha,
+            profile,
+            complete: true,
+        }));
+    } catch {
+        // best effort; a missing marker just means commit-msg scans normally
+    }
+}
+function precommitCleanMatches(repo, treeSha, profile) {
+    let marker;
+    try {
+        marker = JSON.parse(readFileSync(precommitCleanPath(repo), 'utf8'));
+    } catch {
+        return false; // missing/corrupt → fall back to full scan
+    }
+    return marker?.version === PRECOMMIT_CLEAN_VERSION
+        && marker.complete === true
+        && marker.tree === treeSha
+        && marker.profile === profile;
+}
+
 function cmdPrecommit(args) {
     parseNoArguments(args);
     const repo = tryRepo();
@@ -352,6 +396,13 @@ function cmdPrecommit(args) {
             process.stderr.write(incompleteMessage(scan));
             return 31;
         }
+        // W5 marker dedup: record that this staged tree scanned clean so the
+        // upcoming commit-msg hook can skip its duplicate tree scan. The tree
+        // sha is the same value the commit-msg dispatcher computes via
+        // `git write-tree`; the index is unchanged on this no-block path, so the
+        // sha is stable. A missing/stale/mismatched marker makes commit-msg
+        // fall back to the full scan, so this is purely an optimization.
+        recordPrecommitClean(repo, profile);
         return profile === 'strict' && reviews.length ? 11 : 0;
     }
     if (profile === 'strict') {
@@ -479,7 +530,14 @@ function cmdCommitmsg(args) {
     try {
         const checked = againstWouldBeTree(() => ({
             message: scanMessage(repo, text, { target: 'staged' }),
-            tree: options.tree ? scanGitTarget(repo, { kind: 'staged', limits }) : null,
+            // W5 marker dedup: if pre-commit already scanned this exact tree
+            // clean (matching sha + profile + complete), skip the duplicate
+            // ~170ms tree scan. The marker is self-invalidating (any index
+            // mutation changes the tree sha), and a missing/stale/mismatched
+            // marker falls back to the full scan, so this is safe.
+            tree: options.tree && precommitCleanMatches(repo, options.tree, hookProfile)
+                ? null
+                : (options.tree ? scanGitTarget(repo, { kind: 'staged', limits }) : null),
         }));
         scan = checked.message;
         treeScan = checked.tree;

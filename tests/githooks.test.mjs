@@ -1489,6 +1489,79 @@ test('chained hook failure is returned without running the final guard', () => {
     }
 });
 
+// W5 pre-commit/commit-msg marker dedup. After a clean, complete pre-commit
+// scan, pre-commit records the staged tree sha so commit-msg can skip its
+// duplicate tree scan. These tests verify the marker is written on a clean
+// commit, NOT written when pre-commit blocks, and that a --no-verify commit
+// (no marker) still gets its staged content scanned by commit-msg (fallback).
+test('pre-commit records a clean-tree marker that commit-msg can reuse', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-marker-clean-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+            const markerPath = join(root, '.git', 'aimhooman', 'precommit-clean.json');
+
+            // A clean commit: pre-commit scans, finds nothing, records the marker.
+            writeFileSync(join(root, 'README.md'), 'changed\n');
+            git(root, ['add', 'README.md']);
+            assert.equal(existsSync(markerPath), false, 'no marker before the first clean commit');
+            const commit = spawnSync('git', ['commit', '-m', 'clean change'], { cwd: root, encoding: 'utf8' });
+            assert.equal(commit.status, 0, `clean commit failed: ${commit.stderr}`);
+            assert.equal(existsSync(markerPath), true, 'clean pre-commit must record the marker for commit-msg');
+            const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+            assert.equal(marker.complete, true);
+            assert.ok(typeof marker.tree === 'string' && marker.tree.length > 0, 'marker carries the tree sha');
+            assert.equal(marker.profile, 'clean');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('pre-commit does not record a marker when it blocks (commit-msg must still scan)', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-marker-block-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
+            const markerPath = join(root, '.git', 'aimhooman', 'precommit-clean.json');
+
+            // Stage a secret. pre-commit blocks and must NOT record a marker, so
+            // commit-msg (if it ran) would fall back to the full scan.
+            writeFileSync(join(root, '.env'), 'TOKEN=secretvalue\n');
+            git(root, ['add', '-f', '.env']);
+            const commit = spawnSync('git', ['commit', '-m', 'secret'], { cwd: root, encoding: 'utf8' });
+            assert.notEqual(commit.status, 0, 'a staged secret must block the commit');
+            assert.equal(existsSync(markerPath), false, 'a blocking pre-commit must not record a clean marker');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('a --no-verify commit with a staged secret is still blocked by commit-msg (no marker fallback)', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-marker-noverify-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
+            const markerPath = join(root, '.git', 'aimhooman', 'precommit-clean.json');
+
+            // --no-verify skips pre-commit entirely, so no marker is written.
+            // commit-msg must still scan the staged tree and block the secret.
+            writeFileSync(join(root, '.env'), 'TOKEN=secretvalue\n');
+            git(root, ['add', '-f', '.env']);
+            const commit = spawnSync('git', ['commit', '--no-verify', '-m', 'secret'], { cwd: root, encoding: 'utf8' });
+            assert.notEqual(commit.status, 0, '--no-verify must not bypass commit-msg tree scan');
+            assert.equal(existsSync(markerPath), false, 'no marker when pre-commit was skipped');
+            assert.match(commit.stderr, /secret\.dotenv/, 'commit-msg must still catch the staged secret');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 // B10-F1: a chained predecessor that resolves sibling scripts via
 // $(dirname "$0") — the dominant pattern in husky and vanilla .githooks —
 // broke after `aim init`, because the dispatcher invoked the predecessor as
