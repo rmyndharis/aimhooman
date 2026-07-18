@@ -438,3 +438,37 @@ test('withLock holds the critical section and fails closed on a legacy shared lo
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test('a queue directory swept mid-acquisition is recreated, not failed onto the caller', async () => {
+    const { withLock } = await import('../src/atomic-write.mjs');
+    const { openSync } = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'aim-lock-swept-'));
+    try {
+        const lock = join(dir, 'overrides.json.lock');
+        const queue = `${lock}.queue`;
+        // `aimhooman uninstall` removes empty queue directories. Between mkdir and
+        // the first publication this contender owns no file there, so the sweep can
+        // land in the gap — which is wide, because building the candidate probes the
+        // process identity via `ps` on macOS and BSD.
+        let swept = false;
+        const operations = {
+            open: (path, flags, mode) => {
+                if (!swept) {
+                    swept = true;
+                    rmSync(queue, { recursive: true, force: true });
+                }
+                return openSync(path, flags, mode);
+            },
+        };
+        assert.equal(
+            withLock(lock, () => 'entered', { candidateOperations: operations }),
+            'entered',
+        );
+        assert.equal(swept, true, 'the sweep never ran, so the race was not exercised');
+        // Released cleanly: the candidate is gone and the lock is immediately reusable.
+        assert.deepEqual(readdirSync(queue), []);
+        assert.equal(withLock(lock, () => 'again'), 'again');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});

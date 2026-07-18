@@ -1700,19 +1700,28 @@ function cmdUninstall(args) {
     ]) {
         try { rmdirSync(queue); } catch { /* held by another aimhooman, or already gone */ }
     }
-    // A one-commit-ago attribution backup that git's next COMMIT_EDITMSG makes
-    // stale. It lands beside git's message file, which lives in the per-worktree
-    // git directory — not the common one. Uninstall disarms every worktree at
-    // once, so sweep the main git directory and each linked worktree, or
-    // "state purged" stays a lie for whichever worktree last stripped a message.
-    const messageDirs = [repo.commonDir];
-    try {
-        const linked = join(repo.commonDir, 'worktrees');
-        for (const name of readdirSync(linked)) messageDirs.push(join(linked, name));
-    } catch { /* no linked worktrees */ }
-    for (const dir of messageDirs) {
-        try { rmSync(join(dir, 'COMMIT_EDITMSG.aimhooman-bak'), { force: true }); }
-        catch { /* nothing to remove */ }
+    // The attribution backup is the user's only copy of the lines stripped from
+    // their last message — commit-msg already clears the previous one, so what
+    // survives here is current, not stale. A plain uninstall says "state kept"
+    // and must not delete it; only --purge-state, which promises to remove
+    // everything, sweeps it. Git names the message file per operation
+    // (COMMIT_EDITMSG, MERGE_MSG, ...) and the backup inherits that name, so
+    // match the suffix rather than one filename. It lands beside that file, in
+    // the per-worktree git directory rather than the common one, and uninstall
+    // disarms every worktree at once — so cover the main one and each linked.
+    if (purge) {
+        const messageDirs = [repo.commonDir];
+        try {
+            const linked = join(repo.commonDir, 'worktrees');
+            for (const name of readdirSync(linked)) messageDirs.push(join(linked, name));
+        } catch { /* no linked worktrees */ }
+        for (const dir of messageDirs) {
+            try {
+                for (const name of readdirSync(dir)) {
+                    if (name.endsWith('.aimhooman-bak')) rmSync(join(dir, name), { force: true });
+                }
+            } catch { /* directory missing or unreadable */ }
+        }
     }
     return exitStatus;
 }

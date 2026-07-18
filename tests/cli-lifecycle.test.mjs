@@ -1188,6 +1188,71 @@ test('init requires Git 2.28 while accepting vendor suffixes, and doctor reports
     }
 });
 
+test('uninstall sweeps its lock queues, and only --purge-state takes the message backup', () => {
+    const repo = createRepo('clean');
+    try {
+        writeFileSync(join(repo.root, 'app.js'), 'export const value = 1;\n');
+        git(repo, ['add', 'app.js']);
+        git(repo, ['commit', '-m', ATTRIBUTION]);
+
+        const common = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+        const bak = `${gitPath(repo, 'COMMIT_EDITMSG')}.aimhooman-bak`;
+        const queues = [
+            join(common, 'aimhooman-lifecycle.lock.queue'),
+            join(common, 'info', 'exclude.aimhooman.lock.queue'),
+            join(gitPath(repo, 'hooks'), '.aimhooman-hooks.lock.queue'),
+        ];
+        assert.ok(existsSync(bak), 'the attribution strip should leave a backup to sweep');
+
+        // A plain uninstall keeps policy state, so it keeps the backup too: that
+        // file is the only copy of the lines stripped from the last message.
+        const plain = run(repo, ['uninstall']);
+        assert.equal(plain.status, 0, plain.stderr);
+        assert.ok(existsSync(bak), 'a plain uninstall must not delete the message backup');
+        for (const queue of queues) {
+            assert.equal(existsSync(queue), false, `${queue} survived uninstall`);
+        }
+
+        const reinstalled = run(repo, ['init']);
+        assert.equal(reinstalled.status, 0, reinstalled.stderr);
+        const purged = run(repo, ['uninstall', '--purge-state']);
+        assert.equal(purged.status, 0, purged.stderr);
+        assert.equal(existsSync(bak), false, '--purge-state must remove the message backup');
+        for (const queue of queues) {
+            assert.equal(existsSync(queue), false, `${queue} survived --purge-state`);
+        }
+    } finally {
+        cleanup(repo);
+    }
+});
+
+test('--purge-state removes a message backup left in a linked worktree', () => {
+    const repo = createRepo('clean');
+    const linkedBase = mkdtempSync(join(tmpdir(), 'aim-lifecycle-worktree-'));
+    const linked = join(linkedBase, 'linked');
+    try {
+        git(repo, ['worktree', 'add', '-q', linked, '-b', 'feature']);
+        writeFileSync(join(linked, 'app.js'), 'export const value = 1;\n');
+        execFileSync('git', ['add', 'app.js'], { cwd: linked, env: repo.env });
+        execFileSync('git', ['commit', '-m', ATTRIBUTION], { cwd: linked, env: repo.env });
+
+        // Git writes the message file into the per-worktree git directory, so the
+        // backup does not land in the common one the rest of the sweep uses.
+        const common = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+        const bak = join(common, 'worktrees', 'linked', 'COMMIT_EDITMSG.aimhooman-bak');
+        assert.ok(existsSync(bak), 'the linked worktree strip should leave a backup');
+
+        // Uninstalling from the main worktree disarms the linked one too, so its
+        // residue has to go with it or "state purged" is false.
+        const purged = run(repo, ['uninstall', '--purge-state']);
+        assert.equal(purged.status, 0, purged.stderr);
+        assert.equal(existsSync(bak), false, 'the linked worktree backup survived --purge-state');
+    } finally {
+        rmSync(linkedBase, { recursive: true, force: true });
+        cleanup(repo);
+    }
+});
+
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
