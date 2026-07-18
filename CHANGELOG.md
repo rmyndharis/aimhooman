@@ -5,6 +5,75 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-07-18
+
+This release works through the findings of the real-world scenario report
+(191 scenarios across 11 repos, 8 languages). The headline: a read-only
+command copied from `gh`'s own docs no longer gets denied, and editing an
+unrelated line in a file that carries a private-key header elsewhere no
+longer blocks the commit.
+
+### Fixed
+
+- Read-only commands with unquoted braces (`gh api repos/{owner}/{repo}/pulls`,
+  `ls {owner}`, `cp x.{js,ts}`) are no longer denied as opaque commit-hiding
+  pipelines. Brace expansion is argument-level and cannot feed code into a pipe
+  sink; brace groups (`{ list; }`) and PowerShell script blocks remain opaque.
+  The opaque-deny message also no longer names a pipe when the command has none.
+- Editing an unrelated line in a file that contains a private-key header
+  elsewhere (e.g. a PEM fixture inside a Go test string) no longer blocks the
+  commit. Content scanning is now narrowed to the changed hunks; a header added
+  in the diff still blocks, a header carried outside the diff stays silent.
+  Binary blobs keep their whole-blob secret scan.
+- AWS's documented example secret access key (`wJalrXUtnFEMI/...EXAMPLEKEY`)
+  no longer blocks commits. Its access-key-ID pair was already excepted; the
+  secret-key half now is too. Real keys — including ones containing `EXAMPLEKEY`
+  as a substring — still block.
+- `aimhooman <subcommand> --help` now prints usage and exits 0 instead of
+  erroring on the unknown `--help` option.
+- The human finding report renders every remediation entry (a rule's second
+  line, e.g. "rotate the key if it was ever exposed", was silently dropped), and
+  its summary line agrees on number (`1 finding`, not `1 findings`). A scan
+  firing many findings (a vendored OpenSSL corpus can produce 99) now caps the
+  printed blocks at 20 and collapses the rest into one truncation line; the JSON
+  report stays uncapped.
+- The `secret.private-key` message now states the match is by filename, not by
+  content, and offers renaming the file when the name is coincidental.
+- A chained hook predecessor that resolves sibling scripts via `$(dirname "$0")`
+  — the dominant husky and vanilla `.githooks` pattern — no longer breaks after
+  `aimhooman init`. The dispatcher now sources the predecessor in a subshell,
+  which preserves the original `$0`. (Bash-only predecessors remain out of
+  scope.)
+
+### Changed
+
+- **Breaking:** an untracked `core.hooksPath` inside the worktree (a freshly
+  created `.husky` before its first commit, a team-local `.team-hooks`) is now
+  treated as repository content and refuses to receive a dispatcher — the next
+  `git add` would otherwise stage the dispatcher's machine-local absolute CLI,
+  Node, and PATH into history. Add the path to `.gitignore` or
+  `.git/info/exclude` to keep it local; the refusal message names this and
+  points at `aimhooman uninstall`. A `.git/hooks/` path and a tracked `.husky`
+  are unaffected.
+- `aimhooman review` advisories now persist per path across edits on the
+  `clean` and `compliance` profiles, so editing a reviewed agent-instruction
+  file (CLAUDE.md, AGENTS.md, `.github/copilot-instructions.md`) no longer
+  re-surfaces the review message on every edit. The `strict` profile keeps the
+  exact-blob binding unchanged; reviewed deletions (tombstones) keep it in every
+  profile.
+- The `aimhooman init` refusal message names the two remedies (unset
+  `core.hooksPath`, or exclude the worktree path) and points at
+  `aimhooman uninstall`, so a refused init is no longer a dead end.
+
+### Performance
+
+- A commit no longer pays a duplicate tree scan in `commit-msg` for the staged
+  tree that `pre-commit` just verified. `pre-commit` records the staged tree sha
+  after a clean, complete scan; `commit-msg` skips its ~170 ms tree scan when the
+  sha matches. The marker is self-invalidating (any index mutation changes the
+  sha) and a missing/stale/mismatched marker falls back to the full scan, so
+  this is purely an optimization. Net ~150 ms saved per commit.
+
 ## [0.1.7] - 2026-07-18
 
 ### Fixed

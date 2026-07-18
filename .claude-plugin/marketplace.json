@@ -9,7 +9,7 @@
             "name": "aimhooman",
             "source": "./",
             "description": "Keeps AI session files, secrets, and unwanted attribution out at the agent and Git boundary.",
-            "version": "0.1.7",
+            "version": "0.1.8",
             "license": "MIT",
             "keywords": [
                 "git",
