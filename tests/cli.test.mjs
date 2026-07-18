@@ -7,6 +7,53 @@ import { join } from 'node:path';
 
 const CLI = join(process.cwd(), 'bin/aimhooman.mjs');
 
+// Git refuses to make a commit with nothing staged. Repair runs after git has
+// already decided there is something, so unstaging the last path leaves git
+// building an empty commit it would never have made on its own. The user asked
+// to commit an artifact, not to mark the history with an empty one carrying that
+// message.
+test('a repair that empties the index stops the commit instead of leaving an empty one', () => {
+    const dir = makeRepo('clean');
+    try {
+        const before = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+        mkdirSync(join(dir, '.playwright-mcp'));
+        writeFileSync(join(dir, '.playwright-mcp/trace.json'), '{}');
+        execFileSync('git', ['add', '-f', '.playwright-mcp/trace.json'], { cwd: dir });
+
+        const commit = spawnSync('git', ['commit', '-m', 'add trace'], { cwd: dir, encoding: 'utf8' });
+
+        assert.notEqual(commit.status, 0, `git made a commit anyway: ${commit.stderr}`);
+        assert.equal(
+            execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim(),
+            before,
+            'HEAD moved, so an empty commit landed'
+        );
+        assert.match(commit.stderr, /nothing else was staged/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The other half: when something legitimate is still staged, the repair takes the
+// artifact out and the commit goes through. That is the whole point.
+test('a repair that leaves real work staged lets the commit through', () => {
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(join(dir, 'app.js'), 'ship\n');
+        execFileSync('git', ['add', 'app.js'], { cwd: dir });
+        mkdirSync(join(dir, '.playwright-mcp'));
+        writeFileSync(join(dir, '.playwright-mcp/trace.json'), '{}');
+        execFileSync('git', ['add', '-f', '.playwright-mcp/trace.json'], { cwd: dir });
+
+        const commit = spawnSync('git', ['commit', '-m', 'add app'], { cwd: dir, encoding: 'utf8' });
+
+        assert.equal(commit.status, 0, commit.stderr);
+        const files = execFileSync('git', ['show', '--name-only', '--format=', 'HEAD'], {
+            cwd: dir,
+            encoding: 'utf8',
+        }).trim();
+        assert.equal(files, 'app.js');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 function makeRepo(profile) {
     const dir = mkdtempSync(join(tmpdir(), 'aim-cli-'));
     execFileSync('git', ['init', '-q'], { cwd: dir });
@@ -63,15 +110,17 @@ test('refcheck accepts Git 2.54 preparing phase without running the prepared sca
     assert.match(invalid.stderr, /must be preparing, prepared, committed, or aborted/);
 });
 
-test('precommit: clean unstages AI artifact and exits 0', () => {
+test('precommit: clean unstages an AI artifact and stops a commit it emptied', () => {
     const dir = makeRepo('clean');
     try {
         mkdirSync(join(dir, '.playwright-mcp'));
         writeFileSync(join(dir, '.playwright-mcp/trace.json'), '{}');
         execFileSync('git', ['add', '-f', '.playwright-mcp/trace.json'], { cwd: dir });
-        const out = run('precommit', [], dir);
-        assert.equal(out.code, undefined); // exit 0 has no .status
-        // still staged? it should have been unstaged
+        const out = result('precommit', [], dir);
+        // The artifact was the only staged path, so repairing the index leaves
+        // nothing to commit. Exit 10 stops git rather than let it mint an empty
+        // commit carrying the user's message.
+        assert.equal(out.status, 10, out.stderr);
         const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: dir, encoding: 'utf8' }).trim();
         assert.equal(staged, '');
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -95,8 +144,7 @@ test('precommit: clean omits the empty-commit hint when other files remain stage
             encoding: 'utf8',
         }).trim();
         assert.equal(staged, 'feature.txt');
-        assert.doesNotMatch(out.stderr, /commit will be empty/);
-        assert.doesNotMatch(out.stderr, /nothing else staged/);
+        assert.doesNotMatch(out.stderr, /nothing else was staged/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -113,8 +161,10 @@ test('precommit: a zero-similarity blocked rename restores the possible source d
         execFileSync('git', ['add', '-f', '.playwright-mcp/trace.json'], { cwd: dir });
 
         const out = result('precommit', [], dir);
-        assert.equal(out.status, 0, out.stderr);
-        assert.match(out.stderr, /commit will be empty/);
+        // Repairing the index leaves nothing staged, so the commit stops
+        // rather than land empty.
+        assert.equal(out.status, 10, out.stderr);
+        assert.match(out.stderr, /nothing else was staged/);
         const staged = execFileSync('git', ['diff', '--cached', '--name-status'], {
             cwd: dir,
             encoding: 'utf8',
@@ -216,7 +266,9 @@ test('precommit: the clean repair reports the rule that took each file, not one 
         execFileSync('git', ['add', '-f', 'id_rsa', '.playwright-mcp/trace.json'], { cwd: dir });
 
         const out = result('precommit', [], dir);
-        assert.equal(out.status, 0, out.stderr);
+        // Repairing the index leaves nothing staged, so the commit stops
+        // rather than land empty.
+        assert.equal(out.status, 10, out.stderr);
         assert.match(out.stderr, /unstaged 2 file\(s\) from this commit: /);
         assert.doesNotMatch(out.stderr, /AI artifact/);
         // Both categories are in the set, and each finding carries its own rule
@@ -513,7 +565,9 @@ test('clean precommit fully unstages a blocked rename', () => {
         execFileSync('git', ['config', 'diff.renames', 'false'], { cwd: dir });
         execFileSync('git', ['mv', 'README.md', '.env'], { cwd: dir });
         const out = result('precommit', [], dir);
-        assert.equal(out.status, 0, out.stderr);
+        // Repairing the index leaves nothing staged, so the commit stops
+        // rather than land empty.
+        assert.equal(out.status, 10, out.stderr);
         // .env is a credential, not an AI leftover. The summary counts files and
         // the stanza names the rule that took it.
         assert.match(out.stderr, /unstaged 1 file\(s\)/);
@@ -524,7 +578,7 @@ test('clean precommit fully unstages a blocked rename', () => {
             encoding: 'utf8',
         }).trim();
         assert.equal(staged, '');
-        assert.match(out.stderr, /commit will be empty/);
+        assert.match(out.stderr, /nothing else was staged/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -541,7 +595,9 @@ test('clean precommit preserves both index sides of a renamed file with secret c
         const headBytes = execFileSync('git', ['show', 'HEAD:old.txt'], { cwd: dir });
 
         const out = result('precommit', [], dir);
-        assert.equal(out.status, 0, out.stderr);
+        // Repairing the index leaves nothing staged, so the commit stops
+        // rather than land empty.
+        assert.equal(out.status, 10, out.stderr);
         assert.equal(
             execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: dir, encoding: 'utf8' }).trim(),
             '',
@@ -590,7 +646,9 @@ test('clean precommit removes a secret renamed to a neutral path', () => {
         execFileSync('git', ['mv', '.env', 'config'], { cwd: dir });
 
         const out = result('precommit', [], dir);
-        assert.equal(out.status, 0, out.stderr);
+        // Repairing the index leaves nothing staged, so the commit stops
+        // rather than land empty.
+        assert.equal(out.status, 10, out.stderr);
         const staged = execFileSync('git', ['diff', '--cached', '--name-status'], {
             cwd: dir,
             encoding: 'utf8',

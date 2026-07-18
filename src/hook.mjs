@@ -237,6 +237,14 @@ function hookPreToolUse(input) {
             }
             targetRepo = openRepo(gitCommand.cwd);
             const targetProfile = enforcementPolicy(targetRepo).profile;
+            // Some ref-mutation verbs have read-only listing forms that move no
+            // ref and so cannot bypass the reference-transaction guard. Reading
+            // a repository (`git branch | grep`, `git remote -v | grep origin`,
+            // `git stash list | head`) is everyday work; refusing it behind a
+            // pipeline forced developers out of their normal workflow. A real
+            // mutation still carries a mutating flag or positional and stays
+            // subject to every check below.
+            if (gitReadOnlyRefCommand(gitCommand.verb, gitCommand.args || [])) continue;
             // An unresolved subcommand/alias may itself move a ref. When its
             // hook path or execution context is altered, there is no safe
             // content snapshot to fall back to, so treat it like a direct ref
@@ -422,6 +430,12 @@ function hookPreToolUse(input) {
     // index still stops the commit here.
     const prefixHookBypass = opaqueCommitRisk
         || (commitPrefixRisk && (noVerify || bypassHooks || parsed.prefixHooksRisk));
+    // The same distinction, for the deny paths that ask "will anything scan this
+    // commit". hiddenBypass answers a different question — "should the backstop
+    // read the blobs" — and answering the first with the second refuses
+    // `build && git add . && git commit`, which is how most commits get made.
+    const guardBypass = noVerify || bypassHooks || parsed.uncertainShell
+        || prefixHookBypass || aliasBypass;
     const bypassContext = aliasBypass
         ? 'an inline Git alias cannot be proved to preserve the pre-commit guard'
         : prefixBypass
@@ -488,7 +502,7 @@ function hookPreToolUse(input) {
     const indexReplacement = parsed.commands.some((candidate) => (
         candidate.verb === 'commit' && candidate.indexMutationRisk
     ));
-    if (profile !== 'strict' && commit && hiddenBypass
+    if (profile !== 'strict' && commit && guardBypass
         && parsed.commands.some((c) => c.verb === 'commit' && c.futureIndex)) {
         if (indexReplacement) {
             return emitDecision(
@@ -1277,7 +1291,92 @@ const GIT_POLICY_TRANSITION_COMMANDS = new Set([
 const GIT_REF_MUTATION_COMMANDS = new Set([
     'am', 'bisect', 'branch', 'checkout', 'cherry-pick', 'fetch', 'maintenance', 'merge', 'notes',
     'pull', 'push', 'rebase', 'remote', 'replace', 'reset', 'revert', 'stash', 'switch',
-    'symbolic-ref', 'update-ref', 'worktree',
+    'symbolic-ref', 'tag', 'update-ref', 'worktree',
+]);
+
+// gitReadOnlyRefCommand reports whether a ref-mutation verb is used in a
+// read-only listing form that cannot move a ref or mutate state, so the
+// reference-transaction guard has nothing to enforce. branch/remote/stash/notes
+// each have listing subcommands developers pipe every day (`git branch | grep`,
+// `git remote -v | grep`, `git stash list | head`); the mutating forms keep a
+// mutating flag or positional and fall through to the full guard. Conservative:
+// any unknown flag combination is treated as a mutation (fail-closed).
+const GIT_BRANCH_MUTATING_FLAGS = new Set([
+    '-d', '--delete', '-D', '-m', '--move', '-M', '-c', '--copy', '-C',
+    '-u', '--set-upstream-to', '--unset-upstream', '--set-upstream', '-t',
+    '--track', '--unset-track', '-f', '--force',
+]);
+const GIT_REMOTE_MUTATING_SUBCOMMANDS = new Set([
+    'add', 'rename', 'rm', 'remove', 'set-url', 'set-head', 'prune', 'update',
+    'get-url', 'set-urladd',
+]);
+const GIT_STASH_MUTATING_SUBCOMMANDS = new Set([
+    'push', 'pop', 'apply', 'drop', 'clear', 'save', 'create', 'store', 'branch',
+]);
+const GIT_NOTES_MUTATING_SUBCOMMANDS = new Set([
+    'add', 'append', 'copy', 'remove', 'rm', 'edit', 'prune',
+]);
+
+function gitReadOnlyRefCommand(verb, args = []) {
+    const flags = args.filter((arg) => arg.startsWith('-'));
+    const positionals = args.filter((arg) => !arg.startsWith('-'));
+    if (verb === 'branch') {
+        // `git branch`, `git branch -a/-r/-l/--list/-v/--verbose/--all/--remotes`
+        // only list. A name, a start-point, or any create/delete/move/copy flag
+        // is a mutation.
+        if (flags.some((flag) => GIT_BRANCH_MUTATING_FLAGS.has(flag))) return false;
+        const listingOnly = flags.every((flag) => (
+            GIT_BRANCH_READONLY_FLAGS.has(flag)
+        ));
+        if (!listingOnly) return false;
+        // A positional without --list/-l creates or moves a branch.
+        if (positionals.length && !flags.some((flag) => flag === '-l' || flag === '--list')) {
+            return false;
+        }
+        return true;
+    }
+    if (verb === 'remote') {
+        // `git remote` and `git remote -v/--verbose` list; `git remote show <n>`
+        // is read-only; everything else mutates.
+        if (positionals.length === 0) return flags.every((flag) => flag === '-v' || flag === '--verbose');
+        const sub = positionals[0];
+        if (GIT_REMOTE_MUTATING_SUBCOMMANDS.has(sub)) return false;
+        return sub === 'show';
+    }
+    if (verb === 'stash') {
+        // No subcommand defaults to `push` (a mutation). Only list/show are read.
+        const sub = positionals[0] || 'push';
+        if (GIT_STASH_MUTATING_SUBCOMMANDS.has(sub)) return false;
+        return sub === 'list' || sub === 'show';
+    }
+    if (verb === 'notes') {
+        // No subcommand defaults to `list` (read). list/show are read-only.
+        const sub = positionals[0] || 'list';
+        if (GIT_NOTES_MUTATING_SUBCOMMANDS.has(sub)) return false;
+        return sub === 'list' || sub === 'show';
+    }
+    if (verb === 'tag') {
+        // `git tag` and `git tag -l/--list` only list. A name, -d/--delete, -f/--force,
+        // -a/--annotate, -s, -m, or -u creates/moves/deletes a tag.
+        if (flags.some((flag) => GIT_TAG_MUTATING_FLAGS.has(flag))) return false;
+        if (positionals.length && !flags.some((flag) => flag === '-l' || flag === '--list')) {
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+const GIT_TAG_MUTATING_FLAGS = new Set([
+    '-d', '--delete', '-f', '--force', '-a', '--annotate', '-s', '--sign',
+    '-m', '-u', '--local-user', '-v', '--verify', '-n',
+]);
+
+const GIT_BRANCH_READONLY_FLAGS = new Set([
+    '-a', '--all', '-r', '--remotes', '-l', '--list', '-v', '--verbose', '-vv',
+    '-q', '--quiet', '--no-color', '--color',
+    '--sort', '--format', '--contains', '--no-contains', '--merged', '--no-merged',
+    '--points-at',
 ]);
 
 function gitCommandMayBypassRefGuard(verb, args = []) {
@@ -1870,8 +1969,12 @@ function shellUnits(s) {
 // never write files, and cannot bypass Git hooks. Anything not listed is treated
 // as potentially able to hide or feed a commit (fail-closed). Deliberately
 // excluded: shells and interpreters, awk/sed/ed/vim, sqlite3/psql/dc/bc/octave
-// and other stdin-as-program readers, git, tee (writes files), env/xargs/find
-// (run sub-commands), and curl/wget (fetch arbitrary content to a pipe).
+// and other stdin-as-program readers, tee (writes files), env/xargs/find
+// (run sub-commands), and curl/wget (fetch arbitrary content to a pipe). Git is
+// handled separately: a read-only Git subcommand is an allowed pipe SOURCE (see
+// GIT_READONLY_PIPE_SUBCOMMANDS), but Git is never a safe pipe SINK, because a
+// mutating subcommand (apply, am, hash-object --stdin, fast-import) reads its
+// program or patch from stdin.
 const SAFE_PIPE_EXECUTABLES = new Set([
     'cat', 'tac', 'head', 'tail', 'tr', 'cut', 'paste', 'fold', 'fmt', 'expand',
     'unexpand', 'rev', 'nl', 'pr', 'column', 'sort', 'uniq', 'comm', 'tsort',
@@ -1883,6 +1986,100 @@ const SAFE_PIPE_EXECUTABLES = new Set([
     'seq', 'yes', 'echo', 'printf', 'test', 'true', 'false', 'jq', 'yq', 'bat',
     'gh', '[',
 ]);
+
+// SAFE_BUILD_PIPE_EXECUTABLES are build, test, lint and language-toolchain
+// commands permitted as a benign pipe SOURCE. They take data/flag arguments,
+// report to stdout/stderr, and cannot bypass Git hooks or hide a `git commit`
+// invocation from the parser — `npm test | tail`, `cargo build 2>&1 | grep`,
+// `jest | head`, `eslint . | head` are how a developer runs a project every
+// day. A package script could in principle shell out to git, but that is a
+// prefix/indirection risk handled by the same guard that covers `a && b`, not a
+// pipe that feeds code into a sink, so it does not make the pipeline opaque.
+// Deliberately excluded: shells and interpreters reachable with a program on
+// stdin (sh, bash, zsh, python -c, node -e, perl), and anything that runs an
+// arbitrary sub-command (xargs, find -exec, env, make with a generated recipe
+// is kept because its recipe is repository content, not pipe input).
+const SAFE_BUILD_PIPE_EXECUTABLES = new Set([
+    // package managers & task runners
+    'npm', 'npx', 'yarn', 'pnpm', 'pnpx', 'bun', 'bunx', 'deno', 'cargo',
+    'rustc', 'go', 'make', 'cmake', 'ninja', 'bazel', 'buck', 'pants', 'mill',
+    'sbt', 'mvn', 'mvnw', 'gradle', 'gradlew', 'rake', 'bundle', 'gem', 'rake',
+    'pip', 'pip3', 'pipx', 'poetry', 'pdm', 'uv', 'rye', 'conda', 'mamba',
+    // test runners / formatters / linters / type-checkers
+    'jest', 'vitest', 'mocha', 'karma', 'ava', 'tape', 'tap', 'pytest',
+    'py.test', 'tox', 'nox', 'go-test', 'rspec', 'minitest', 'test', 'ctest',
+    'xcodebuild', 'swift', 'swiftc', 'dotnet', 'msbuild', 'tsc', 'tsdx',
+    'eslint', 'biome', 'biome-check', 'standard', 'ts-standard', 'prettier',
+    'stylelint', 'ruff', 'flake8', 'pylint', 'mypy', 'black', 'isort', 'rubocop',
+    'golangci-lint', 'staticcheck', 'revive', 'clippy', 'shellcheck',
+    'hadolint', 'actionlint', 'markdownlint', 'remark', 'knip',
+    // language runtimes used as direct tools
+    'node', 'python', 'python3', 'ruby', 'php', 'java', 'javac', 'dotnet',
+]);
+
+// GIT_READONLY_PIPE_SUBCOMMANDS are Git subcommands safe as the SOURCE of a
+// benign pipeline: they only report (stdout), do not move refs or mutate the
+// index/worktree, do not read a program or patch from stdin, and cannot bypass
+// hooks. `git log | head`, `git status | grep`, `git diff | cat` are how a
+// developer reads a repository every day, and treating them as opaque commit
+// hiding blocked the normal workflow. Anything that can write, move a ref, or
+// consume stdin as input (add, commit, apply, am, hash-object, reset, checkout,
+// push, fetch, merge, rebase, cherry-pick, read-tree, update-index, update-ref,
+// clean, init, clone, bundle, archive, ...) is excluded and stays fail-closed.
+// Dual-mode subcommands (branch, tag, remote, config, stash, notes) are kept:
+// piped use is almost always the read form, their listing forms cannot hide or
+// feed a commit, and a real ref/index mutation is still caught by the managed
+// reference-transaction and pre-commit hooks at commit time.
+const GIT_READONLY_PIPE_SUBCOMMANDS = new Set([
+    'annotate', 'blame', 'branch', 'cat-file', 'check-attr', 'check-ignore',
+    'check-mailmap', 'check-ref-format', 'cherry', 'config', 'count-objects',
+    'describe', 'diff', 'diff-files', 'diff-index', 'diff-tree', 'for-each-ref',
+    'fsck', 'grep', 'help', 'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge-base',
+    'name-rev', 'notes', 'reflog', 'remote', 'rev-list', 'rev-parse', 'shortlog',
+    'show', 'show-branch', 'show-ref', 'stash', 'status', 'var',
+    'verify-commit', 'verify-pack', 'verify-tag', 'version', 'whatchanged',
+]);
+
+// gitPipeSourceSubcommand returns the Git subcommand of a pipe segment that is a
+// read-only Git source (e.g. `git -C repo log --oneline`), or null when the
+// segment is not a Git command or the subcommand is not read-only. It reuses the
+// same global-option skipping the verb parser does, so `-C path`, `-c k=v`,
+// `--git-dir`, `--work-tree`, `--namespace` and `--no-pager`/`-p` style flags do
+// not hide a mutating subcommand.
+function gitPipeSourceSubcommand(segment) {
+    const words = shellWords(segment.trim());
+    let i = 0;
+    while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
+    if (i >= words.length || !isGitExecutable(words[i])) return null;
+    i += 1;
+    while (i < words.length && words[i].startsWith('-') && words[i] !== '--') {
+        const option = words[i];
+        // Global options that take the next token as their value.
+        if (['-C', '-c', '--config-env', '--git-dir', '--work-tree', '--namespace',
+            '--upload-pack', '--receive-pack'].includes(option) && words[i + 1]) {
+            i += 2;
+        } else if (
+            option.startsWith('-C')
+            || option.startsWith('-c')
+            || option.startsWith('--config-env=')
+            || option.startsWith('--git-dir=')
+            || option.startsWith('--work-tree=')
+            || option.startsWith('--namespace=')
+            || option.startsWith('--upload-pack=')
+            || option.startsWith('--receive-pack=')
+        ) {
+            i += 1;
+        } else {
+            // Flags that take no value (--no-pager, -p, --no-replace-objects,
+            // --literal-pathspecs, --bare, --exec-path, ...). `--` ends options.
+            i += 1;
+        }
+    }
+    if (i < words.length && words[i] === '--') i += 1;
+    const subcommand = words[i];
+    if (!subcommand) return null;
+    return GIT_READONLY_PIPE_SUBCOMMANDS.has(subcommand) ? subcommand : null;
+}
 
 // containsOpaquePipeLexeme is a quote-aware scan for shell constructs that can
 // hide or feed a commit or subcommand: command substitution, subshells, brace
@@ -1946,20 +2143,83 @@ function pipelineSegmentExecutable(segment) {
     return null;
 }
 
-// benignReadOnlyPipeline reports whether a command is a bare pipeline whose
-// every segment is a known non-code-executing, non-mutating command with no
-// opaque shell syntax. Such a pipe cannot hide or feed a commit, so it is not a
-// "potential commit" for the unmodelled-prefix guard. Fail-closed: any opaque
-// lexeme, unlisted executable, missing executable, or non-pipe returns false.
-function benignReadOnlyPipeline(command) {
-    if (!command.includes('|')) return false;
-    if (containsOpaquePipeLexeme(command)) return false;
-    const segments = splitPipeSegments(command);
-    if (segments.length < 2) return false;
-    return segments.every((segment) => {
+// splitLogicalUnits splits a command line on unquoted command separators that
+// do not move data into a pipe sink: &&, ||, and ;. A pipeline between two
+// separators stays one unit (its internal | is handled by splitPipeSegments).
+function splitLogicalUnits(command) {
+    const units = [];
+    let unit = '';
+    let quote = '';
+    let escaped = false;
+    for (let i = 0; i < command.length; i += 1) {
+        const char = command[i];
+        const next = command[i + 1];
+        if (escaped) { unit += char; escaped = false; continue; }
+        if (char === '\\' && quote !== "'") { unit += char; escaped = true; continue; }
+        if (quote) { unit += char; if (char === quote) quote = ''; continue; }
+        if (char === "'" || char === '"') { unit += char; quote = char; continue; }
+        if ((char === '&' && next === '&') || (char === '|' && next === '|')) {
+            units.push(unit); unit = ''; i += 1; continue;
+        }
+        if (char === ';') { units.push(unit); unit = ''; continue; }
+        unit += char;
+    }
+    units.push(unit);
+    return units;
+}
+
+// benignReadOnlyUnit reports whether a single shell unit (no &&/||/;) is a
+// read-only pipeline or a single read-only command. It is the same fail-closed
+// contract as benignReadOnlyPipeline, applied to one piece of a compound line:
+// the unit cannot hide or feed a commit when every pipe segment is a known safe
+// filter, a read-only Git source, or a build/test toolchain command as source.
+function benignReadOnlyUnit(unit) {
+    const text = unit.trim();
+    if (!text) return true; // an empty piece (e.g. trailing ;) is harmless
+    if (containsOpaquePipeLexeme(text)) return false;
+    const segments = splitPipeSegments(text);
+    if (segments.length < 2) {
+        // A single command (no pipe). Benign when it is a known safe command, a
+        // build/test toolchain command, a read-only Git command, or a directory
+        // change.
+        const words = shellWords(text);
+        while (words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) words.shift();
+        if (!words.length) return true;
+        const executable = shellExecutable(words[0]);
+        if (SAFE_PIPE_EXECUTABLES.has(executable)) return true;
+        if (SAFE_BUILD_PIPE_EXECUTABLES.has(executable)) return true;
+        if (executable === 'cd' || executable === 'pushd' || executable === 'popd') return true;
+        return gitPipeSourceSubcommand(text) !== null;
+    }
+    return segments.every((segment, index) => {
         const executable = pipelineSegmentExecutable(segment);
-        return executable !== null && SAFE_PIPE_EXECUTABLES.has(executable);
+        if (executable !== null && SAFE_PIPE_EXECUTABLES.has(executable)) return true;
+        if (index === 0) {
+            // Source-only segments: a read-only Git command, or a build/test
+            // toolchain command. Build tools and interpreters must never be a
+            // later (sink) segment, where stdin could feed a program or patch.
+            if (executable !== null && SAFE_BUILD_PIPE_EXECUTABLES.has(executable)) return true;
+            if (gitPipeSourceSubcommand(segment) !== null) return true;
+        }
+        return false;
     });
+}
+
+// benignReadOnlyPipeline reports whether a command line is composed entirely of
+// read-only units (joined by &&, ||, or ;) where every piece is a known
+// non-code-executing, non-mutating command or a read-only Git source, with no
+// opaque shell syntax. Such a line cannot hide or feed a commit, so it is not a
+// "potential commit" for the unmodelled-prefix guard. This is how a developer
+// reads a repository every day: `cd repo && git log | head`, `git status | grep`,
+// `git diff | cat`. Fail-closed: any opaque lexeme, unlisted executable, missing
+// executable, mutating Git subcommand, or a non-read-only command returns false.
+// A read-only Git command may appear only as the source (first segment) of a
+// pipeline, never as a later sink where stdin could drive a mutation.
+function benignReadOnlyPipeline(command) {
+    if (!command.includes('|') && !/[;&]/.test(command)) return false;
+    if (containsOpaquePipeLexeme(command)) return false;
+    const units = splitLogicalUnits(command);
+    return units.every(benignReadOnlyUnit);
 }
 
 function pipedShellCommitInvocations(source, initialCwd) {
@@ -2264,7 +2524,7 @@ function unwrapCommand(input, initialCwd) {
         while (isAssignment(toks[0])) assignments.push(toks.shift());
     };
     const stripPrecommands = () => {
-        for (;;) {
+        for (; ;) {
             if (toks[0] === '-' || toks[0] === 'nocorrect' || toks[0] === 'noglob') {
                 toks.shift();
             } else if (toks[0] === 'coproc') {
