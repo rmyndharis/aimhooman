@@ -18,9 +18,11 @@ export function scanEntries(repo, engine, entries, options = {}) {
         findings_total: 0,
         findings_returned: 0,
         skipped: {},
+        skippedPaths: {},
     };
     const candidates = [];
     let selectedBytes = 0;
+    const oversized = [];
 
     for (const entry of entries) {
         if (entry.type !== 'blob') {
@@ -37,15 +39,46 @@ export function scanEntries(repo, engine, entries, options = {}) {
             continue;
         }
         if (entry.size > limits.maxFileBytes) {
-            increment(stats.skipped, 'size-limit');
+            oversized.push(entry);
             continue;
         }
         if (selectedBytes + entry.size > limits.maxTotalBytes) {
             increment(stats.skipped, 'total-byte-limit');
+            appendPath(stats.skippedPaths, 'total-byte-limit', entry.path, entry.size);
             continue;
         }
         selectedBytes += entry.size;
         candidates.push(entry);
+    }
+
+    // Oversized files: probe the first 8 KB to separate binary from text.
+    // A binary file (PSD, WOFF, PNG) can't hide text-pattern secrets that
+    // the full content scan would find, so it skips as 'binary' (complete).
+    // A text file that exceeds the budget is a genuine 'size-limit' skip
+    // (incomplete) and the caller must raise the limit to cover it.
+    // Cap probing at 16 MiB: cat-file --batch reads the full blob into memory,
+    // so probing a 500 MB file just to check for NULs is wasteful. Files above
+    // the cap are classified as size-limit without probing.
+    const PROBE_CAP = 16 * 1024 * 1024;
+    const probeable = oversized.filter((entry) => entry.size <= PROBE_CAP);
+    const tooBig = oversized.filter((entry) => entry.size > PROBE_CAP);
+    for (const entry of tooBig) {
+        increment(stats.skipped, 'size-limit');
+        appendPath(stats.skippedPaths, 'size-limit', entry.path, entry.size);
+    }
+    if (probeable.length) {
+        const probeOids = [...new Set(probeable.map((entry) => entry.oid))];
+        const probes = probeObjects(repo, probeOids, probeable);
+        for (const entry of probeable) {
+            const header = probes.get(entry.oid);
+            if (header && isBinary(header)) {
+                increment(stats.skipped, 'binary');
+                appendPath(stats.skippedPaths, 'binary', entry.path, entry.size);
+            } else {
+                increment(stats.skipped, 'size-limit');
+                appendPath(stats.skippedPaths, 'size-limit', entry.path, entry.size);
+            }
+        }
     }
 
     const objectIds = [...new Set(candidates.map((entry) => entry.oid))];
@@ -65,6 +98,7 @@ export function scanEntries(repo, engine, entries, options = {}) {
         let matched;
         if (isBinary(blob)) {
             increment(stats.skipped, 'binary');
+            appendPath(stats.skippedPaths, 'binary', entry.path, blob.length);
             // Binary classification only skips text-oriented policy rules. Secret
             // signatures are ASCII byte sequences, so latin1 preserves a
             // one-byte-to-one-code-unit view and keeps the existing byte limits.
@@ -148,8 +182,53 @@ function readObjects(repo, objectIds, expectedBytes = 0) {
     return { objects, failures };
 }
 
+// probeObjects reads the first 8000 bytes of each blob to decide whether it is
+// binary (contains a NUL). cat-file --batch outputs full blobs, so the buffer
+// must accommodate total blob sizes, but we only inspect the leading bytes.
+function probeObjects(repo, objectIds, entries) {
+    const unique = [...new Set(objectIds.filter(Boolean))];
+    if (!unique.length) return new Map();
+    const PROBE_BYTES = 8000;
+    // Sum the actual sizes so the buffer can hold the full output.
+    const sizeByOid = new Map();
+    for (const entry of entries) {
+        if (entry.oid && entry.size > 0) sizeByOid.set(entry.oid, Math.max(sizeByOid.get(entry.oid) || 0, entry.size));
+    }
+    const totalExpected = unique.reduce((sum, oid) => sum + (sizeByOid.get(oid) || 0), 0);
+    const output = execFileSync('git', ['cat-file', '--batch'], {
+        cwd: repo.root,
+        env: gitEnvironment(),
+        input: Buffer.from(unique.join('\n') + '\n'),
+        encoding: 'buffer',
+        maxBuffer: Math.max(2 * 1024 * 1024, totalExpected + unique.length * 256 + 1024),
+        timeout: GIT_TIMEOUT_MS,
+        stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const probes = new Map();
+    let offset = 0;
+    for (const requested of unique) {
+        const newline = output.indexOf(0x0a, offset);
+        if (newline < 0) break;
+        const header = output.subarray(offset, newline).toString('utf8');
+        offset = newline + 1;
+        const fields = header.split(' ');
+        if (fields[1] === 'missing' || fields.length !== 3 || fields[1] !== 'blob') continue;
+        const size = Number(fields[2]);
+        const end = offset + size;
+        if (end > output.length || output[end] !== 0x0a) break;
+        probes.set(requested, output.subarray(offset, offset + Math.min(size, PROBE_BYTES)));
+        offset = end + 1;
+    }
+    return probes;
+}
+
 function increment(record, key) {
     record[key] = (record[key] || 0) + 1;
+}
+
+function appendPath(record, reason, path, size) {
+    if (!record[reason]) record[reason] = [];
+    if (record[reason].length < 10) record[reason].push({ path, size });
 }
 
 function isBinary(buffer) {

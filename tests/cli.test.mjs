@@ -173,19 +173,17 @@ test('precommit: a zero-similarity blocked rename restores the possible source d
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a tracked file over the per-file scan budget wedges every commit until the budget is raised', () => {
-    // Crossing a scan budget marks the scan incomplete, an incomplete scan is 31
-    // on every profile, and 31 at the reference-transaction boundary is a ref
-    // update git refuses — a boundary --no-verify does not skip. A lockfile, an
-    // image or a vendored bundle over the 2 MiB default therefore stopped every
-    // commit in the repository, with nothing the owner could set to get out.
+test('an unchanged file over the per-file scan budget does not wedge commits that do not touch it', () => {
+    // The content scan now covers only changed files (path rules still run on
+    // the full tree), so an oversized file that is unchanged in this commit
+    // does not block it. When the oversized file itself changes, the budget
+    // applies and the commit fails until the budget is raised.
     const dir = mkdtempSync(join(tmpdir(), 'aim-scan-budget-'));
     try {
         execFileSync('git', ['init', '-q'], { cwd: dir });
         execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
         execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
-        // ~3.3 MiB of ordinary source: over the default per-file budget, and
-        // nothing any rule objects to.
+        // ~3.3 MiB of ordinary source: over the default per-file budget.
         writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 1;\n'.repeat(140000));
         writeFileSync(join(dir, 'app.js'), 'export const x = 1;\n');
         execFileSync('git', ['add', 'vendor.js', 'app.js'], { cwd: dir });
@@ -195,26 +193,34 @@ test('a tracked file over the per-file scan budget wedges every commit until the
         writeFileSync(join(dir, 'app.js'), 'export const x = 2;\n');
         execFileSync('git', ['add', 'app.js'], { cwd: dir });
 
-        // The default budget is what wedges it: 2 MiB, which vendor.js crosses.
-        const wedged = spawnSync('git', ['commit', '-m', 'tweak one line'], {
+        // Unchanged vendor.js is not content-scanned, so the commit passes.
+        const ok = spawnSync('git', ['commit', '-m', 'tweak one line'], {
+            cwd: dir,
+            encoding: 'utf8',
+        });
+        assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+        assert.equal(
+            execFileSync('git', ['log', '-1', '--format=%s'], { cwd: dir, encoding: 'utf8' }).trim(),
+            'tweak one line',
+        );
+
+        // Changing the oversized file triggers the budget again.
+        writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 2;\n'.repeat(140000));
+        execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
+        const wedged = spawnSync('git', ['commit', '-m', 'update vendor'], {
             cwd: dir,
             encoding: 'utf8',
         });
         assert.notEqual(wedged.status, 0);
         assert.match(wedged.stderr, /scan incomplete \(size-limit=1\)/);
-        // The only place a wedged repository learns the way out.
         assert.match(wedged.stderr, /raise AIMHOOMAN_MAX_FILE_BYTES \/ AIMHOOMAN_MAX_TOTAL_BYTES/);
 
-        const raised = spawnSync('git', ['commit', '-m', 'tweak one line'], {
+        const raised = spawnSync('git', ['commit', '-m', 'update vendor'], {
             cwd: dir,
             encoding: 'utf8',
             env: { ...process.env, AIMHOOMAN_MAX_FILE_BYTES: String(8 << 20) },
         });
         assert.equal(raised.status, 0, raised.stdout + raised.stderr);
-        assert.equal(
-            execFileSync('git', ['log', '-1', '--format=%s'], { cwd: dir, encoding: 'utf8' }).trim(),
-            'tweak one line',
-        );
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -693,8 +699,9 @@ test('precommit fails closed on incomplete scans in clean and compliance profile
     for (const profile of ['clean', 'compliance']) {
         const dir = makeRepo(profile);
         try {
-            writeFileSync(join(dir, 'large.txt'), '');
-            truncateSync(join(dir, 'large.txt'), 3 * 1024 * 1024);
+            // Use text content so the binary probe classifies it as text (size-limit)
+            // rather than binary (complete).
+            writeFileSync(join(dir, 'large.txt'), 'data line\n'.repeat(350000));
             execFileSync('git', ['add', 'large.txt'], { cwd: dir });
             const out = result('precommit', [], dir);
             assert.equal(out.status, 31, `${profile}: ${out.stderr}`);

@@ -217,6 +217,7 @@ function scanCommit(repo, options) {
     }
     scanEntryGroup(repo, loaded.engine, snapshot.entries, policy, accumulator, {
         reviewPathEntries: snapshot.changes,
+        contentEntries: snapshot.changes,
         allowMissingPolicy: acknowledged && !rawPolicy.policy_object_id,
         transition: snapshot.commit,
     });
@@ -367,8 +368,15 @@ function scanEntryGroup(repo, engine, entries, policy, accumulator, options = {}
         })
             .map((finding) => decorate(finding, entry, policy)));
     }
+    // Content scanning can target a narrower set than the path check. When
+    // contentEntries is provided (e.g. only changed files in a commit), read
+    // blobs only for those entries instead of the full snapshot. Path-based
+    // rules already ran on the full tree above, so secrets like .env are still
+    // caught even when their blob isn't re-read.
+    const contentScannable = (options.contentEntries ?? entries)
+        .filter((entry) => entry.status !== 'D' && entry.type !== 'deleted');
     const remaining = accumulator.remaining();
-    const scanned = scanEntries(repo, engine, scannable, {
+    const scanned = scanEntries(repo, engine, contentScannable, {
         maxFileBytes: accumulator.limits.maxFileBytes,
         maxTotalBytes: accumulator.remainingBytes(),
         maxFindings: remaining,
@@ -628,6 +636,7 @@ function createAccumulator(limits = {}) {
         findings_total: 0,
         findings_returned: 0,
         skipped: {},
+        skippedPaths: {},
     };
     let complete = true;
 
@@ -664,6 +673,12 @@ function createAccumulator(limits = {}) {
             }
             for (const [reason, count] of Object.entries(scanned.stats.skipped || {})) {
                 stats.skipped[reason] = (stats.skipped[reason] || 0) + count;
+            }
+            for (const [reason, paths] of Object.entries(scanned.stats.skippedPaths || {})) {
+                if (!stats.skippedPaths[reason]) stats.skippedPaths[reason] = [];
+                for (const entry of paths) {
+                    if (stats.skippedPaths[reason].length < 10) stats.skippedPaths[reason].push(entry);
+                }
             }
             if (!scanned.complete) complete = false;
         },

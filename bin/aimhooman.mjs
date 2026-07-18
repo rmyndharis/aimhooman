@@ -212,7 +212,24 @@ function incompleteMessage(scan) {
         : budgeted
             ? 'reduce the target, or raise AIMHOOMAN_MAX_FILE_BYTES / AIMHOOMAN_MAX_TOTAL_BYTES, and retry'
             : 'reduce the target or limits and retry';
-    return `aimhooman: scan incomplete${skipped ? ` (${skipped})` : ''}; ${hint}\n`;
+    let message = `aimhooman: scan incomplete${skipped ? ` (${skipped})` : ''}; ${hint}\n`;
+    const skippedPaths = scan.stats?.skippedPaths || {};
+    const pathLines = [];
+    for (const [reason, entries] of Object.entries(skippedPaths)) {
+        for (const entry of entries.slice(0, 5)) {
+            const sizeStr = formatBytes(entry.size);
+            pathLines.push(`  skipped: ${entry.path} (${reason}, ${sizeStr})\n`);
+        }
+        if (entries.length > 5) pathLines.push(`  ... and ${entries.length - 5} more\n`);
+    }
+    return message + pathLines.join('');
+}
+
+function formatBytes(bytes) {
+    if (bytes == null || bytes < 0) return '?';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function snapshotFile(path) {
@@ -978,6 +995,7 @@ function cmdExplain(args) {
     console.log(`Actions:     clean=${af('clean')} strict=${af('strict')} compliance=${af('compliance')}`);
     console.log(`Reason:      ${r.reason}`);
     if (r.match?.paths) console.log(`Paths:       ${r.match.paths.join(', ')}`);
+    if (r.match?.except) console.log(`Except:      ${r.match.except.join(', ')}`);
     if (r.match?.content) console.log(`Content:     ${r.match.content.join(', ')}`);
     if (r.remediation?.length) {
         console.log('Remediation:');

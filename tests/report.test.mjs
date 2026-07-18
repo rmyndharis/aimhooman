@@ -172,6 +172,7 @@ test('JSON report includes metadata and redacts secret text', () => {
             findings_total: 1,
             findings_returned: 1,
             skipped: {},
+            skippedPaths: {},
         },
         message_scanned: false,
     };

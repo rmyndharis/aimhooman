@@ -82,6 +82,21 @@
                 "skipped": {
                     "type": "object",
                     "additionalProperties": { "type": "integer", "minimum": 1 }
+                },
+                "skippedPaths": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["path", "size"],
+                            "properties": {
+                                "path": { "type": "string" },
+                                "size": { "type": ["integer", "null"], "minimum": 0 }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
                 }
             },
             "additionalProperties": false

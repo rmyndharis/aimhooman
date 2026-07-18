@@ -218,7 +218,7 @@
     },
     {
         "id": "secret.dotenv",
-        "version": 3,
+        "version": 4,
         "provider": "generic",
         "category": "secret",
         "confidence": "high",
@@ -236,7 +236,8 @@
                 "**/*.sample",
                 "**/*.template",
                 "**/*.dist",
-                "**/*.defaults"
+                "**/*.defaults",
+                "**/*.minimal"
             ]
         },
         "actions": {
