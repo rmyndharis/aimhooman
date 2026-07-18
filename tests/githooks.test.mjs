@@ -14,6 +14,7 @@ import {
     symlinkSync,
     statSync,
     writeFileSync,
+    appendFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
@@ -224,10 +225,13 @@ test('installedHooks executable and reachable filters are load-bearing', () => {
     }
 });
 
-test('install/uninstall honors a local-scope core.hooksPath', () => {
-    // A team may set core.hooksPath at local scope to a shared hooks dir;
-    // install must write dispatchers there (not .git/hooks), status must find
-    // them, and uninstall must remove them.
+test('install/uninstall honors a local-scope core.hooksPath once it is excluded', () => {
+    // A team may set core.hooksPath at local scope to a worktree hooks dir.
+    // Since B2, a worktree hooks path is repository content in waiting (the next
+    // `git add` would stage the dispatcher's machine-local paths), so install
+    // refuses until the path is excluded — proving the team intends it to stay
+    // local. Once excluded, install writes dispatchers there (not .git/hooks),
+    // status finds them, and uninstall removes them.
     const base = mkdtempSync(join(tmpdir(), 'aim-local-hookspath-'));
     try {
         isolatedGitConfig(base, () => {
@@ -235,13 +239,58 @@ test('install/uninstall honors a local-scope core.hooksPath', () => {
             const custom = join(root, '.team-hooks');
             mkdirSync(custom, { recursive: true });
             git(root, ['config', '--local', 'core.hooksPath', custom]);
+
+            // Before exclude: refused, treated as worktree content that Git will
+            // track. No dispatcher written; the worktree stays clean.
+            const refused = installHooks(openRepo(root), CLI);
+            assert.equal(refused.shared, true, 'untracked worktree hooksPath is shared until excluded');
+            assert.deepEqual(refused.installed, []);
+            assert.equal(existsSync(join(custom, 'pre-commit')), false);
+            assert.match(refused.warnings.join('\n'), /worktree/);
+
+            // Exclude it, then install proceeds.
+            appendFileSync(join(root, '.git', 'info', 'exclude'), '.team-hooks/\n');
             installHooks(openRepo(root), CLI);
-            assert.ok(existsSync(join(custom, 'pre-commit')), 'dispatcher written to the configured hooksPath');
+            assert.ok(existsSync(join(custom, 'pre-commit')), 'dispatcher written to the excluded hooksPath');
             assert.equal(existsSync(join(root, '.git', 'hooks', 'pre-commit')), false);
             assert.ok(installedHooks(openRepo(root)).includes('pre-commit'));
             const uninstalled = uninstallHooks(openRepo(root));
             assert.deepEqual(uninstalled.removed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction']);
             assert.equal(existsSync(join(custom, 'pre-commit')), false);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// B10-F2: an UNTRACKED worktree hooksPath (a freshly created `.husky` before the
+// first commit) is repository content in waiting — the next `git add` would
+// stage the dispatcher's machine-local absolute CLI/Node/PATH into history.
+// aimhooman must refuse to install into it until the team excludes the path.
+// Before B2, the guard only checked whether the path was already tracked, so an
+// untracked `.husky` got a dispatcher and B10a6's `git add -A && git commit`
+// landed machine-local paths in the repo.
+test('an untracked worktree hooksPath is refused until excluded', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-untracked-hookspath-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const custom = join(root, '.husky');
+            mkdirSync(custom, { recursive: true });
+            git(root, ['config', '--local', 'core.hooksPath', custom]);
+
+            // Refused: worktree content, not excluded. No dispatcher, clean tree.
+            const refused = installHooks(openRepo(root), CLI);
+            assert.equal(refused.shared, true, 'untracked worktree hooksPath is shared until excluded');
+            assert.deepEqual(refused.installed, []);
+            assert.equal(existsSync(join(custom, 'pre-commit')), false);
+            assert.match(refused.warnings.join('\n'), /worktree/);
+            assert.equal(git(root, ['status', '--short']), '', 'refusal must not dirty the worktree');
+
+            // A subsequent `git add -A` must not stage any dispatcher, because none
+            // was written. This is the B10a6 leak shape — it must not recur.
+            git(root, ['add', '-A']);
+            assert.equal(git(root, ['status', '--short', '--untracked-files=all']), '');
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -591,6 +640,13 @@ test('one hooks-directory lock serializes concurrent nested-repository installs'
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-shared-race-'));
     const outer = join(base, 'outer');
     const inner = join(outer, 'inner');
+    // shared lives inside inner (and thus inside outer's worktree too), so both
+    // repos consider it inside their worktree. Since B2, a worktree hooksPath is
+    // repository content in waiting unless excluded — and a shared hooks dir
+    // used by two nested repos is exactly the "kept local" case that the exclude
+    // opt-in covers, so both repos exclude it before pointing core.hooksPath at
+    // it. This test is about lock contention between two repos on one hooks dir,
+    // not about committed hooks.
     const shared = join(inner, 'shared-hooks');
     const marker = join(base, 'first-writing');
     const globalConfig = join(base, 'global.gitconfig');
@@ -638,6 +694,11 @@ process.stdout.write(JSON.stringify({ result, stateDir: repo.stateDir }));
         init(outer);
         init(inner);
         mkdirSync(shared);
+        // Exclude the shared hooks dir in both repos so B2's worktree-content
+        // guard treats it as intentionally local (the lock-contention scenario
+        // is about shared local plumbing, not committed hooks).
+        appendFileSync(join(outer, '.git', 'info', 'exclude'), 'inner/shared-hooks/\n');
+        appendFileSync(join(inner, '.git', 'info', 'exclude'), 'shared-hooks/\n');
         execFileSync('git', ['config', '--local', 'core.hooksPath', shared], { cwd: outer, env });
         execFileSync('git', ['config', '--local', 'core.hooksPath', shared], { cwd: inner, env });
 
@@ -1422,6 +1483,75 @@ test('chained hook failure is returned without running the final guard', () => {
                 { cwd: root, encoding: 'utf8' },
             );
             assert.equal(out.status, 23);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// B10-F1: a chained predecessor that resolves sibling scripts via
+// $(dirname "$0") — the dominant pattern in husky and vanilla .githooks —
+// broke after `aim init`, because the dispatcher invoked the predecessor as
+// "$CHAINED" "$@", setting the predecessor's $0 to the backup path inside
+// .git/aimhooman/chained/, where the sibling scripts do not live. The
+// dispatcher now sources the predecessor in a subshell, which inherits the
+// dispatcher's $0 (the original hook path Git invoked), so $(dirname "$0")
+// resolves to the real hooks directory again.
+test('a chained predecessor sees the original $0, so $(dirname "$0") resolves to its real directory', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-chained-zero-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            // The predecessor records $0 and $(dirname "$0") to a probe file, then
+            // sources a sibling helper (the husky pattern) that appends its own
+            // marker. Both live in the ORIGINAL hooks dir, not the chained backup.
+            writeFileSync(
+                join(hooks, 'pre-commit'),
+                '#!/bin/sh\n'
+                + 'printf \'$0=%s\\n\' "$0" > "$0".probe\n'
+                + 'printf \'dirname=%s\\n\' "$(dirname -- "$0")" >> "$0".probe\n'
+                + '. "$(dirname -- "$0")/helper.sh"\n',
+                { mode: 0o755 },
+            );
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+            writeFileSync(join(hooks, 'helper.sh'), '#!/bin/sh\nprintf \'helper=ran\\n\' >> "$0".probe\n', { mode: 0o755 });
+            chmodSync(join(hooks, 'helper.sh'), 0o755);
+
+            installHooks(repo, CLI);
+            // After install, the predecessor lives in the chained backup dir, but
+            // helper.sh is NOT copied there — only the managed-hook set is chained.
+            // So sourcing the predecessor must resolve $(dirname "$0") to the
+            // original hooks dir for helper.sh to be found.
+            const probePath = `${join(hooks, 'pre-commit')}.probe`;
+            const out = spawnSync(
+                HOOK_SHELL,
+                [shellArgumentPath(join(hooks, 'pre-commit'))],
+                { cwd: root, encoding: 'utf8' },
+            );
+            assert.equal(out.status, 0, `dispatcher failed: ${out.stderr}`);
+            assert.ok(existsSync(probePath), 'predecessor ran and wrote the probe');
+            const probe = readFileSync(probePath, 'utf8');
+            // $0 must be the ORIGINAL hook path (the dispatcher Git invoked), not
+            // the .git/aimhooman/chained/ backup path. This is the core fix.
+            const probeLines = probe.split('\n');
+            const zeroLine = probeLines.find((line) => line.startsWith('$0='));
+            const dirLine = probeLines.find((line) => line.startsWith('dirname='));
+            assert.ok(zeroLine, `probe missing $0 line: ${probe}`);
+            assert.ok(dirLine, `probe missing dirname line: ${probe}`);
+            const observedZero = zeroLine.slice('$0='.length);
+            const observedDir = dirLine.slice('dirname='.length);
+            assert.equal(
+                observedZero, join(hooks, 'pre-commit'),
+                `predecessor $0 must be the original hook path, got: ${observedZero}`,
+            );
+            assert.equal(
+                observedDir, hooks,
+                `$(dirname "$0") must resolve to the original hooks dir, got: ${observedDir}`,
+            );
+            // The sibling helper ran, proving the relative resolution works.
+            assert.match(probe, /helper=ran/, `helper.sh was not sourced from the original dir: ${probe}`);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

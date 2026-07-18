@@ -43,14 +43,25 @@ function hooksDir(repo) {
     // Inside the worktree is not the same as ours. A hooks directory Git tracks
     // (husky, the vanilla .githooks pattern) is repository content: a dispatcher
     // written there stages this machine's absolute CLI, Node, and PATH for
-    // everyone who clones.
-    const tracked = inside && trackedPath(repo, dir);
+    // everyone who clones. An UNTRACKED hooks directory inside the worktree
+    // (a freshly created `.husky` before the first commit, a team-local
+    // `.team-hooks`) is repository content in waiting: the next `git add`
+    // stages it, carrying the same machine-local paths into history. Treat both
+    // as repository content so neither receives a dispatcher — UNLESS the team
+    // has explicitly excluded the path (.gitignore or .git/info/exclude), which
+    // is the opt-in that says "this hooks dir stays local". A hooks path inside
+    // `.git/` (the default, or a custom one) is local Git plumbing and is safe
+    // to install into regardless.
+    const worktreeContent = inside && !insideGitDir(repo, dir) && !gitIgnored(repo, dir);
+    const trackedByGit = inside && trackedPath(repo, dir);
+    const tracked = trackedByGit || worktreeContent;
     const repositoryOwned = inside && !tracked;
     const shared = !repositoryOwned || resolve(dir) === resolve(globalHooksDir());
     if (shared) {
         const where = scope ? `${scope} scope` : 'a non-local scope';
         let reason = where;
-        if (tracked) reason = `${where}, tracked by this repository`;
+        if (trackedByGit) reason = `${where}, tracked by this repository`;
+        else if (worktreeContent) reason = `${where}, inside the worktree so Git will track it on the next add (add it to .gitignore or .git/info/exclude to manage it locally)`;
         else if (localScope && !inside) reason = `${where}, outside this repository`;
         return {
             dir,
@@ -106,10 +117,34 @@ function trackedPath(repo, path) {
     }
 }
 
+// gitIgnored reports whether Git would ignore path (via .gitignore,
+// .git/info/exclude, or core.excludesfile). This is the opt-in that lets a team
+// keep a worktree hooks dir local: an excluded path will not be staged by the
+// next `git add`, so a dispatcher written there cannot leak machine-local
+// absolute paths into history. Used to decide whether a worktree hooksPath is
+// repository content in waiting (refuse) or intentionally local (install). A
+// Git that cannot answer counts as NOT ignored, so we fail closed and refuse
+// (the safer side for a leak that writes machine paths into shared history).
+function gitIgnored(repo, path) {
+    try {
+        execFileSync(
+            'git',
+            ['check-ignore', '--quiet', '--', String(path)],
+            { cwd: repo.root, encoding: 'utf8', timeout: GIT_TIMEOUT_MS },
+        );
+        // git check-ignore exits 0 when the path IS ignored, 1 when it is not.
+        return true;
+    } catch (error) {
+        // Non-zero exit means "not ignored" (exit 1) or "git failed". Either way,
+        // treat as not-ignored so the worktree-content guard stays on.
+        return false;
+    }
+}
+
 function canonicalPath(path) {
     let current = resolve(path);
     const tail = [];
-    for (;;) {
+    for (; ;) {
         try {
             return resolve(realpathSync(current), ...tail);
         } catch (error) {
@@ -631,9 +666,19 @@ function hookScript(name, cmd, cliPath, chainedPath) {
 ) || exit $?
 `
         : '';
+    // The chained predecessor is sourced in a subshell, not exec'd. Git runs the
+    // dispatcher with $0 set to the original hook path (the dispatcher replaced
+    // it in place), and a subshell inherits $0, so sourcing lets the predecessor
+    // see the original $0 and resolve $(dirname "$0") to its real directory —
+    // the pattern husky and vanilla .githooks hooks use to find sibling scripts.
+    // Exec'ing "$CHAINED" would set the predecessor's $0 to the backup path and
+    // break that resolution. Sourcing runs the predecessor in this dispatcher's
+    // shell (/bin/sh -p), so its shebang is honoured only for sh-compatible
+    // scripts; bash-only predecessors are out of scope. exit inside the
+    // predecessor exits the subshell and propagates via || exit $?.
     const chainedInvocation = name === 'reference-transaction'
-        ? `  printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | "$CHAINED" "$@" || exit $?`
-        : `  "$CHAINED" "$@" || exit $?`;
+        ? `  printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | ( . "$CHAINED" ) || exit $?`
+        : `  ( . "$CHAINED" ) || exit $?`;
     const aimCommand = name === 'commit-msg'
         ? 'commitmsg "$1" --tree "$AIMHOOMAN_COMMIT_TREE"'
         : name === 'reference-transaction'

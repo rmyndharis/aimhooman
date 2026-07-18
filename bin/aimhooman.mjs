@@ -895,7 +895,15 @@ function cmdInit(args) {
             // the user is told nothing but "incomplete". The prefix is load-bearing:
             // the exit-code branch below matches on it.
             const cause = rep.shared && rep.warnings.length ? `${rep.warnings.join('; ')}; ` : '';
-            throw new Error(`hook installation incomplete; ${cause}repository guard is not active`);
+            // When the decline is because the hooks path is shared/tracked (or,
+            // after B2, worktree content the next add would commit), name the two
+            // ways out so the user is not stuck: let aimhooman use the default
+            // .git/hooks, or — for a worktree hooks path kept local — exclude it
+            // first. The uninstall hint lets them undo this init attempt.
+            const remedy = rep.shared
+                ? ' To proceed, either unset core.hooksPath so aimhooman uses the default .git/hooks, or (for a worktree hooks path you keep local) add it to .gitignore or .git/info/exclude and retry. Run "aimhooman uninstall" to undo this init attempt.'
+                : '';
+            throw new Error(`hook installation incomplete; ${cause}repository guard is not active.${remedy}`);
         }
         saveConfig(repo.stateDir, { profile });
         applyExclude(repo.excludeFile, patternsForRules(eng.rules));
