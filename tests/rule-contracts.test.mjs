@@ -196,6 +196,42 @@ test('aws access key IDs are blocked, but AWS\'s published example keys are not'
     assert.equal(matched(`token=AKIA${body}9`), false);
 });
 
+// F-15e1: the AWS example secret access key (`wJalrXUtnFEMI/...EXAMPLEKEY`)
+// is printed next to `AKIAIOSFODNN7EXAMPLE` on every AWS docs page. The 0.1.5
+// exception only covered the access key ID; the secret access key stayed
+// blocked. The v3 pattern adds a lookbehind so a value ending in EXAMPLEKEY
+// (the documented example shape) is not flagged, while a real key that merely
+// contains EXAMPLEKEY as a substring stays blocked.
+test('AWS example secret access key is allowed, real keys are still blocked', () => {
+    const engine = newEngine('clean');
+    const matched = (text) => Boolean(
+        matchFor(engine.checkContent('config/aws.ini', text), 'secret.aws-key-content')
+    );
+
+    // AWS's documented example pair — the secret access key half. This was the
+    // original 0.1.5 miss: the access key ID (`AKIAIOSFODNN7EXAMPLE`) was
+    // excepted, but its printed pair was not.
+    const exampleSecret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    assert.equal(matched(`aws_secret_access_key = ${exampleSecret}`), false, 'AWS doc example secret must not block');
+    assert.equal(matched(`aws_secret_access_key = "${exampleSecret}"`), false, 'quoted AWS doc example secret must not block');
+    assert.equal(matched(`AWS_SESSION_TOKEN=${exampleSecret}`), false, 'AWS doc example session token must not block');
+
+    // Real-shape keys (no EXAMPLEKEY suffix) still block. Use a literal split so
+    // this file does not carry a single 40-char run that looks like a live key.
+    const realHead = 'wJalrXUtnFEMI7K7MDENG';
+    const realTail = 'bPxRfiCYzXmpir3Qw';
+    assert.ok(matched(`aws_secret_access_key = ${realHead}${realTail}`), 'real 40-char secret must block');
+    assert.ok(matched(`aws_secret_access_key = "${realHead}${realTail}"`), 'real quoted secret must block');
+
+    // A key that merely contains EXAMPLEKEY as a substring (not as a suffix) is
+    // a real key and must still block. The fix narrows the exception to the
+    // documented example shape (ends in EXAMPLEKEY), not to any value containing it.
+    assert.ok(
+        matched(`aws_secret_access_key = aEXAMPLEKEY${'a'.repeat(30)}`),
+        'real key with EXAMPLEKEY substring must still block',
+    );
+});
+
 test('source markers stay out of documentation, tests, dependencies, and generated output', () => {
     const engine = newEngine('strict');
     const excludedPaths = [
