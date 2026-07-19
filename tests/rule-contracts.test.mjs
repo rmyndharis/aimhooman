@@ -362,6 +362,23 @@ test('the review-required rules print the bound review command as their fix', ()
     }
 });
 
+// UT-03b: a content secret finding used to stop at "remove it, rotate it" and
+// never mentioned the one sanctioned way to keep an intentional fixture (docs
+// quoting a key header, a detection test fixture). The path secret rules set
+// that standard already; the content rules now print the bound secret-path
+// allow too. A bare allow cannot silence a secret, so this is the only command
+// they may honestly name.
+test('content secret rules name the deliberate-fixture escape hatch in their remediation', () => {
+    const secrets = loadRules().filter((rule) => rule.category === 'secret' && rule.kind === 'code');
+    assert.ok(secrets.length >= 4, 'the content secret rule set moved');
+    for (const rule of secrets) {
+        assert.ok(
+            rule.remediation.some((line) => line.includes('aimhooman allow <path> --scope secret-path')),
+            `${rule.id} does not name the secret-path allow in its remediation`,
+        );
+    }
+});
+
 test('message attribution repair is exact and compliance preserves disclosures', () => {
     const clean = newEngine('clean');
     const compliance = newEngine('compliance');

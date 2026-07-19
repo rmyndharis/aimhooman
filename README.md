@@ -130,6 +130,7 @@ Guard a repository:
 
 ```sh
 aimhooman init        # git hooks + local excludes; normally no worktree files
+aimhooman init --grandfather-secrets # also allow --scope secret-path for every secret already tracked (fixtures); new secrets stay blocked
 aimhooman status
 aimhooman uninstall   # restore hooks/excludes; keep local policy state
 aimhooman uninstall --purge-state # also delete common Git-directory state

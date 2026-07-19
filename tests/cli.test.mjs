@@ -231,7 +231,7 @@ test('an unchanged file over the per-file scan budget does not wedge commits tha
             encoding: 'utf8',
         });
         assert.notEqual(wedged.status, 0);
-        assert.match(wedged.stderr, /scan incomplete \(size-limit=1\)/);
+        assert.match(wedged.stderr, /scan incomplete \(skipped: size-limit=1 file\)/);
         assert.match(wedged.stderr, /raise AIMHOOMAN_MAX_FILE_BYTES \/ AIMHOOMAN_MAX_TOTAL_BYTES/);
 
         const raised = spawnSync('git', ['commit', '-m', 'update vendor'], {
@@ -270,7 +270,7 @@ test('the scan budget knob refuses a value that is not a byte count, and caps th
             AIMHOOMAN_MAX_FILE_BYTES: '8',
         });
         assert.equal(lowered.status, 31, lowered.stderr);
-        assert.match(lowered.stderr, /scan incomplete \(size-limit=1\)/);
+        assert.match(lowered.stderr, /scan incomplete \(skipped: size-limit=1 file\)/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1005,6 +1005,37 @@ test('CLI rejects a rule-scope allow for a secret rule and directs to secret-pat
         assert.equal(denied.status, 20, denied.stderr);
         assert.match(denied.stderr, /secret rules cannot be allowed at --scope rule/);
         assert.match(denied.stderr, /--scope secret-path/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CLI refuses a path allow for a file whose content holds a secret and directs to secret-path', () => {
+    // UT-01: the name matches no path rule; only the content does. A bare
+    // allow used to report success yet leave the commit blocked — a broken
+    // allow. The guard now reads the file's content too and fails closed.
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(
+            join(dir, 'fixture.pem'),
+            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
+        );
+        execFileSync('git', ['add', 'fixture.pem'], { cwd: dir });
+        const bareAllow = result('allow', ['fixture.pem'], dir);
+        assert.equal(bareAllow.status, 20, bareAllow.stderr);
+        assert.match(bareAllow.stderr, /matches a secret rule/);
+        assert.match(bareAllow.stderr, /--scope secret-path/);
+        let checked = result('check', ['--staged', '--json'], dir);
+        assert.equal(checked.status, 10, checked.stderr);
+        assert.equal(JSON.parse(checked.stdout).findings[0]?.ruleId, 'secret.private-key-content');
+
+        // The explicit scope remains the supported way to allow a fixture.
+        assert.equal(result('allow', ['fixture.pem', '--scope', 'secret-path'], dir).status, 0);
+        checked = result('check', ['--staged', '--json'], dir);
+        assert.equal(checked.status, 0, checked.stderr);
+
+        // A path without secret content is unaffected by the content guard.
+        execFileSync('git', ['reset', '-q'], { cwd: dir });
+        writeFileSync(join(dir, 'notes.txt'), 'ordinary content\n');
+        assert.equal(result('allow', ['notes.txt'], dir).status, 0);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

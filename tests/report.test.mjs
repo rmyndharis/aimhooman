@@ -210,6 +210,91 @@ test('human report caps printed findings and signals truncation; JSON is uncappe
     assert.equal(parsed.findings.length, 30);
 });
 
+// UT-06: a provider-token finding used to render the generic reason "A provider
+// access token must not enter Git history." even though the matched line makes
+// the provider obvious (ghp_..., xoxb-...). The developer needs the provider
+// name to revoke the right credential, so the human report names it. The raw
+// token is only read for the label and is never printed.
+test('human report names the provider for provider-token findings and still redacts', () => {
+    const providerFinding = (text) => ({
+        ...secretFinding,
+        ruleId: 'secret.provider-token',
+        matchedRuleIds: ['secret.provider-token'],
+        matchedRules: [{ ...secretFinding.matchedRules[0], ruleId: 'secret.provider-token' }],
+        reason: 'A provider access token must not enter Git history.',
+        text,
+    });
+    // Tokens assembled at runtime so this source carries no literal that trips
+    // the rule it tests.
+    const cases = [
+        ['GitHub', `ghp_${'a'.repeat(36)}`],
+        ['GitHub', `github_pat_${'a'.repeat(60)}`],
+        ['GitLab', `glpat-${'a'.repeat(20)}`],
+        ['npm', `npm_${'a'.repeat(36)}`],
+        ['Slack', `xoxb-${'a'.repeat(20)}`],
+        ['Anthropic', `sk-ant-api03-${'a'.repeat(95)}`],
+        ['OpenAI', `sk-proj-${'a'.repeat(48)}`],
+        ['Google', `AIza${'a'.repeat(35)}`],
+        ['Stripe', `sk_live_${'a'.repeat(24)}`],
+        ['Stripe', `rk_live_${'a'.repeat(24)}`],
+        ['Hugging Face', `hf_${'a'.repeat(34)}`],
+        ['SendGrid', `SG.${'a'.repeat(22)}.${'b'.repeat(43)}`],
+    ];
+    for (const [provider, token] of cases) {
+        const report = human([providerFinding(`TOKEN=${token}`)], 'professional');
+        assert.match(
+            report,
+            new RegExp(`A provider access token \\(${provider}\\) must not enter Git history\\.`),
+            `${provider} token not named`,
+        );
+        assert.doesNotMatch(report, new RegExp(token.replace(/[.]/g, '\\.')), `${provider} token leaked into the report`);
+        assert.match(report, /\[redacted\]/);
+    }
+    // A finding whose text matches no known prefix keeps the generic reason.
+    const unknown = human([providerFinding('TOKEN=zz-no-known-prefix')], 'professional');
+    assert.match(unknown, /A provider access token must not enter Git history\./);
+    assert.doesNotMatch(unknown, /access token \(/);
+    // Other rules are untouched even when their text carries a token prefix.
+    const other = human([{ ...secretFinding, text: 'see ghp_ docs' }], 'professional');
+    assert.match(other, /secret-like content/);
+    assert.doesNotMatch(other, /\(GitHub\)/);
+});
+
+// UT-08: a repeated rule (20 hits of the same secret rule) used to reprint the
+// identical fix block for every finding. The full remediation now renders on
+// the first finding of a rule; later findings of the same rule point back.
+test('human report prints a repeated rule remediation once, not per finding', () => {
+    const many = Array.from({ length: 5 }, (_, i) => ({
+        ...secretFinding,
+        path: `key${i}.txt`,
+        line: i + 1,
+    }));
+    const report = human(many, 'professional');
+    const full = report.split('\n').filter((line) => line === '       fix: remove the value');
+    assert.equal(full.length, 1, `expected the fix once, got ${full.length}`);
+    const pointers = report.split('\n').filter((line) => line === '       fix: as above for local.secret');
+    assert.equal(pointers.length, 4, `expected 4 back-pointers, got ${pointers.length}`);
+    // Every finding location still shows, first to last.
+    assert.match(report, /key0\.txt:1/);
+    assert.match(report, /key4\.txt:5/);
+});
+
+test('human report keeps full remediation for distinct rules', () => {
+    const other = {
+        ...secretFinding,
+        ruleId: 'local.other',
+        matchedRuleIds: ['local.other'],
+        remediation: ['do the other thing'],
+    };
+    const report = human([secretFinding, other, { ...secretFinding, path: 'again.txt' }], 'professional');
+    assert.match(report, /fix: remove the value/);
+    assert.match(report, /fix: do the other thing/);
+    // Only the genuinely repeated rule collapses.
+    const pointers = report.split('\n').filter((line) => line.includes('fix: as above for'));
+    assert.equal(pointers.length, 1);
+    assert.match(pointers[0], /local\.secret/);
+});
+
 test('JSON report includes metadata and redacts secret text', () => {
     const metadata = {
         tool_version: '0.1.0-rc.1',

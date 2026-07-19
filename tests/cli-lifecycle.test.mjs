@@ -160,6 +160,7 @@ test('repeatable-looking singleton flags and conflicting modes are rejected', as
             ['audit', '--staged'],
             ['scan', '--commit', 'HEAD'],
             ['init', '--global', '--profile', 'clean'],
+            ['init', '--global', '--grandfather-secrets'],
             ['override', 'reset', '--allow', '--deny'],
             ['policy-review', '--staged', '--transition', 'HEAD'],
             ['uninstall', '--global', '--purge-state'],
@@ -171,6 +172,96 @@ test('repeatable-looking singleton flags and conflicting modes are rejected', as
                 assert.match(result.stderr, /options conflict/);
             });
         }
+    } finally {
+        cleanup(repo);
+    }
+});
+
+test('init output names the local ignore note and the undo command', () => {
+    // UT-04/UT-07: the summary used to stop at state/excludes/hooks, leaving
+    // both the new ignore behavior and the way back out unspoken.
+    const repo = createRepo();
+    try {
+        const initialized = run(repo, ['init', '--profile', 'clean']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        assert.match(initialized.stdout, /initialised \(profile: clean\)/);
+        assert.match(initialized.stdout, /excludes:\s+/);
+        assert.match(initialized.stdout, /note:\s+known AI artifacts are now ignored locally; see them with 'git status --ignored'/);
+        assert.match(initialized.stdout, /undo:\s+aimhooman uninstall/);
+    } finally {
+        cleanup(repo);
+    }
+});
+
+test('init --grandfather-secrets allows already-tracked secret fixtures and still blocks new ones', () => {
+    // UT-03a: a repository that already tracks secret-looking fixtures (the
+    // OpenSSL scenario) would see every commit touching one blocked. The flag
+    // writes a --scope secret-path allow per pre-existing finding; files added
+    // after init keep the default posture.
+    const repo = createRepo();
+    try {
+        mkdirSync(join(repo.root, 'tests', 'certs'), { recursive: true });
+        writeFileSync(
+            join(repo.root, 'tests', 'certs', 'old-key.pem'),
+            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
+        );
+        git(repo, ['add', 'tests/certs/old-key.pem']);
+        git(repo, ['commit', '--no-verify', '-q', '-m', 'Import fixtures']);
+
+        const initialized = run(repo, ['init', '--grandfather-secrets']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        assert.match(initialized.stdout, /grandfathered 1 tracked secret path\(s\)/);
+
+        const overrides = JSON.parse(readFileSync(join(stateDir(repo), 'overrides.json'), 'utf8'));
+        const grandfathered = overrides.allow.filter((entry) => entry.scope === 'secret-path');
+        assert.deepEqual(grandfathered.map((entry) => entry.target), ['tests/certs/old-key.pem']);
+        assert.match(grandfathered[0].reason, /grandfathered at init/);
+
+        // A commit touching the grandfathered path now passes the guard.
+        writeFileSync(
+            join(repo.root, 'tests', 'certs', 'old-key.pem'),
+            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\nAAAA\n-----END PRIVATE KEY-----\n',
+        );
+        git(repo, ['add', 'tests/certs/old-key.pem']);
+        git(repo, ['commit', '-q', '-m', 'Rotate fixture bytes']);
+
+        // A NEW file with the same secret content is still blocked.
+        writeFileSync(
+            join(repo.root, 'new-key.pem'),
+            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
+        );
+        git(repo, ['add', 'new-key.pem']);
+        const blocked = spawnSync('git', ['commit', '-m', 'Add a new key'], {
+            cwd: repo.root,
+            env: repo.env,
+            encoding: 'utf8',
+        });
+        assert.notEqual(blocked.status, 0, blocked.stdout + blocked.stderr);
+        assert.match(blocked.stderr, /secret\.private-key-content/);
+        assert.equal(git(repo, ['log', '-1', '--format=%s']), 'Rotate fixture bytes');
+    } finally {
+        cleanup(repo);
+    }
+});
+
+test('init --grandfather-secrets outside a repository fails like a plain init', () => {
+    const root = mkdtempSync(join(tmpdir(), 'aim-lifecycle-norepo-'));
+    const home = mkdtempSync(join(tmpdir(), 'aim-lifecycle-home-'));
+    const repo = {
+        root,
+        home,
+        env: {
+            ...process.env,
+            HOME: home,
+            XDG_CONFIG_HOME: join(home, '.config'),
+            GIT_CONFIG_NOSYSTEM: '1',
+            GIT_TERMINAL_PROMPT: '0',
+        },
+    };
+    try {
+        const result = run(repo, ['init', '--grandfather-secrets']);
+        assert.equal(result.status, 30, result.stderr);
+        assert.match(result.stderr, /not a git repository/);
     } finally {
         cleanup(repo);
     }

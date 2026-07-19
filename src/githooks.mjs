@@ -651,6 +651,12 @@ function hookScript(name, cmd, cliPath, chainedPath) {
     const shellPathValue = hookPathForShell(pathValue);
     const nodeMetadata = Buffer.from(nodePath, 'utf8').toString('base64url');
     const pathMetadata = Buffer.from(pathValue, 'utf8').toString('base64url');
+    // chainedPath is <stateDir>/chained/<name> for a repository install and
+    // <globalHooksDir>/chained/<name> for a global one, so its grandparent is
+    // always per-install state. The compile cache lives there rather than in a
+    // shared or temp location: no other repository can pollute it, and
+    // `uninstall --purge-state` removes it along with the rest of the state.
+    const compileCacheDir = join(dirname(dirname(String(chainedPath))), 'compile-cache');
     const captureTree = name === 'commit-msg'
         ? `AIMHOOMAN_COMMIT_TREE=$(PATH="$AIMHOOMAN_PATH" git write-tree) || {
   echo "aimhooman: cannot snapshot the would-be commit tree" >&2
@@ -706,6 +712,7 @@ ${MARKER} (${name})
 AIMHOOMAN_CLI=${shq(resolvedCliPath)}
 AIMHOOMAN_NODE=${shq(nodePath)}
 AIMHOOMAN_PATH=${shq(shellPathValue)}
+AIMHOOMAN_COMPILE_CACHE=${shq(compileCacheDir)}
 ${captureTree}${captureTransaction}run_aimhooman() {
   if [ ! -f "$AIMHOOMAN_CLI" ]; then
     echo "aimhooman: guard unavailable (aimhooman CLI is missing); allowing this operation without protection. Reinstall aimhooman or remove the managed hooks." >&2
@@ -731,8 +738,15 @@ ${captureTree}${captureTransaction}run_aimhooman() {
     unset BASH_ENV ENV CDPATH
     PATH=$AIMHOOMAN_PATH
     AIMHOOMAN_ACTIVE_HOOK=${shq(name)}
+    # A V8 compile cache shared by every hook spawn of this installation shaves
+    # the module parse/compile cost off each Node start. Node creates the
+    # directory when it can and silently disables the cache when it cannot, so
+    # an unwritable state directory degrades to the old cold start, never to a
+    # hook failure.
+    NODE_COMPILE_CACHE=$AIMHOOMAN_COMPILE_CACHE
     export PATH
     export AIMHOOMAN_ACTIVE_HOOK
+    export NODE_COMPILE_CACHE
     "$AIMHOOMAN_NODE" "$AIMHOOMAN_CLI" "$@"
   )
 }
