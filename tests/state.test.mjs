@@ -198,6 +198,22 @@ test('override state accepts legacy entries but rejects unsupported schema field
         assert.match(writes[0], /dropped 2 override\(s\) with retired scope "secret-path"/);
         assert.ok(writes[0].includes(file), 'warning names the overrides file');
 
+        // The cleaned file is persisted, so the migration warns once rather
+        // than on every load.
+        assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), {
+            schema_version: 1,
+            allow: [{ target: 'README.md', scope: 'path' }],
+            deny: [],
+        });
+        const secondWrites = [];
+        process.stderr.write = (chunk) => { secondWrites.push(String(chunk)); return true; };
+        try {
+            assert.deepEqual(loadOverrides(state), migrated);
+        } finally {
+            process.stderr.write = originalWrite;
+        }
+        assert.equal(secondWrites.length, 0, 'a migrated file stays silent');
+
         writeFileSync(file, JSON.stringify({
             allow: [],
             deny: [{ target: '.aimhooman.json', scope: 'policy-migration' }],

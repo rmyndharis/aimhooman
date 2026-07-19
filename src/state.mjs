@@ -4,7 +4,7 @@ import {
     readFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { atomicWrite } from './atomic-write.mjs';
+import { atomicWrite, withLock } from './atomic-write.mjs';
 import { normalizeGitPath } from './git-path.mjs';
 
 // Per-repository state, stored in the common Git dir (never the worktree).
@@ -193,7 +193,24 @@ export function loadOverrides(stateDir) {
         if (error?.code === 'ENOENT') return { allow: [], deny: [] };
         throw new LocalOverridesError(file, `cannot read file: ${error.message}`, error);
     }
-    return parseOverrides(text, file);
+    const dropped = { count: 0 };
+    const overrides = parseOverrides(text, file, dropped);
+    if (dropped.count) {
+        process.stderr.write(
+            `aimhooman: warning: ${file}: dropped ${dropped.count} override(s) with retired scope "secret-path"; built-in secret scanning was removed in v0.3.0\n`
+        );
+        // Persist the cleaned file so the migration warns once, not on every
+        // command. Re-read under the lock so a concurrent allow/deny write is
+        // never clobbered; a failed rewrite only means the warning returns
+        // next run, so this stays best effort.
+        try {
+            withLock(`${file}.lock`, () => {
+                const fresh = parseOverrides(readFileSync(file, 'utf8'), file);
+                atomicWriteJson(file, { schema_version: 1, ...fresh });
+            });
+        } catch { /* best effort */ }
+    }
+    return overrides;
 }
 
 export function saveOverrides(stateDir, overrides) {
@@ -207,17 +224,17 @@ export function normalizeOverrideTarget(target) {
     return normalizeGitPath(target);
 }
 
-function parseOverrides(text, file) {
+function parseOverrides(text, file, dropped = { count: 0 }) {
     let value;
     try {
         value = JSON.parse(stripBom(text));
     } catch (error) {
         throw new LocalOverridesError(file, `invalid JSON: ${error.message}`, error);
     }
-    return normalizeOverrides(value, file);
+    return normalizeOverrides(value, file, dropped);
 }
 
-function normalizeOverrides(value, file) {
+function normalizeOverrides(value, file, dropped = { count: 0 }) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new LocalOverridesError(file, 'root must be a JSON object');
     }
@@ -230,17 +247,13 @@ function normalizeOverrides(value, file) {
     if (value.schema_version !== undefined && value.schema_version !== 1) {
         throw new LocalOverridesError(file, 'schema_version must be 1');
     }
-    const dropped = { count: 0 };
-    const normalized = {
+    // The caller owns the drop count: loadOverrides warns and persists the
+    // cleaned file, saveOverrides drops retired entries silently on the next
+    // write.
+    return {
         allow: overrideEntries(value.allow, 'allow', file, dropped),
         deny: overrideEntries(value.deny, 'deny', file, dropped),
     };
-    if (dropped.count) {
-        process.stderr.write(
-            `aimhooman: warning: ${file}: dropped ${dropped.count} override(s) with retired scope "secret-path"; built-in secret scanning was removed in v0.3.0\n`
-        );
-    }
-    return normalized;
 }
 
 function overrideEntries(value, key, file, dropped = { count: 0 }) {
@@ -251,8 +264,8 @@ function overrideEntries(value, key, file, dropped = { count: 0 }) {
     return value.map((entry, index) => {
         // Built-in secret scanning and its secret-path override scope were
         // removed in v0.3.0. An overrides file written by an older version may
-        // still carry such entries; drop them (one warning per file, below)
-        // instead of failing the whole load.
+        // still carry such entries; drop them (loadOverrides warns once and
+        // persists the cleaned file) instead of failing the whole load.
         if (entry && typeof entry === 'object' && !Array.isArray(entry) && entry.scope === 'secret-path') {
             dropped.count += 1;
             return null;
