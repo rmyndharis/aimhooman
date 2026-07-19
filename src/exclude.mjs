@@ -74,6 +74,20 @@ export function inspectExclude(file, patterns) {
     return { installed: true, current: missing.length === 0 && actual.size === patterns.length, missing };
 }
 
+// managedPatterns returns the pattern lines currently inside the managed
+// block, or [] when the file or block is absent. Read-only.
+export function managedPatterns(file) {
+    const existing = readExclude(file, null);
+    if (existing === null) return [];
+    const range = managedRange(existing);
+    if (!range) return [];
+    return existing
+        .slice(range.start + BEGIN.length, range.end)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#') && !line.startsWith('!'));
+}
+
 function stripBlock(s) {
     const range = managedRange(s);
     if (!range) return s;
