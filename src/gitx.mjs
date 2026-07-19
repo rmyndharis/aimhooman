@@ -12,7 +12,7 @@ import {
     rmSync,
     symlinkSync,
 } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
 export class GitRevisionError extends Error {
@@ -162,10 +162,36 @@ function diffEntries(repo, args, renameThreshold = null) {
 
 // openRepo resolves the repository containing cwd. Throws if not a repo.
 export function openRepo(cwd = process.cwd()) {
-    const root = gitStr(['rev-parse', '--show-toplevel'], cwd);
-    const gitDir = gitStr(['rev-parse', '--absolute-git-dir'], root);
-    let commonDir = gitStr(['rev-parse', '--git-common-dir'], root);
-    if (!isAbsolute(commonDir)) commonDir = join(root, commonDir);
+    // One rev-parse invocation, not three: this runs inside every Git hook
+    // spawn, and each git subprocess costs ~13ms of the commit-time budget.
+    // The flags print in request order, one value per line.
+    const lines = gitStr(
+        ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
+        cwd,
+    ).split('\n');
+    if (lines.length !== 3) {
+        // A newline inside the repository path breaks the multi-flag output
+        // into extra lines; one flag per call is immune to that.
+        const root = gitStr(['rev-parse', '--show-toplevel'], cwd);
+        const gitDir = gitStr(['rev-parse', '--absolute-git-dir'], root);
+        let commonDir = gitStr(['rev-parse', '--git-common-dir'], root);
+        if (!isAbsolute(commonDir)) commonDir = join(root, commonDir);
+        return {
+            root,
+            gitDir,
+            commonDir,
+            stateDir: join(commonDir, 'aimhooman'),
+            excludeFile: join(commonDir, 'info', 'exclude'),
+        };
+    }
+    const [root, gitDir, commonRaw] = lines;
+    // Only --git-common-dir comes back relative, and it is relative to the cwd
+    // the command ran in (../.git from a subdirectory), never to the toplevel,
+    // so resolve it against that cwd and canonicalize the result:
+    // --show-toplevel is symlink-resolved by git (/private/tmp on macOS), and
+    // resolving the common dir through a symlinked cwd would hand back a
+    // differently-spelled state path for the same repository.
+    const commonDir = isAbsolute(commonRaw) ? commonRaw : realpathSync(resolve(cwd, commonRaw));
     return {
         root,
         gitDir,
@@ -190,6 +216,17 @@ export function stagedEntries(repo) {
 export function stagedPaths(repo) {
     return nulStrings(gitBuf([
         'diff', '--cached', '--name-only', '--find-renames', '-z', '--diff-filter=ACMRTD', '--',
+    ], repo.root));
+}
+
+// ignoredByPatterns lists untracked, ignored paths under the given pathspecs.
+// Passing pathspecs keeps git's directory pruning effective: a bare
+// `ls-files --others --ignored` walks the whole worktree and costs ~150ms on
+// a large one, while anchored pathspecs answer in ~15ms.
+export function ignoredByPatterns(repo, pathspecs) {
+    if (!pathspecs.length) return [];
+    return nulStrings(gitBuf([
+        'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', ...pathspecs,
     ], repo.root));
 }
 

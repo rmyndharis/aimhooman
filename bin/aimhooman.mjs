@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, readdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,7 @@ import { exitCode, human, jsonReport, visible } from '../src/report.mjs';
 import {
     GitRevisionError,
     gitConfig,
+    ignoredByPatterns,
     introducedCommits,
     openRepo,
     readCommitPath,
@@ -20,7 +22,7 @@ import {
     withIndexFromTree,
 } from '../src/gitx.mjs';
 import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, saveConfig, saveOverrides } from '../src/state.mjs';
-import { applyExclude, inspectExclude, patternsForRules, removeExclude } from '../src/exclude.mjs';
+import { applyExclude, inspectExclude, managedPatterns, patternsForRules, removeExclude } from '../src/exclude.mjs';
 import { effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
@@ -386,6 +388,38 @@ function precommitCleanMatches(repo, treeSha, profile) {
         && marker.profile === profile;
 }
 
+// F-E1: the prevention layer keeps AI artifacts out of `git status`, which
+// also keeps their exclusion silent — a `git add .` never tells the developer
+// the chat log did not make the commit. Name the artifacts once per set
+// change. The worktree walk is pathspec-pruned to the anchored managed
+// patterns (~15ms; a bare ignored-listing costs ~150ms on a large tree), so
+// `**/`-prefixed duplicates are skipped: nested artifacts still get excluded,
+// they just do not get the notice. Informational only — it must never change
+// an exit code, so every failure inside degrades to silence.
+const IGNORED_NOTICE_VERSION = 1;
+function noticeIgnoredArtifacts(repo) {
+    try {
+        const patterns = managedPatterns(repo.excludeFile)
+            .filter((pattern) => !pattern.startsWith('**/'));
+        if (!patterns.length) return;
+        const paths = ignoredByPatterns(repo, patterns).sort();
+        if (!paths.length) return;
+        const hash = createHash('sha256').update(paths.join('\0')).digest('hex');
+        const statePath = join(repo.stateDir, 'ignored-notice.json');
+        let previous = null;
+        try { previous = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* first run or corrupt state */ }
+        if (previous?.version === IGNORED_NOTICE_VERSION && previous.hash === hash) return;
+        writeFileSync(statePath, JSON.stringify({ version: IGNORED_NOTICE_VERSION, hash }));
+        const shown = paths.slice(0, 5);
+        const more = paths.length - shown.length;
+        process.stderr.write(
+            `aimhooman: ${paths.length} AI artifact(s) present locally are kept out of commits: `
+            + `${shown.map(visible).join(', ')}${more ? `, and ${more} more` : ''} `
+            + "(they stay on disk; 'git status --ignored' lists them; shown once per set change)\n"
+        );
+    } catch { /* informational only */ }
+}
+
 function cmdPrecommit(args) {
     parseNoArguments(args);
     const repo = tryRepo();
@@ -418,6 +452,7 @@ function cmdPrecommit(args) {
         // sha is stable. A missing/stale/mismatched marker makes commit-msg
         // fall back to the full scan, so this is purely an optimization.
         recordPrecommitClean(repo, profile);
+        noticeIgnoredArtifacts(repo);
         return profile === 'strict' && reviews.length ? 11 : 0;
     }
     if (profile === 'strict') {
@@ -494,6 +529,7 @@ function cmdPrecommit(args) {
     // not. The request was to commit the artifact, not to stamp the history with
     // its message and no content.
     if (emptied) return 10;
+    if (scan.complete) noticeIgnoredArtifacts(repo);
     return scan.complete ? 0 : 31;
 }
 
@@ -761,6 +797,15 @@ function cmdRefcheck(args) {
             process.stderr.write(human(scan.findings, tone()));
             if (!scan.complete) process.stderr.write(incompleteMessage(scan));
             process.stderr.write(`aimhooman: proposed commit ${revision} was rejected before refs changed\n`);
+            // The vetoed commit stays in the object store: the ref never
+            // moved, but the bytes — including whatever triggered the block —
+            // are still on disk. Whether gc collects it depends on other refs,
+            // so phrase the cleanup as conditional; rotating an exposed secret
+            // stays the operator's call either way.
+            process.stderr.write(
+                `aimhooman: note: the rejected commit object remains in the local object store; `
+                + "if nothing else references it, 'git gc --prune=now' removes it when you are done inspecting\n"
+            );
             return code;
         }
     }

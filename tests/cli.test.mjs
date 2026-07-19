@@ -129,6 +129,68 @@ test('refcheck accepts Git 2.54 preparing phase without running the prepared sca
     assert.match(invalid.stderr, /must be preparing, prepared, committed, or aborted/);
 });
 
+test('precommit names locally-ignored AI artifacts once per set change', () => {
+    // F-E1: the prevention layer keeps AI artifacts out of `git status`, which
+    // also keeps their exclusion silent — a `git add .` never tells the
+    // developer the chat log did not make the commit. The notice fires once
+    // per set change, never changes the exit code, and costs one pruned
+    // pathspec walk.
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(join(dir, '.aider.chat.history.md'), 'log\n');
+        writeFileSync(join(dir, 'app.js'), 'ship\n');
+        execFileSync('git', ['add', 'app.js'], { cwd: dir });
+
+        const first = result('precommit', [], dir);
+        assert.equal(first.status, 0, first.stderr);
+        assert.match(first.stderr, /1 AI artifact\(s\) present locally are kept out of commits/);
+        assert.match(first.stderr, /\.aider\.chat\.history\.md/);
+        assert.match(first.stderr, /shown once per set change/);
+
+        // The same set stays silent on the next run.
+        const second = result('precommit', [], dir);
+        assert.equal(second.status, 0, second.stderr);
+        assert.doesNotMatch(second.stderr, /AI artifact\(s\) present locally/);
+
+        // A changed set brings the notice back.
+        writeFileSync(join(dir, '.aider.input.history'), 'input\n');
+        const third = result('precommit', [], dir);
+        assert.equal(third.status, 0, third.stderr);
+        assert.match(third.stderr, /2 AI artifact\(s\) present locally/);
+
+        // The repair path still runs its own message: the forced add is
+        // unstaged, the commit would proceed with app.js, and the notice
+        // stays silent because the artifact set did not change.
+        execFileSync('git', ['add', '-f', '.aider.input.history'], { cwd: dir });
+        const repaired = result('precommit', [], dir);
+        assert.equal(repaired.status, 0, repaired.stderr);
+        assert.match(repaired.stderr, /unstaged 1 file\(s\) from this commit: \.aider\.input\.history/);
+        assert.doesNotMatch(repaired.stderr, /present locally are kept out of commits/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a vetoed ref update says the rejected commit object stays in the object store', () => {
+    // F-B-02: the reference-transaction veto stops the ref, but the commit
+    // object lingers in the local object store. Say so, with the conditional
+    // cleanup command, so a secret payload is not mistaken for gone — and
+    // without claiming "unreachable", which is wrong for a commit another
+    // ref already reaches.
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(
+            join(dir, 'key.pem'),
+            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
+        );
+        execFileSync('git', ['add', 'key.pem'], { cwd: dir });
+
+        const veto = spawnSync('git', ['commit', '--no-verify', '-m', 'wip'], { cwd: dir, encoding: 'utf8' });
+        assert.notEqual(veto.status, 0, 'the secret commit went through');
+        assert.match(veto.stderr, /rejected before refs changed/);
+        assert.match(veto.stderr, /remains in the local object store/);
+        assert.match(veto.stderr, /git gc --prune=now/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('precommit: clean unstages an AI artifact and stops a commit it emptied', () => {
     const dir = makeRepo('clean');
     try {

@@ -515,6 +515,15 @@ test('generated dispatchers use builtin ref capture and accept safe Git updates'
             // committed/aborted short-circuit before the Node spawn, so an ordinary
             // commit does not pay a cold start for a phase refcheck only no-ops.
             assert.match(referenceHook, /case "\$1" in committed\|aborted\) exit 0 ;; esac/);
+            // A prepared transaction that moves neither a branch nor HEAD
+            // (ORIG_HEAD, tags, remote-tracking refs) carries nothing refcheck
+            // scans, so it exits before the Node spawn too — but only after a
+            // presence check proves the guard dispatchers were not wiped
+            // mid-operation, keeping the tamper evidence the CLI check gave.
+            assert.match(referenceHook, /case "\$1" in prepared\)/);
+            assert.match(referenceHook, /case "\$AIMHOOMAN_REF_UPDATES" in/);
+            assert.match(referenceHook, /\*refs\/heads\/\*\|\*" HEAD"\*\) ;;/);
+            assert.match(referenceHook, /for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction/);
             // The dispatcher exports a V8 compile cache rooted in per-install
             // state, so repeated hook spawns skip module recompilation and
             // --purge-state removes the cache along with the rest of the state.
@@ -542,6 +551,36 @@ test('generated dispatchers use builtin ref capture and accept safe Git updates'
             ], { cwd: root, encoding: 'utf8' });
             assert.equal(update.status, 0, update.stderr);
             assert.doesNotMatch(update.stderr, /command not found/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('a branch-free reference transaction still notices wiped dispatchers', () => {
+    // The prepared pre-filter skips the Node spawn for payloads that move no
+    // branch or HEAD — but it must not lose the tamper evidence the CLI check
+    // gave. A hook manager deleting dispatchers during a tag operation is
+    // answered with a stop, not silence, because after a full wipe no later
+    // hook exists to raise the alarm.
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-wipe-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            execFileSync(process.execPath, [CLI, 'init'], { cwd: root });
+
+            // A benign tag first: the pre-filter path exits cleanly.
+            const benign = spawnSync('git', ['tag', 'v0'], { cwd: root, encoding: 'utf8' });
+            assert.equal(benign.status, 0, benign.stderr);
+
+            // A hook manager wipes a dispatcher; the next branch-free
+            // transaction must stop and say why.
+            rmSync(join(hooks, 'commit-msg'));
+            const wiped = spawnSync('git', ['tag', 'v1'], { cwd: root, encoding: 'utf8' });
+            assert.notEqual(wiped.status, 0, wiped.stdout + wiped.stderr);
+            assert.match(wiped.stderr, /required Git guards changed/);
+            assert.match(wiped.stderr, /commit-msg is unavailable/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

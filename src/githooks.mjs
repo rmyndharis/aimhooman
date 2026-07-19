@@ -696,10 +696,31 @@ function hookScript(name, cmd, cliPath, chainedPath) {
     // committed/aborted fire only after refs are locked in, and refcheck can do
     // nothing but return 0 for them (see cmdRefcheck). Short-circuit in the shell
     // so an ordinary commit no longer pays a Node cold start for the committed
-    // phase. Placed after the chained-hook call, so a chained hook still sees
-    // every phase.
+    // phase. The prepared filter goes further: a transaction that moves neither
+    // a branch nor HEAD (ORIG_HEAD, tags, remote-tracking refs) carries nothing
+    // refcheck scans, so it never spawns at all — but only after proving the
+    // guard is still there to skip. A hook manager that wipes the dispatchers
+    // during a branch-free operation (tag, fetch, stash) would otherwise go
+    // unnoticed, because after a full wipe no later hook exists to raise the
+    // alarm. Presence is exactly what a deletion removes; content integrity
+    // keeps running on every branch transaction via refcheck. Both sit after
+    // the chained-hook call, so a chained hook still sees every phase.
     const phaseShortCircuit = name === 'reference-transaction'
-        ? 'case "$1" in committed|aborted) exit 0 ;; esac\n'
+        ? `case "$1" in committed|aborted) exit 0 ;; esac
+case "$1" in prepared)
+  case "$AIMHOOMAN_REF_UPDATES" in
+    *refs/heads/*|*" HEAD"*) ;;
+    *)
+      for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction; do
+        [ -x "$(dirname "$0")/$AIMHOOMAN_GUARD" ] || {
+          echo "aimhooman: required Git guards changed while reference-transaction was running; $AIMHOOMAN_GUARD is unavailable. The operation was stopped; run 'aimhooman init' and retry." >&2
+          exit 20
+        }
+      done
+      exit 0 ;;
+  esac ;;
+esac
+`
         : '';
     const template = `#!/bin/sh -p
 ${MARKER} (${name})

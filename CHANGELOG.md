@@ -52,6 +52,16 @@ with the working escape hatch named in the same breath.
 - Secret content rules now carry a remediation line naming the fixture
   escape hatch: `aimhooman allow <path> --scope secret-path --reason
   "test fixture"`.
+- The pre-commit hook now names locally-ignored AI artifacts once per set
+  change (`3 AI artifact(s) present locally are kept out of commits: ...`).
+  The prevention layer keeps them out of `git status`, which also kept their
+  exclusion silent: a `git add .` never told the developer the chat log did
+  not make the commit. The worktree walk is pathspec-pruned to the managed
+  exclude patterns, so it costs ~15ms; informational only, it never changes
+  an exit code.
+- The reference-transaction veto now notes that the rejected commit object
+  remains in the local object store — collected by `git gc --prune=now` when
+  nothing else references it — so a secret payload is not mistaken for gone.
 
 ### Changed
 
@@ -63,6 +73,19 @@ with the working escape hatch named in the same breath.
 
 ### Performance
 
+- `openRepo` resolves the repository in one `git rev-parse` call instead of
+  three; every hook spawn pays this, so it was the cheapest milliseconds on
+  the commit path. The common-dir answer is resolved against the invoking
+  cwd and canonicalized, preserving the previous spelling on symlinked
+  paths (macOS `/tmp`), and a path containing a newline falls back to one
+  flag per call.
+- The reference-transaction dispatcher exits before the Node spawn for a
+  `prepared` transaction that moves neither a branch nor HEAD (ORIG_HEAD,
+  tags, remote-tracking refs). Such payloads carry nothing `refcheck`
+  scans — but the skip first proves the four dispatchers are still
+  installed, so a hook manager wiping them mid-operation is answered with
+  a stop, not silence. An ordinary commit's hook time drops by roughly a
+  third in the field measurement (982ms → 649ms).
 - Installed Git hook shims export `NODE_COMPILE_CACHE` pointing at a
   per-install directory under the state dir (removed by
   `uninstall --purge-state`), shaving the module parse/compile cost off
