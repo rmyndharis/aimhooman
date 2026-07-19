@@ -186,12 +186,21 @@ export function openRepo(cwd = process.cwd()) {
     }
     const [root, gitDir, commonRaw] = lines;
     // Only --git-common-dir comes back relative, and it is relative to the cwd
-    // the command ran in (../.git from a subdirectory), never to the toplevel,
-    // so resolve it against that cwd and canonicalize the result:
-    // --show-toplevel is symlink-resolved by git (/private/tmp on macOS), and
-    // resolving the common dir through a symlinked cwd would hand back a
-    // differently-spelled state path for the same repository.
-    const commonDir = isAbsolute(commonRaw) ? commonRaw : realpathSync(resolve(cwd, commonRaw));
+    // the command ran in, never to the toplevel. Anchor the plain-'.git' case
+    // (a main worktree from any cwd spelling) on git's own canonical root —
+    // the same spelling the three-call version produced — instead of
+    // realpath'ing through the cwd: git lengthens 8.3 names on Windows and
+    // resolves symlinked cwds on macOS, and matching it keeps one spelling
+    // per repository. Anything else (a subdir's ../.git, an uncommon layout)
+    // resolves against the invoking cwd, which is the same directory.
+    let commonDir;
+    if (isAbsolute(commonRaw)) {
+        commonDir = commonRaw;
+    } else if (commonRaw === '.git') {
+        commonDir = join(root, commonRaw);
+    } else {
+        commonDir = resolve(cwd, commonRaw);
+    }
     return {
         root,
         gitDir,
