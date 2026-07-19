@@ -93,8 +93,12 @@ export function syncCatalog(root = ROOT, { check = false } = {}) {
     const rules = loadRules();
     const stale = [];
     for (const target of catalogTargets(root)) {
-        const output = target.render(rules);
         const current = existsSync(target.path) ? readFileSync(target.path, 'utf8') : null;
+        // Windows checkouts convert text files to CRLF in the worktree. Render
+        // with the file's own EOL so the drift check compares like with like —
+        // the same trick sync-hosts.mjs uses for the host table.
+        const eol = current?.includes('\r\n') ? '\r\n' : '\n';
+        const output = target.render(rules).replace(/\n/g, eol);
         if (current === output) continue;
         if (check) stale.push(target.file);
         else writeFileSync(target.path, output);

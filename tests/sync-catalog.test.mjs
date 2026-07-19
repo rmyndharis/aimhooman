@@ -30,6 +30,12 @@ function managedLines(text, start, end) {
         .filter((line) => line.trim());
 }
 
+// Windows checkouts convert the committed artifacts to CRLF in the worktree;
+// compare them in LF so the assertions hold on every platform.
+function readLf(path) {
+    return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+}
+
 test('catalog generators are deterministic across rule loads', () => {
     assert.equal(renderGitignore(loadRules()), renderGitignore(loadRules()));
     assert.equal(renderCatalog(loadRules()), renderCatalog(loadRules()));
@@ -40,8 +46,8 @@ test('catalog generators are deterministic across rule loads', () => {
 test('sync:catalog --check passes on the committed artifacts', () => {
     execFileSync(process.execPath, ['scripts/sync-catalog.mjs', '--check'], { cwd: ROOT });
     const rules = loadRules();
-    assert.equal(readFileSync(join(ROOT, 'docs/ai-artifacts.gitignore'), 'utf8'), renderGitignore(rules));
-    assert.equal(readFileSync(join(ROOT, 'docs/catalog.md'), 'utf8'), renderCatalog(rules));
+    assert.equal(readLf(join(ROOT, 'docs/ai-artifacts.gitignore')), renderGitignore(rules));
+    assert.equal(readLf(join(ROOT, 'docs/catalog.md')), renderCatalog(rules));
 });
 
 test('sync:catalog --check fails when an artifact is stale or missing', () => {
@@ -57,13 +63,13 @@ test('sync:catalog --check fails when an artifact is stale or missing', () => {
 });
 
 test('gitignore artifact lists exactly the rule-derived patterns', () => {
-    const text = readFileSync(join(ROOT, 'docs/ai-artifacts.gitignore'), 'utf8');
+    const text = readLf(join(ROOT, 'docs/ai-artifacts.gitignore'));
     const lines = managedLines(text, '# >>> aimhooman:catalog-start', '# <<< aimhooman:catalog-end');
     assert.deepEqual(lines, patternsForRules(loadRules()));
 });
 
 test('catalog table covers every built-in rule', () => {
-    const text = readFileSync(join(ROOT, 'docs/catalog.md'), 'utf8');
+    const text = readLf(join(ROOT, 'docs/catalog.md'));
     const rows = managedLines(text, '<!-- aimhooman:catalog-start -->', '<!-- aimhooman:catalog-end -->')
         .filter((line) => line.startsWith('| `'));
     const rules = loadRules();
