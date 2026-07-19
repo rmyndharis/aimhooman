@@ -5,9 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-19
 
-This batch works through the findings of the cross-ecosystem field test
+This release works through the findings of the cross-ecosystem field test
 (8 upstream clones, 6 language loops, a local bare remote, and a private
 GitHub sandbox). The headline: `allow` no longer says yes when it means no —
 a path allow on a file whose content holds a secret is refused up front,

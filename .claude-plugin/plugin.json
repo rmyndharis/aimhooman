@@ -1,6 +1,6 @@
 {
     "name": "aimhooman",
-    "version": "0.1.8",
+    "version": "0.2.0",
     "description": "AI works. Hoomans ship. Keeps AI session files, secrets, and unwanted attribution out at the agent and Git boundary.",
     "author": {
         "name": "aimhooman"
