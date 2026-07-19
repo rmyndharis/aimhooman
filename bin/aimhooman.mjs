@@ -1052,7 +1052,18 @@ function cmdInit(args) {
 function grandfatherTrackedSecrets(repo) {
     let scan;
     try {
-        scan = scanGitTarget(repo, { kind: 'tracked', limits: scanLimits() });
+        // Commit-time budgets exist for latency, but a grandfather scan that
+        // stops at the default 64 MiB total or 1,000 findings silently misses
+        // fixtures in exactly the large, fixture-heavy repositories it exists
+        // for (OpenSSL tracks ~200 MiB and its 279 key files produce more
+        // than a thousand PEM findings). This is a one-shot, operator-invoked
+        // scan of the operator's own repository, so the defaults here are the
+        // same cap an env raise could reach plus a generous finding budget;
+        // the per-file budget and an explicit env override still apply.
+        scan = scanGitTarget(repo, {
+            kind: 'tracked',
+            limits: { maxTotalBytes: MAX_SCAN_LIMIT_BYTES, maxFindings: 100_000, ...scanLimits() },
+        });
     } catch (error) {
         console.error(`aimhooman: warning: grandfather scan failed (${error.message}); no pre-existing secret paths were allowed`);
         return;

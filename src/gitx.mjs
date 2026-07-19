@@ -99,7 +99,23 @@ function objectMetadata(repo, oids) {
 }
 
 function enrichEntries(repo, entries) {
-    const metadata = objectMetadata(repo, entries.map((entry) => entry.oid));
+    const metadata = objectMetadata(
+        repo,
+        entries.filter((entry) => entry.mode !== '160000').map((entry) => entry.oid),
+    );
+    // Gitlinks (mode 160000) pin a commit of another repository. Enrich them
+    // from the local object store when the pin happens to be there, but never
+    // let the read fail the scan: in a partial clone asking cat-file about a
+    // pin that is not local triggers a promisor fetch that aborts the whole
+    // batch ("not our ref"), surfacing as an EPIPE. A failed read leaves the
+    // mode-derived type in place with no size.
+    try {
+        const gitlinks = objectMetadata(
+            repo,
+            entries.filter((entry) => entry.mode === '160000').map((entry) => entry.oid),
+        );
+        for (const [oid, object] of gitlinks) metadata.set(oid, object);
+    } catch { /* best effort — see above */ }
     return entries.map((entry) => {
         const object = metadata.get(entry.oid) || { type: null, size: null };
         return {
