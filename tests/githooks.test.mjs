@@ -575,11 +575,16 @@ test('a branch-free reference transaction still notices wiped dispatchers', () =
             assert.equal(benign.status, 0, benign.stderr);
 
             // A hook manager wipes a dispatcher; the next branch-free
-            // transaction must stop and say why.
+            // transaction must stop and say why. Which layer answers first
+            // depends on the Git version: Git >=2.54 fires the preparing
+            // phase, where refcheck's own integrity check responds ("final
+            // Git guards changed"); older Git reaches the dispatcher's
+            // presence check in prepared ("required Git guards changed").
+            // Both stop the operation and name the missing dispatcher.
             rmSync(join(hooks, 'commit-msg'));
             const wiped = spawnSync('git', ['tag', 'v1'], { cwd: root, encoding: 'utf8' });
             assert.notEqual(wiped.status, 0, wiped.stdout + wiped.stderr);
-            assert.match(wiped.stderr, /required Git guards changed/);
+            assert.match(wiped.stderr, /Git guards changed/);
             assert.match(wiped.stderr, /commit-msg is unavailable/);
         });
     } finally {
