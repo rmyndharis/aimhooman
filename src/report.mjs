@@ -9,13 +9,17 @@ const HUMAN_FINDING_CAP = 20;
 
 export function human(findings, tone) {
     if (!findings.length) return '';
-    let out = tone === 'professional' ? '\n' : '\nnot very hooman.\n\n';
     let block = 0;
     let review = 0;
     for (const f of findings) {
         if (f.decision === 'block') block += 1;
         else if (f.decision === 'review') review += 1;
     }
+    // The banner means "aimhooman stopped or reshaped your operation". A pure
+    // advisory (review findings only, the commit proceeds untouched) prints
+    // without it — otherwise the banner fires on allowed work and stops
+    // meaning anything when a real block lands.
+    let out = tone === 'professional' || block === 0 ? '\n' : '\nnot very hooman.\n\n';
     // Render findings in order up to the cap, then collapse the rest into one
     // summary line. Keeps the first findings fully visible (the actionable ones)
     // while bounding stderr for repeated-rule scans.
@@ -92,8 +96,13 @@ function isSensitive(finding) {
 // final ref boundary (failClosedIncomplete). Frictionless profiles warn and
 // continue — the reference-transaction guard still scans introduced commits
 // with failClosedIncomplete set, so the skipped content is checked before any
-// ref moves.
-export function exitCode(findings, profile, complete = true, { failClosedIncomplete = false } = {}) {
+// ref moves. One exception at that final boundary: a scan whose only gap is
+// 'size-limit' (a file over maxFileBytes went unscanned for content rules —
+// path rules still ran) warns and continues on frictionless profiles. Blocking
+// the whole commit there cost developers a legit large file for a marker risk
+// that clean/compliance treat as advisory anyway. Strict stays fail-closed on
+// any gap, size-limit included.
+export function exitCode(findings, profile, complete = true, { failClosedIncomplete = false, incompleteReasons = [] } = {}) {
     let block = false;
     let review = false;
     for (const f of findings) {
@@ -101,7 +110,11 @@ export function exitCode(findings, profile, complete = true, { failClosedIncompl
         else if (f.decision === 'review') review = true;
     }
     if (block) return 10;
-    if (!complete && (profile === 'strict' || failClosedIncomplete)) return 31;
+    if (!complete && (profile === 'strict' || failClosedIncomplete)) {
+        const sizeLimitOnly = incompleteReasons.length > 0
+            && incompleteReasons.every((reason) => reason === 'size-limit');
+        if (profile === 'strict' || !sizeLimitOnly) return 31;
+    }
     if (review && findings.some((finding) => (finding.scanProfile || profile) !== 'clean')) return 11;
     return 0;
 }

@@ -5,6 +5,43 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- New managed `pre-push` hook (`pushcheck`) that scans every commit a push
+  would introduce, messages included. A commit vetoed by the
+  reference-transaction guard stays in the local object store, and pushing that
+  raw object ID (`git push <remote> <sha>:<ref>`) moved no local branch, so it
+  sailed past every guard; the veto message even printed the SHA. Such pushes
+  are now rejected before any objects are sent. Deletions carry nothing and
+  pass without scanning.
+
+### Changed
+
+- A scan whose only gap is a file over the per-file size budget no longer
+  wedges commits on `clean`/`compliance`: the final ref guard warns and
+  continues instead of vetoing, because path rules still covered the file.
+  `strict` stays fail-closed (exit 31) on any incomplete scan, and every other
+  gap (total byte budget, unreadable objects, rule-pack errors) stays
+  fail-closed on all profiles.
+- Commit overhead: the `commit-msg` dispatcher greps the message for the
+  attribution-rule anchors and skips its Node spawn when none is present (a
+  local rule pack re-enables the spawn, since it can declare its own message
+  rules), and `pre-commit` skips its spawn when the index is empty. A typical
+  commit goes from three Node spawns to two; an empty commit to one.
+- The `not very hooman.` banner now appears only when a finding actually stops
+  or reshapes the operation (a block). A pure review advisory, where the
+  commit proceeds untouched, prints without it so the banner keeps its meaning.
+- A blocked strict-policy downgrade or deletion now prints the exact
+  `aimhooman policy-review` invocation — oids included — instead of pointing at
+  "the reviewed migration command"; running the printed command unlocks the
+  commit.
+- A non-blocking "scan incomplete" warning (the oversized-file case) prints
+  once per tree and gap instead of once per hook: pre-commit, commit-msg, the
+  final ref guard, and pre-push share a notice marker, so the same oversized
+  file no longer warns three times in one commit.
+
 ## [0.3.1] - 2026-07-19
 
 ### Fixed

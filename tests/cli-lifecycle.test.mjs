@@ -389,7 +389,7 @@ test('a misspelled global uninstall flag leaves repository enforcement intact', 
 
         const status = run(repo, ['status']);
         assert.equal(status.status, 0, status.stderr);
-        assert.match(status.stdout, /hooks:\s+commit-msg, pre-commit, pre-merge-commit, reference-transaction/);
+        assert.match(status.stdout, /hooks:\s+commit-msg, pre-commit, pre-merge-commit, pre-push, reference-transaction/);
     } finally {
         cleanup(repo);
     }
@@ -1093,7 +1093,7 @@ withLock(lock, () => writeFileSync(exclude, 'user pattern\\n'), { retries: 1000 
     };
     const assertInstalled = (repo, profile) => {
         assert.equal(JSON.parse(readFileSync(join(stateDir(repo), 'config.json'))).profile, profile);
-        for (const name of ['pre-commit', 'pre-merge-commit', 'commit-msg', 'reference-transaction']) {
+        for (const name of ['pre-commit', 'pre-merge-commit', 'commit-msg', 'pre-push', 'reference-transaction']) {
             assert.equal(existsSync(gitPath(repo, `hooks/${name}`)), true, name);
         }
         assert.match(readFileSync(repo.excludeFile || gitPath(repo, 'info/exclude'), 'utf8'), /aimhooman managed excludes/);
@@ -1148,7 +1148,7 @@ withLock(lock, () => writeFileSync(exclude, 'user pattern\\n'), { retries: 1000 
             const [a, b] = await Promise.all([initOutcome, uninstallOutcome]);
             assert.equal(a.status, 0, a.stderr);
             assert.equal(b.status, 0, b.stderr);
-            for (const name of ['pre-commit', 'pre-merge-commit', 'commit-msg', 'reference-transaction']) {
+            for (const name of ['pre-commit', 'pre-merge-commit', 'commit-msg', 'pre-push', 'reference-transaction']) {
                 assert.equal(existsSync(gitPath(repo, `hooks/${name}`)), false, name);
             }
             assert.equal(JSON.parse(readFileSync(join(stateDir(repo), 'config.json'))).profile, 'clean');

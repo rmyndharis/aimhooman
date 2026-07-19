@@ -41,7 +41,9 @@ One detection core, many enforcement surfaces. On the default profile the ordina
 path repairs hygiene findings when it can; `commit-msg` checks the pinned would-be tree,
 and the final ref boundary independently scans every commit introduced to `HEAD` or a
 branch. A block that survives repair stops the commit; an incomplete scan warns on
-`clean`/`compliance` and still vetoes at the final ref guard.
+`clean`/`compliance` and still vetoes at the final ref guard, unless the only gap is a
+file over the per-file size budget. `pre-push` scans what a push would send, so a commit
+pushed by raw object ID cannot bypass the local guards.
 
 ```mermaid
 flowchart TD
@@ -57,15 +59,18 @@ flowchart TD
     MSG -->|unsafe or unrepairable| BLOCK
     REF -->|accepted| SHIP([Ref update commits])
     REF -->|violation or incomplete scan| BLOCK
+    PUSH([git push]) --> PREPUSH["pre-push<br/>scans every commit the push would send,<br/>messages included — even a push by raw object ID"]
+    PREPUSH -->|accepted| SENT([Objects leave for the remote])
+    PREPUSH -->|violation| BLOCK
 
     classDef entry fill:#f8fafc,stroke:#94a3b8,color:#0f172a,stroke-width:1.5px
     classDef hook fill:#eef2ff,stroke:#6366f1,color:#312e81,stroke-width:2px
     classDef ok fill:#ecfdf5,stroke:#10b981,color:#064e3b,stroke-width:1.5px
     classDef stop fill:#fef2f2,stroke:#ef4444,color:#7f1d1d,stroke-width:2px
 
-    class SESS,AGENT,RUN,COMMIT,DIRECT entry
-    class PRE,MSG,REF hook
-    class SHIP ok
+    class SESS,AGENT,RUN,COMMIT,DIRECT,PUSH entry
+    class PRE,MSG,REF,PREPUSH hook
+    class SHIP,SENT ok
     class BLOCK stop
 ```
 

@@ -62,12 +62,16 @@ manager runs the check but registers no managed guard, so the agent hook still
 refuses the commit. Remove the override before retrying, or accept that the
 repository is unguarded and do not run `init` there.
 
-Repository `init` installs `pre-commit`, `pre-merge-commit`, `commit-msg`, and
-`reference-transaction`, and preserves an existing hook as a predecessor. For
+Repository `init` installs `pre-commit`, `pre-merge-commit`, `commit-msg`,
+`reference-transaction`, and `pre-push`, and preserves an existing hook as a
+predecessor. For
 `commit-msg`, aimhooman pins the would-be tree before the predecessor runs, so a later
 index change cannot select a weaker policy. The prepared reference transaction is the
 last local check for cherry-pick, revert, rebase, `git am`, fetch/worktree branch
-creation, and direct branch-ref updates. Every profile stops if a predecessor removes
+creation, and direct branch-ref updates. The `pre-push` hook scans every commit a push
+would introduce — including one pushed by raw object ID, which moves no local branch
+and therefore never passes the reference-transaction guard. Every profile stops if a
+predecessor removes
 a required guard; the first running dispatcher that detects the loss aborts the
 operation.
 
@@ -89,9 +93,11 @@ change, and strict previews unless `--apply` is supplied.
 `rule` (see [docs/policy.md](policy.md#overrides)).
 
 On `clean` and `compliance`, `check`, `fix`, and the commit hooks warn and continue
-when a scan is incomplete; `strict` exits 31 instead. The final ref guard
-(`reference-transaction`) stays fail-closed on every profile and still vetoes what
-it cannot fully scan.
+when a scan is incomplete; `strict` exits 31 instead. The final ref guards
+(`reference-transaction`, `pre-push`) stay fail-closed on every profile and still
+veto what they cannot fully scan — with one carve-out: a scan whose only gap is a
+file over the per-file size budget warns and continues on `clean`/`compliance`,
+because path rules still covered that file.
 
 Machine reports use `schema_version: 1` and include target policy identity, completeness,
 scan statistics, commit and object metadata. Schemas are published in [`schemas/`](../schemas/).
@@ -111,4 +117,4 @@ History cleanup is deliberately outside aimhooman's scope.
 | 11 | review-required on a non-clean profile |
 | 20 | usage, configuration, or rule-pack error |
 | 30 | Git or I/O error |
-| 31 | scan incomplete on `strict` or at the final ref guard (`clean`/`compliance` warn and continue) |
+| 31 | scan incomplete on `strict`, or at the final ref guard for any gap other than a per-file size-limit on `clean`/`compliance` (those warn and continue) |

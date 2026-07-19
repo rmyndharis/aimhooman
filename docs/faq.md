@@ -16,9 +16,11 @@ and treats an incomplete scan as a stop.
 Git objects in batches. Text-oriented rules skip binary files. Size and total budgets
 are visible in reports. Files over 2 MiB or a scan over 64 MiB make the scan
 incomplete (binary files skip complete; oversized text is what trips it): direct
-checks and the Git pre-commit guards warn on `clean`/`compliance` and stop on
-`strict`, and the final ref guard stops on every profile rather than
-claiming that content was checked.
+checks and the Git guards warn on `clean`/`compliance` and stop on
+`strict`. At the final ref guard the carve-out narrows: a scan whose only gap is
+an oversized file (path rules still ran on it) warns and continues there too, while
+any other gap — a blown total budget, an unreadable object — stops on every profile
+rather than claiming that content was checked.
 
 **Can the agent bypass it?** Any local tool can ultimately be bypassed by a user with
 commit access. The agent guard fails closed on what it cannot prove: empty, invalid,

@@ -60,7 +60,7 @@ three commits back still gets caught.
 ### Running it alongside aimhooman
 
 The two tools do not overlap and do not fight. aimhooman owns Git's
-`pre-commit`, `commit-msg`, and `reference-transaction` hooks; gitleaks runs
+`pre-commit`, `commit-msg`, `reference-transaction`, and `pre-push` hooks; gitleaks runs
 as a pre-commit.com hook or in CI, so both fire on the same commit without
 sharing state. A commit carrying an AI session file and an API key gets
 stopped for both reasons, each reported by the tool that owns it. Keep

@@ -26,7 +26,15 @@ const MANAGED = {
     'pre-merge-commit': 'precommit',
     'commit-msg': 'commitmsg "$1"',
     'reference-transaction': 'refcheck "$1"',
+    'pre-push': 'pushcheck',
 };
+// Literal anchors shared by every built-in message-kind rule. The commit-msg
+// dispatcher greps the message for this ERE before paying a Node spawn: a
+// message with no anchor cannot match any attribution rule, so skipping the
+// spawn cannot let attribution through. Pinned by a test that walks
+// rules/attribution.json — a new message rule must carry one of these anchors
+// or the fast path would silently bypass it.
+export const MESSAGE_ANCHOR_ERE = 'anthropic|openai|copilot|claude|chatgpt|gpt|codex|cursor|\\[bot\\]|bot@users';
 const LEGACY_MANAGED = {
     'pre-commit': 'precommit',
     'commit-msg': 'commitmsg "$1"',
@@ -664,7 +672,52 @@ function hookScript(name, cmd, cliPath, chainedPath) {
 }
 `
         : '';
-    const captureTransaction = name === 'reference-transaction'
+    // Fast paths that skip the Node spawn for work the guard can prove is a
+    // no-op. Both sit after the chained-hook call, so a chained predecessor
+    // always runs, and both fall through to the full guard on any doubt (grep
+    // or git erroring included).
+    // - commit-msg: every built-in message rule carries one of the
+    //   MESSAGE_ANCHOR_ERE literals, so a message with no anchor match has
+    //   nothing to strip and no finding to raise. Local packs can declare
+    //   their own message rules, so their presence disables the fast path.
+    //   The tree snapshot stays at the top of the script on purpose: it must
+    //   capture the would-be tree BEFORE a chained predecessor can stage a
+    //   policy change into the live index.
+    // - pre-commit: an empty index holds nothing to scan (`--allow-empty`,
+    //   `commit -m` with no staged change). git diff exits 1 on staged changes
+    //   and >1 on read errors; only a proven-empty index skips.
+    // - pre-push: deletion lines (zero local oid) carry nothing to scan, so
+    //   they are dropped before the spawn; a push of only deletions never
+    //   starts Node. The chained predecessor still saw the full unfiltered
+    //   input above. The filter is grep, not a shell `case` loop: case
+    //   patterns break inside $( ) on older POSIX shells (bash 3.2 /bin/sh).
+    //   grep exit 1 means "only deletions" — not an error; anything worse
+    //   aborts the push rather than skipping the guard.
+    const preAimFilter = name === 'commit-msg'
+        ? `AIMHOOMAN_COMMON=$(PATH="$AIMHOOMAN_PATH" git rev-parse --git-common-dir 2>/dev/null) || AIMHOOMAN_COMMON=
+if [ -n "$AIMHOOMAN_COMMON" ] && PATH="$AIMHOOMAN_PATH" ls "$AIMHOOMAN_COMMON/aimhooman/rules/"*.json >/dev/null 2>&1; then
+  :
+else
+  PATH="$AIMHOOMAN_PATH" grep -Eiq -- ${shq(MESSAGE_ANCHOR_ERE)} "$1" 2>/dev/null
+  case $? in
+    1) exit 0 ;;
+  esac
+fi
+`
+        : name === 'pre-commit'
+            ? `PATH="$AIMHOOMAN_PATH" git diff --cached --quiet
+case $? in
+  0) exit 0 ;;
+esac
+`
+            : name === 'pre-push'
+                ? `AIMHOOMAN_PUSH_UPDATES=$(
+  printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | PATH="$AIMHOOMAN_PATH" grep -v '^[^ ]* 0* ' || [ $? -eq 1 ]
+) || exit $?
+[ -n "$AIMHOOMAN_PUSH_UPDATES" ] || exit 0
+`
+                : '';
+    const captureTransaction = name === 'reference-transaction' || name === 'pre-push'
         ? `AIMHOOMAN_REF_UPDATES=$(
   while IFS= read -r AIMHOOMAN_REF_UPDATE || [ -n "$AIMHOOMAN_REF_UPDATE" ]; do
     printf '%s\\n' "$AIMHOOMAN_REF_UPDATE" || exit $?
@@ -682,7 +735,7 @@ function hookScript(name, cmd, cliPath, chainedPath) {
     // shell (/bin/sh -p), so its shebang is honoured only for sh-compatible
     // scripts; bash-only predecessors are out of scope. exit inside the
     // predecessor exits the subshell and propagates via || exit $?.
-    const chainedInvocation = name === 'reference-transaction'
+    const chainedInvocation = name === 'reference-transaction' || name === 'pre-push'
         ? `  printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | ( . "$CHAINED" ) || exit $?`
         : `  ( . "$CHAINED" ) || exit $?`;
     const aimCommand = name === 'commit-msg'
@@ -692,7 +745,9 @@ function hookScript(name, cmd, cliPath, chainedPath) {
             : cmd;
     const aimInvocation = name === 'reference-transaction'
         ? `printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | run_aimhooman ${aimCommand} || exit $?`
-        : `run_aimhooman ${aimCommand} || exit $?`;
+        : name === 'pre-push'
+            ? `printf '%s\\n' "$AIMHOOMAN_PUSH_UPDATES" | run_aimhooman ${aimCommand} || exit $?`
+            : `run_aimhooman ${aimCommand} || exit $?`;
     // committed/aborted fire only after refs are locked in, and refcheck can do
     // nothing but return 0 for them (see cmdRefcheck). Short-circuit in the shell
     // so an ordinary commit no longer pays a Node cold start for the committed
@@ -711,7 +766,7 @@ case "$1" in prepared)
   case "$AIMHOOMAN_REF_UPDATES" in
     *refs/heads/*|*" HEAD"*) ;;
     *)
-      for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction; do
+      for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction pre-push; do
         [ -x "$(dirname "$0")/$AIMHOOMAN_GUARD" ] || {
           echo "aimhooman: required Git guards changed while reference-transaction was running; $AIMHOOMAN_GUARD is unavailable. The operation was stopped; run 'aimhooman init' and retry." >&2
           exit 20
@@ -779,7 +834,7 @@ fi
 if [ -x "$CHAINED" ]; then
 ${chainedInvocation}
 fi
-${phaseShortCircuit}${aimInvocation}
+${phaseShortCircuit}${preAimFilter}${aimInvocation}
 `;
     const fingerprint = hookFingerprint(template);
     return template.replace(FINGERPRINT_PLACEHOLDER, fingerprint);

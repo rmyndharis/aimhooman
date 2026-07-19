@@ -25,6 +25,7 @@ import {
     installGlobalHooks,
     installHooks,
     installedHooks,
+    MESSAGE_ANCHOR_ERE,
     pathCommandReachable,
     uninstallGlobalHooks,
     uninstallHooks,
@@ -118,7 +119,7 @@ test('linked worktree uses common hooks and preserves/restores an existing hook'
             const originalMode = statSync(join(effective, 'pre-commit')).mode & 0o777;
 
             const installed = installHooks(repo, '/tmp/aimhooman-cli.mjs');
-            assert.deepEqual(installed.installed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction']);
+            assert.deepEqual(installed.installed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'pre-push', 'reference-transaction']);
             assert.deepEqual(installed.chained, ['pre-commit']);
             assert.equal(hookFileExecutable(statSync(join(effective, 'pre-commit'))), true);
             assert.ok(existsSync(join(root, '.git/hooks/pre-commit')));
@@ -133,7 +134,7 @@ test('linked worktree uses common hooks and preserves/restores an existing hook'
             );
 
             const uninstalled = uninstallHooks(repo);
-            assert.deepEqual(uninstalled.removed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction']);
+            assert.deepEqual(uninstalled.removed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'pre-push', 'reference-transaction']);
             assert.deepEqual(uninstalled.restored, ['pre-commit']);
             assert.equal(readFileSync(join(effective, 'pre-commit'), 'utf8'), oldHook);
             assert.equal(
@@ -255,7 +256,7 @@ test('install/uninstall honors a local-scope core.hooksPath once it is excluded'
             assert.equal(existsSync(join(root, '.git', 'hooks', 'pre-commit')), false);
             assert.ok(installedHooks(openRepo(root)).includes('pre-commit'));
             const uninstalled = uninstallHooks(openRepo(root));
-            assert.deepEqual(uninstalled.removed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction']);
+            assert.deepEqual(uninstalled.removed, ['commit-msg', 'pre-commit', 'pre-merge-commit', 'pre-push', 'reference-transaction']);
             assert.equal(existsSync(join(custom, 'pre-commit')), false);
         });
     } finally {
@@ -297,7 +298,7 @@ test('an untracked worktree hooksPath is refused until excluded', () => {
     }
 });
 
-const MANAGED_NAMES = ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction'];
+const MANAGED_NAMES = ['commit-msg', 'pre-commit', 'pre-merge-commit', 'pre-push', 'reference-transaction'];
 
 test('a renamed repository still owns the dispatchers inside its own .git', () => {
     // The dispatcher bakes absolute paths, so moving the repository changes the
@@ -401,7 +402,7 @@ test('managed hook integrity and command reachability are verified', () => {
             const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
             installHooks(repo, CLI);
 
-            assert.deepEqual(installedHooks(repo), ['commit-msg', 'pre-commit', 'pre-merge-commit', 'reference-transaction']);
+            assert.deepEqual(installedHooks(repo), ['commit-msg', 'pre-commit', 'pre-merge-commit', 'pre-push', 'reference-transaction']);
             for (const diagnostic of hookDiagnostics(repo)) {
                 assert.equal(diagnostic.managed, true, diagnostic.reason);
                 assert.equal(diagnostic.reachable, true, diagnostic.reason);
@@ -413,7 +414,7 @@ test('managed hook integrity and command reachability are verified', () => {
             const precommit = join(hooks, 'pre-commit');
             writeFileSync(precommit, readFileSync(precommit, 'utf8') + 'if then\n');
             chmodSync(precommit, 0o755);
-            assert.deepEqual(installedHooks(repo), ['commit-msg', 'pre-merge-commit', 'reference-transaction']);
+            assert.deepEqual(installedHooks(repo), ['commit-msg', 'pre-merge-commit', 'pre-push', 'reference-transaction']);
             assert.match(
                 hookDiagnostics(repo).find((hook) => hook.name === 'pre-commit').reason,
                 /fingerprint/
@@ -425,7 +426,7 @@ test('managed hook integrity and command reachability are verified', () => {
                 { mode: 0o755 }
             );
             chmodSync(precommit, 0o755);
-            assert.deepEqual(installedHooks(repo), ['commit-msg', 'pre-merge-commit', 'reference-transaction']);
+            assert.deepEqual(installedHooks(repo), ['commit-msg', 'pre-merge-commit', 'pre-push', 'reference-transaction']);
             assert.equal(
                 hookDiagnostics(repo).find((hook) => hook.name === 'pre-commit').managed,
                 false
@@ -774,6 +775,7 @@ process.stdout.write(JSON.stringify({ result, stateDir: repo.stateDir }));
             'commit-msg': 1,
             'pre-commit': 1,
             'pre-merge-commit': 1,
+            'pre-push': 1,
             'reference-transaction': 1,
         }).sort());
         assert.deepEqual(secondInstall.result.installed, []);
@@ -1059,6 +1061,127 @@ function refcheckPrepared(root, input) {
         encoding: 'utf8',
     });
 }
+
+function pushcheckDirect(root, input) {
+    return spawnSync(process.execPath, [CLI, 'pushcheck'], {
+        cwd: root,
+        input,
+        encoding: 'utf8',
+    });
+}
+
+// Field test F-1: a commit vetoed by refcheck stays in the object store, and
+// `git push <remote> <sha>:<ref>` used to publish it without any guard firing.
+// pushcheck closes that by scanning everything a push would introduce.
+test('pushcheck scans pushed commits, vetoes residue, and stops on input it cannot parse', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-pushcheck-direct-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const zero = '0'.repeat(40);
+
+            // A dangling commit with an AI artifact (never gated: made with
+            // --no-verify, then taken off the branch).
+            mkdirSync(join(root, '.claude'));
+            writeFileSync(join(root, '.claude', 'session.json'), '{"session":"local"}\n');
+            git(root, ['add', '-f', '.claude/session.json']);
+            git(root, ['commit', '--no-verify', '-q', '-m', 'session state']);
+            const artifact = git(root, ['rev-parse', 'HEAD']);
+            git(root, ['reset', '--hard', '-q', 'HEAD~1']);
+
+            // A dangling commit whose only residue is attribution in the
+            // message — no path rule fires, so this pins message scanning on
+            // every pushed commit, not only locally-authored ref updates.
+            writeFileSync(join(root, 'work.txt'), 'work\n');
+            git(root, ['add', 'work.txt']);
+            git(root, ['commit', '--no-verify', '-q', '-m', 'work\n\nCo-authored-by: Claude <noreply@anthropic.com>']);
+            const attributed = git(root, ['rev-parse', 'HEAD']);
+            git(root, ['reset', '--hard', '-q', 'HEAD~1']);
+
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+
+            const artifactPush = pushcheckDirect(root, `${artifact} ${artifact} refs/heads/probe ${zero}\n`);
+            assert.equal(artifactPush.status, 10, artifactPush.stderr);
+            assert.match(artifactPush.stderr, /claude\.session-state/);
+            assert.ok(
+                artifactPush.stderr.includes(`push of commit ${artifact} was rejected before any objects were sent`),
+                artifactPush.stderr,
+            );
+
+            const attributedPush = pushcheckDirect(root, `${attributed} ${attributed} refs/heads/probe ${zero}\n`);
+            assert.equal(attributedPush.status, 10, attributedPush.stderr);
+            assert.match(attributedPush.stderr, /attribution\.claude-coauthor/);
+
+            // A clean commit on top of the remote tip introduces one scannable
+            // commit and passes.
+            writeFileSync(join(root, 'clean.txt'), 'clean\n');
+            git(root, ['add', 'clean.txt']);
+            git(root, ['commit', '-q', '-m', 'clean work']);
+            const clean = git(root, ['rev-parse', 'HEAD']);
+            const parent = git(root, ['rev-parse', 'HEAD~1']);
+            const cleanPush = pushcheckDirect(root, `${clean} ${clean} refs/heads/main ${parent}\n`);
+            assert.equal(cleanPush.status, 0, cleanPush.stderr);
+
+            const deletion = pushcheckDirect(root, `refs/heads/old ${zero} refs/heads/old ${clean}\n`);
+            assert.equal(deletion.status, 0, deletion.stderr);
+
+            const malformed = pushcheckDirect(root, 'garbage\n');
+            assert.equal(malformed.status, 30, malformed.stderr);
+            assert.match(malformed.stderr, /malformed pre-push input/);
+
+            const badObject = pushcheckDirect(root, `${clean} zzz refs/heads/main ${parent}\n`);
+            assert.equal(badObject.status, 30, badObject.stderr);
+            assert.match(badObject.stderr, /malformed object ID in pre-push input/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('installed pre-push hook stops a vetoed dangling commit from reaching the remote', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-pre-push-hook-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const bare = join(base, 'remote.git');
+            execFileSync('git', ['init', '-q', '--bare', bare]);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+            git(root, ['remote', 'add', 'local', bare]);
+
+            // Clean work pushes fine and the ref lands.
+            writeFileSync(join(root, 'clean.txt'), 'clean\n');
+            git(root, ['add', 'clean.txt']);
+            git(root, ['commit', '-q', '-m', 'clean work']);
+            const okPush = spawnSync('git', ['push', 'local', 'HEAD:refs/heads/main'], { cwd: root, encoding: 'utf8' });
+            assert.equal(okPush.status, 0, okPush.stderr);
+
+            // A --no-verify commit is vetoed locally; its object stays behind.
+            mkdirSync(join(root, '.claude'));
+            writeFileSync(join(root, '.claude', 'session.json'), '{"session":"local"}\n');
+            git(root, ['add', '-f', '.claude/session.json']);
+            const dirty = spawnSync('git', ['commit', '--no-verify', '-m', 'session state'], { cwd: root, encoding: 'utf8' });
+            assert.notEqual(dirty.status, 0, 'refcheck must veto the --no-verify commit');
+            const sha = /proposed commit ([0-9a-f]{40}) was rejected/.exec(dirty.stderr)?.[1];
+            assert.ok(sha, `veto message must name the rejected commit: ${dirty.stderr}`);
+
+            // Pushing that raw object is what used to bypass every guard.
+            const bypass = spawnSync('git', ['push', 'local', `${sha}:refs/heads/probe-artifact`], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.notEqual(bypass.status, 0, bypass.stderr);
+            assert.match(bypass.stderr, /rejected before any objects were sent/);
+            const refs = git(bare, ['for-each-ref', '--format=%(refname)']);
+            assert.doesNotMatch(refs, /probe-artifact/);
+
+            // Deletions sail through without the guard scanning anything.
+            const del = spawnSync('git', ['push', 'local', ':refs/heads/never-existed'], { cwd: root, encoding: 'utf8' });
+            assert.equal(del.status, 0, del.stderr);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
 
 // The reference-transaction tests below drive this scan through a real installed hook,
 // and none of it reaches the coverage report: the generated hook unsets NODE_V8_COVERAGE
@@ -1350,6 +1473,57 @@ test('final reference scan carries an exact staged instruction review into the d
     }
 });
 
+// The block for an unreviewed strict-policy migration used to say "use the
+// reviewed migration command" without naming it. The remediation now prints
+// the exact invocation, oids included — and it must work when run as printed.
+test('a blocked policy downgrade prints the exact policy-review command that then unlocks it', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-policy-migration-msg-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            writeFileSync(
+                join(root, '.aimhooman.json'),
+                JSON.stringify({ schema_version: 1, profile: 'strict' }) + '\n',
+            );
+            git(root, ['add', '.aimhooman.json']);
+            git(root, ['commit', '--no-verify', '-q', '-m', 'strict baseline']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
+            const oldObject = git(root, ['rev-parse', 'HEAD:.aimhooman.json']);
+            writeFileSync(
+                join(root, '.aimhooman.json'),
+                JSON.stringify({ schema_version: 1, profile: 'clean' }) + '\n',
+            );
+            git(root, ['add', '.aimhooman.json']);
+            const newObject = git(root, ['rev-parse', ':.aimhooman.json']);
+
+            const blocked = spawnSync('git', ['commit', '-m', 'unreviewed downgrade'], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.notEqual(blocked.status, 0, blocked.stderr);
+            assert.match(blocked.stderr, /cannot be downgraded without a bound review/);
+            const expected = `aimhooman policy-review --head HEAD --staged --old ${oldObject} --new ${newObject} --reason`;
+            assert.ok(
+                blocked.stderr.includes(expected),
+                `remediation must print the exact command.\nwanted: ${expected}\ngot:\n${blocked.stderr}`,
+            );
+
+            // Run it as printed (reason text is the user's), then the commit passes.
+            execFileSync(process.execPath, [
+                CLI, 'policy-review', '--head', 'HEAD', '--staged',
+                '--old', oldObject, '--new', newObject, '--reason', 'reviewed policy migration',
+            ], { cwd: root });
+            const commit = spawnSync('git', ['commit', '-m', 'reviewed downgrade'], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.equal(commit.status, 0, commit.stderr);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('final reference scan carries an exact staged policy migration into the direct tip', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-ref-staged-policy-'));
     try {
@@ -1449,6 +1623,10 @@ test('generated hook allows the operation when its embedded CLI cannot run', () 
             const repo = openRepo(root);
             const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
             installHooks(repo, join(base, 'missing-cli.mjs'));
+            // Stage content so the pre-commit fast path (empty index → skip)
+            // does not legitimately bypass the guard this test drives.
+            writeFileSync(join(root, 'staged.txt'), 'staged\n');
+            git(root, ['add', 'staged.txt']);
             const out = spawnSync(HOOK_SHELL, [shellArgumentPath(join(hooks, 'pre-commit'))], {
                 cwd: root,
                 encoding: 'utf8',
@@ -1474,6 +1652,10 @@ function repoWithMovedNodePin(base) {
     const cli = join(base, 'cli.mjs');
     writeFileSync(cli, '');
     installHooks(repo, cli);
+    // Stage content so the pre-commit fast path (empty index → skip) does not
+    // legitimately bypass the Node-pin checks under test.
+    writeFileSync(join(root, 'staged.txt'), 'staged\n');
+    git(root, ['add', 'staged.txt']);
     const hookPath = join(hooks, 'pre-commit');
     writeFileSync(hookPath, readFileSync(hookPath, 'utf8')
         .replace(/^AIMHOOMAN_NODE=.*$/m, `AIMHOOMAN_NODE='${join(base, 'gone', 'node')}'`));
@@ -1517,6 +1699,100 @@ test('a moved Node pin allows the operation when no Node exists to run the remed
             assert.equal(out.status, 0, 'refusing here would trap the repository');
             assert.match(out.stderr, /no Node interpreter found/);
             assert.match(out.stderr, /without protection/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// Field test F-2: the commit-msg dispatcher greps the message for the
+// attribution anchors and skips the Node spawn when none is present. These
+// tests drive the dispatcher with a missing CLI: a skipped spawn stays silent,
+// a taken spawn hits the fail-open 'guard unavailable' path.
+test('commit-msg fast path skips the Node spawn only when the message has no anchor and no local pack', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-fastpath-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            installHooks(repo, join(base, 'missing-cli.mjs'));
+            const hook = join(hooks, 'commit-msg');
+            const message = join(base, 'message.txt');
+            const drive = () => spawnSync(HOOK_SHELL, [shellArgumentPath(hook), shellArgumentPath(message)], {
+                cwd: root,
+                encoding: 'utf8',
+                env: { ...process.env, PATH: '' },
+            });
+
+            writeFileSync(message, 'plain subject\n');
+            const clean = drive();
+            assert.equal(clean.status, 0, clean.stderr);
+            assert.doesNotMatch(clean.stderr, /guard unavailable/);
+
+            writeFileSync(message, 'update\n\nCo-authored-by: Claude <noreply@anthropic.com>\n');
+            const anchored = drive();
+            assert.equal(anchored.status, 0, anchored.stderr);
+            assert.match(anchored.stderr, /guard unavailable/);
+
+            // A local pack can declare message rules the anchors do not cover,
+            // so its mere presence disables the fast path.
+            mkdirSync(join(root, '.git', 'aimhooman', 'rules'), { recursive: true });
+            writeFileSync(join(root, '.git', 'aimhooman', 'rules', 'local.json'), '[]');
+            writeFileSync(message, 'plain subject\n');
+            const packed = drive();
+            assert.equal(packed.status, 0, packed.stderr);
+            assert.match(packed.stderr, /guard unavailable/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// The fast path is only sound while every message-kind rule carries one of the
+// anchor literals; this walks the shipped pack so a new rule without an anchor
+// fails here instead of silently bypassing the commit-msg guard.
+test('every built-in message rule carries a literal the commit-msg fast path greps for', () => {
+    const anchors = MESSAGE_ANCHOR_ERE.split('|').map((anchor) => anchor.replace(/\\/g, '').toLowerCase());
+    const pack = JSON.parse(readFileSync(join(process.cwd(), 'rules', 'attribution.json'), 'utf8'));
+    const messageRules = pack.filter((rule) => rule.kind === 'message');
+    assert.ok(messageRules.length > 0, 'expected message rules in rules/attribution.json');
+    for (const rule of messageRules) {
+        for (const pattern of rule.match?.content || []) {
+            const normalized = pattern.replace(/\\/g, '').toLowerCase();
+            assert.ok(
+                anchors.some((anchor) => normalized.includes(anchor)),
+                `${rule.id} pattern carries no fast-path anchor: ${pattern}`,
+            );
+        }
+    }
+});
+
+// Field test F-2: pre-commit with a proven-empty index skips the Node spawn.
+test('pre-commit fast path skips the Node spawn when nothing is staged', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-empty-index-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            installHooks(repo, join(base, 'missing-cli.mjs'));
+            const hook = join(hooks, 'pre-commit');
+            const drive = () => spawnSync(HOOK_SHELL, [shellArgumentPath(hook)], {
+                cwd: root,
+                encoding: 'utf8',
+                env: { ...process.env, PATH: '' },
+            });
+
+            const empty = drive();
+            assert.equal(empty.status, 0, empty.stderr);
+            assert.doesNotMatch(empty.stderr, /guard unavailable/);
+
+            writeFileSync(join(root, 'staged.txt'), 'staged\n');
+            git(root, ['add', 'staged.txt']);
+            const staged = drive();
+            assert.equal(staged.status, 0, staged.stderr);
+            assert.match(staged.stderr, /guard unavailable/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

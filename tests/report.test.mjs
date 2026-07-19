@@ -254,6 +254,27 @@ test('human report keeps full remediation for distinct rules', () => {
     assert.match(pointers[0], /local\.secret/);
 });
 
+// Field test F-4: the "not very hooman." banner used to fire on pure advisories
+// (review findings only, the commit proceeds), which wore the signal out. It now
+// appears only when at least one finding blocks the operation.
+test('human report shows the banner only when a finding blocks', () => {
+    const reviewFinding = {
+        ...secretFinding,
+        category: 'review',
+        decision: 'review',
+        matchedRules: secretFinding.matchedRules.map((match) => ({ ...match, category: 'review', decision: 'review' })),
+    };
+    const advisory = human([reviewFinding], 'playful');
+    assert.doesNotMatch(advisory, /not very hooman\./);
+    assert.match(advisory, /REVIEW/);
+    const stopped = human([secretFinding], 'playful');
+    assert.match(stopped, /not very hooman\./);
+    const mixed = human([reviewFinding, secretFinding], 'playful');
+    assert.match(mixed, /not very hooman\./);
+    // Professional tone never prints the banner, blocked or not.
+    assert.doesNotMatch(human([secretFinding], 'professional'), /not very hooman\./);
+});
+
 test('JSON report includes metadata and redacts secret text', () => {
     const metadata = {
         tool_version: '0.1.0-rc.1',

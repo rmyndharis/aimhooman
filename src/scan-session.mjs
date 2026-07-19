@@ -7,6 +7,17 @@ export const DEFAULT_SCAN_LIMITS = Object.freeze({
     maxFindings: 1000,
 });
 
+// Skip reasons that mean a rule never ran on its input, so the scan cannot
+// claim full coverage. What that costs is the caller's call: strict stops on
+// any of them; the final ref guard stops on all but 'size-limit' (see
+// exitCode in report.mjs). 'local-pack-error' never originates here — it is
+// tallied by scan-target — but it belongs to the same contract.
+export const FATAL_SKIP_REASONS = new Set([
+    'metadata-unavailable', 'size-limit', 'total-byte-limit',
+    'missing-object', 'unexpected-object', 'finding-limit',
+    'local-input-limit', 'local-pack-error',
+]);
+
 export function scanEntries(repo, engine, entries, options = {}) {
     const limits = { ...DEFAULT_SCAN_LIMITS, ...options };
     const stats = {
@@ -131,12 +142,9 @@ export function scanEntries(repo, engine, entries, options = {}) {
         stats.skipped[reason] = (stats.skipped[reason] || 0) + count;
     }
 
-    const incompleteReasons = new Set([
-        'metadata-unavailable', 'size-limit', 'total-byte-limit',
-        'missing-object', 'unexpected-object', 'finding-limit', 'local-input-limit',
-    ]);
-    const complete = !Object.keys(stats.skipped).some((reason) => incompleteReasons.has(reason));
-    return { findings, complete, stats };
+    const complete = !Object.keys(stats.skipped).some((reason) => FATAL_SKIP_REASONS.has(reason));
+    const incompleteReasons = Object.keys(stats.skipped).filter((reason) => FATAL_SKIP_REASONS.has(reason));
+    return { findings, complete, incompleteReasons, stats };
 }
 
 function readObjects(repo, objectIds, expectedBytes = 0) {

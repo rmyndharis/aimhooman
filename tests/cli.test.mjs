@@ -255,7 +255,8 @@ test('an unchanged file over the per-file scan budget does not wedge commits tha
     // The content scan now covers only changed files (path rules still run on
     // the full tree), so an oversized file that is unchanged in this commit
     // does not block it. When the oversized file itself changes, the budget
-    // applies and the commit fails until the budget is raised.
+    // applies: clean/compliance commit with a warning (the final ref guard
+    // downgrades a size-limit-only gap), strict stays fail-closed.
     const dir = mkdtempSync(join(tmpdir(), 'aim-scan-budget-'));
     try {
         execFileSync('git', ['init', '-q'], { cwd: dir });
@@ -282,26 +283,63 @@ test('an unchanged file over the per-file scan budget does not wedge commits tha
             'tweak one line',
         );
 
-        // Changing the oversized file triggers the budget again.
+        // Changing the oversized file trips the budget again. On the clean
+        // profile the commit now goes through with a warning: path rules still
+        // covered the file, and the final ref guard downgrades a size-limit-only
+        // gap instead of wedging the commit (field test F-3).
         writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 2;\n'.repeat(140000));
+        execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
+        const warned = spawnSync('git', ['commit', '-m', 'update vendor'], {
+            cwd: dir,
+            encoding: 'utf8',
+        });
+        assert.equal(warned.status, 0, warned.stdout + warned.stderr);
+        assert.match(warned.stderr, /warning: scan incomplete \(skipped: size-limit=1 file\)/);
+        assert.match(warned.stderr, /AIMHOOMAN_MAX_FILE_BYTES/);
+        // The same gap trips pre-commit, commit-msg, and the ref guard in one
+        // commit; the warning prints once, not three times.
+        const warnings = warned.stderr.match(/warning: scan incomplete/g) || [];
+        assert.equal(warnings.length, 1, `warning must print once, got:\n${warned.stderr}`);
+        assert.equal(
+            execFileSync('git', ['log', '-1', '--format=%s'], { cwd: dir, encoding: 'utf8' }).trim(),
+            'update vendor',
+        );
+
+        // Raising the budget covers the file again, so the warning disappears.
+        writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 3;\n'.repeat(140000));
+        execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
+        const raised = spawnSync('git', ['commit', '-m', 'update vendor again'], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { ...process.env, AIMHOOMAN_MAX_FILE_BYTES: String(8 << 20) },
+        });
+        assert.equal(raised.status, 0, raised.stdout + raised.stderr);
+        assert.doesNotMatch(raised.stderr, /scan incomplete/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an oversized staged file still stops the strict profile', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aim-scan-budget-strict-'));
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+        writeFileSync(join(dir, 'app.js'), 'export const x = 1;\n');
+        execFileSync('git', ['add', 'app.js'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: dir });
+        execFileSync('node', [CLI, 'init', '--profile', 'strict'], { cwd: dir });
+
+        writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 1;\n'.repeat(140000));
         execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
         const wedged = spawnSync('git', ['commit', '-m', 'update vendor'], {
             cwd: dir,
             encoding: 'utf8',
         });
         assert.notEqual(wedged.status, 0);
+        // Strict stops at the first guard (pre-commit, exit 31), before the
+        // reference-transaction guard is even reached.
         assert.match(wedged.stderr, /scan incomplete \(skipped: size-limit=1 file\)/);
-        assert.match(wedged.stderr, /raise AIMHOOMAN_MAX_FILE_BYTES \/ AIMHOOMAN_MAX_TOTAL_BYTES/);
-        // The early hooks warn on clean; the reference-transaction guard is
-        // what actually stops the ref from moving.
-        assert.match(wedged.stderr, /rejected before refs changed/);
-
-        const raised = spawnSync('git', ['commit', '-m', 'update vendor'], {
-            cwd: dir,
-            encoding: 'utf8',
-            env: { ...process.env, AIMHOOMAN_MAX_FILE_BYTES: String(8 << 20) },
-        });
-        assert.equal(raised.status, 0, raised.stdout + raised.stderr);
+        assert.match(wedged.stderr, /raise AIMHOOMAN_MAX_FILE_BYTES/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1628,7 +1666,7 @@ test('uninstall never reports success while its own dispatchers remain', () => {
     }).trim();
     try {
         const out = result('uninstall', [], dir);
-        const left = ['pre-commit', 'commit-msg', 'pre-merge-commit', 'reference-transaction']
+        const left = ['pre-commit', 'commit-msg', 'pre-merge-commit', 'pre-push', 'reference-transaction']
             .filter((name) => existsSync(join(hooks, name)));
 
         if (out.status === 0) {
@@ -1654,7 +1692,7 @@ test('uninstall lets a renamed repository go', () => {
         const hooks = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'hooks'], {
             cwd: moved, encoding: 'utf8',
         }).trim();
-        for (const name of ['pre-commit', 'commit-msg', 'pre-merge-commit', 'reference-transaction']) {
+        for (const name of ['pre-commit', 'commit-msg', 'pre-merge-commit', 'pre-push', 'reference-transaction']) {
             assert.equal(existsSync(join(hooks, name)), false, name);
         }
         writeFileSync(join(moved, 'work.txt'), 'ordinary\n');

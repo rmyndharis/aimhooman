@@ -8,7 +8,7 @@ import {
     unmergedPaths,
 } from './gitx.mjs';
 import { commitChanges, commitMessage, commitSnapshot, historyRange } from './history-scan.mjs';
-import { DEFAULT_SCAN_LIMITS, scanEntries } from './scan-session.mjs';
+import { DEFAULT_SCAN_LIMITS, FATAL_SKIP_REASONS, scanEntries } from './scan-session.mjs';
 import { loadRulesWithDiagnostics } from './rules.mjs';
 
 // A tiebreak for the one profile a range report has to name, not a strength
@@ -75,7 +75,7 @@ export function scanMessage(repo, text, options = {}) {
 
 function scanIndex(repo, options) {
     const kind = options.kind || 'staged';
-    const { rawPolicy, floor, policy, head, acknowledged } = resolveStagedPolicy(repo, options.explicitProfile);
+    const { rawPolicy, floor, policy, head, acknowledged, baselineObjectId } = resolveStagedPolicy(repo, options.explicitProfile);
     const loaded = engineForPolicy(repo, policy, options.overrideHead || head);
     const accumulator = createAccumulator(options.limits);
     accumulator.addSkipped(loaded.skipped);
@@ -96,11 +96,14 @@ function scanIndex(repo, options) {
         });
         // A reviewed-path override can suppress a matching path rule, but it
         // cannot turn an unresolved index into a complete commit snapshot.
-        accumulator.markIncomplete();
+        accumulator.markIncomplete('index-unresolved');
     }
 
     if (floor && !isVersionedStrict(rawPolicy)) {
-        accumulator.add([protectedPolicyFinding(rawPolicy, policy, null)]);
+        accumulator.add([protectedPolicyFinding(rawPolicy, policy, null, {
+            oldObjectId: baselineObjectId,
+            transition: 'staged',
+        })]);
     }
     scanEntryGroup(repo, loaded.engine, entries, policy, accumulator, {
         allowMissingPolicy: acknowledged && !rawPolicy.policy_object_id,
@@ -140,6 +143,7 @@ export function resolveStagedPolicy(repo, explicitProfile) {
         floor,
         head,
         acknowledged,
+        baselineObjectId: baselineStrict ? baseline.policy_object_id : null,
         policy: effectivePolicy(
             rawPolicy,
             explicitProfile,
@@ -209,11 +213,14 @@ function scanCommit(repo, options) {
             throw new GitRevisionError(options.revision, message);
         }
         diagnostics.push({ level: 'warning', message });
-        accumulator.markIncomplete();
+        accumulator.markIncomplete('shallow-repository');
     }
 
     if (floor && !isVersionedStrict(rawPolicy)) {
-        accumulator.add([protectedPolicyFinding(rawPolicy, policy, snapshot)]);
+        accumulator.add([protectedPolicyFinding(rawPolicy, policy, snapshot, {
+            oldObjectId: strictParentPolicies[0]?.policy_object_id ?? null,
+            transition: snapshot.commit,
+        })]);
     }
     // A commit is judged by what it changes, not by the whole tree it inherits.
     // Scanning snapshot.entries (a full `ls-tree`) re-applied path rules to
@@ -284,7 +291,7 @@ function scanRange(repo, options) {
             throw new GitRevisionError(options.range, message);
         }
         diagnostics.push({ level: 'warning', message });
-        accumulator.markIncomplete();
+        accumulator.markIncomplete('shallow-repository');
     }
     const policies = [];
     let usedStrictFloor = false;
@@ -336,7 +343,10 @@ function scanRange(repo, options) {
         diagnostics.push(...loaded.diagnostics);
 
         if (floor && !isVersionedStrict(rawPolicy)) {
-            accumulator.add([protectedPolicyFinding(rawPolicy, policy, commit)]);
+            accumulator.add([protectedPolicyFinding(rawPolicy, policy, commit, {
+                oldObjectId: [...parentStrictObjects][0] ?? null,
+                transition: commit.commit,
+            })]);
         }
         scanEntryGroup(repo, loaded.engine, changes.entries, policy, accumulator, {
             allowMissingPolicy: acknowledged && !rawPolicy.policy_object_id,
@@ -556,12 +566,27 @@ function isVersionedStrict(policy) {
     ));
 }
 
-function protectedPolicyFinding(rawPolicy, policy, entry) {
+function protectedPolicyFinding(rawPolicy, policy, entry, migration = {}) {
     const removed = !rawPolicy.policy_object_id;
     const reason = removed
         ? 'A versioned strict project policy cannot be deleted or renamed away without a bound review acknowledgment.'
         : 'A versioned strict project policy cannot be downgraded without a bound review acknowledgment.';
-    const remediation = ['Restore the strict policy or use the reviewed migration command bound to this target.'];
+    // Name the exact command, oids included: "use the reviewed migration
+    // command" sent developers to the docs for a three-flag incantation they
+    // could not guess (field-test rerun). The staged form binds to the live
+    // index; the transition form binds to the commit that carries the change.
+    const remediation = ['Restore the strict policy, or unstage the change to keep the current baseline.'];
+    if (migration.oldObjectId && migration.transition) {
+        const newOid = rawPolicy.policy_object_id ?? 'missing';
+        const form = migration.transition === 'staged'
+            ? '--staged'
+            : `--transition ${migration.transition}`;
+        remediation.push(
+            `or acknowledge the migration: aimhooman policy-review --head HEAD ${form} --old ${migration.oldObjectId} --new ${newOid} --reason "reviewed policy migration"`
+        );
+    } else {
+        remediation.push('or acknowledge the migration with a reviewed aimhooman policy-review invocation.');
+    }
     return decorate({
         ruleId: 'generic.project-policy',
         ruleVersion: 1,
@@ -637,10 +662,10 @@ function rangeReportPolicy(basePolicy, policies, usedStrictFloor, explicitProfil
     };
 }
 
-// Skip reasons that mean a rule never ran, as opposed to a rule running and
-// matching nothing. Either way the scan cannot claim to have covered its input.
-const INCOMPLETE_SKIP_REASONS = new Set(['local-input-limit', 'local-pack-error']);
-
+// The canonical set of fatal skip reasons lives in scan-session.mjs
+// (FATAL_SKIP_REASONS); the accumulator records which of them fired so callers
+// can tell "only an oversized file went unscanned" apart from gaps that must
+// stay fail-closed.
 function createAccumulator(limits = {}) {
     const effectiveLimits = { ...DEFAULT_SCAN_LIMITS, ...limits };
     const findings = [];
@@ -657,6 +682,12 @@ function createAccumulator(limits = {}) {
         skippedPaths: {},
     };
     let complete = true;
+    const incompleteReasons = new Set();
+
+    function flagIncomplete(reason) {
+        complete = false;
+        incompleteReasons.add(reason);
+    }
 
     function add(values, total = values.length) {
         stats.findings_total += total;
@@ -667,7 +698,7 @@ function createAccumulator(limits = {}) {
                 continue;
             }
             if (findings.length >= effectiveLimits.maxFindings) {
-                complete = false;
+                flagIncomplete('finding-limit');
                 increment(stats.skipped, 'finding-limit');
                 continue;
             }
@@ -675,7 +706,7 @@ function createAccumulator(limits = {}) {
             findings.push(finding);
         }
         stats.findings_returned = findings.length;
-        if (total > values.length) complete = false;
+        if (total > values.length) flagIncomplete('finding-limit');
     }
 
     return {
@@ -698,16 +729,17 @@ function createAccumulator(limits = {}) {
                     if (stats.skippedPaths[reason].length < 10) stats.skippedPaths[reason].push(entry);
                 }
             }
+            for (const reason of scanned.incompleteReasons || []) incompleteReasons.add(reason);
             if (!scanned.complete) complete = false;
         },
         addSkipped(skipped = {}) {
             for (const [reason, count] of Object.entries(skipped)) {
                 stats.skipped[reason] = (stats.skipped[reason] || 0) + count;
-                if (INCOMPLETE_SKIP_REASONS.has(reason)) complete = false;
+                if (FATAL_SKIP_REASONS.has(reason)) flagIncomplete(reason);
             }
         },
-        markIncomplete() {
-            complete = false;
+        markIncomplete(reason = 'target-unverifiable') {
+            flagIncomplete(reason);
         },
         remaining() {
             return Math.max(0, effectiveLimits.maxFindings - findings.length);
@@ -717,6 +749,9 @@ function createAccumulator(limits = {}) {
         },
         isComplete() {
             return complete;
+        },
+        get incompleteReasons() {
+            return [...incompleteReasons];
         },
     };
 }
@@ -731,6 +766,7 @@ function result({ target, policy, accumulator, diagnostics, messageScanned, comm
             policy_enforced_object_ids: policy.enforced_policy_object_ids,
         } : {}),
         complete: accumulator.isComplete(),
+        incomplete_reasons: accumulator.incompleteReasons,
         stats: accumulator.stats,
         findings: accumulator.findings,
         diagnostics,
