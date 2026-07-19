@@ -1,5 +1,5 @@
 {
-    "description": "aimhooman: keep AI session files, secrets, and attribution out of commits",
+    "description": "aimhooman: keep AI session files and attribution out of commits",
     "hooks": {
         "SessionStart": [
             {

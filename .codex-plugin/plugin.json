@@ -1,7 +1,7 @@
 {
     "name": "aimhooman",
     "version": "0.2.0",
-    "description": "AI works. Hoomans ship. Keeps AI session files, secrets, and unwanted attribution out at the agent and Git boundary.",
+    "description": "AI works. Hoomans ship. Keeps AI session files and unwanted attribution out at the agent and Git boundary.",
     "author": {
         "name": "aimhooman maintainers",
         "email": "yudhi@rmyndharis.com",
@@ -19,7 +19,7 @@
     "interface": {
         "displayName": "aimhooman",
         "shortDescription": "Keep AI tooling residue out of Git",
-        "longDescription": "Detects AI session files, secrets, and unwanted attribution before they enter Git history.",
+        "longDescription": "Detects AI session files and unwanted attribution before they enter Git history.",
         "developerName": "aimhooman maintainers",
         "category": "Developer Tools",
         "capabilities": [

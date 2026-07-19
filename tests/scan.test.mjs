@@ -13,12 +13,6 @@ test('flags a Claude session file, ignores normal source', () => {
     assert.equal(f[0].source, 'builtin');
 });
 
-test('flags .env but allows .env.example', () => {
-    const f = newEngine('clean').checkPaths(['.env', '.env.example']);
-    assert.equal(f.length, 1);
-    assert.equal(f[0].path, '.env');
-});
-
 test('AGENTS.md is review on clean, block on strict', () => {
     assert.equal(newEngine('clean').checkPaths(['AGENTS.md'])[0].decision, 'review');
     assert.equal(newEngine('strict').checkPaths(['AGENTS.md'])[0].decision, 'block');
@@ -49,16 +43,9 @@ test('allow override suppresses, deny override escalates', () => {
 });
 
 test('legacy object overrides infer rule IDs without changing path semantics', () => {
-    // A secret rule cannot be blanket-allowed at rule scope (that would mask
-    // every matching secret path under every profile); it requires an explicit
-    // --scope secret-path override on the specific path.
     const allowedRule = newEngine('clean');
-    allowedRule.setOverrides([{ target: 'secret.dotenv' }], []);
-    assert.equal(allowedRule.checkPaths(['.env'])[0].decision, 'block');
-
-    const allowedSecretPath = newEngine('clean');
-    allowedSecretPath.setOverrides([{ target: '.env', scope: 'secret-path' }], []);
-    assert.equal(allowedSecretPath.checkPaths(['.env']).length, 0);
+    allowedRule.setOverrides([{ target: 'generic.agent-instructions' }], []);
+    assert.equal(allowedRule.checkPaths(['AGENTS.md']).length, 0);
 
     const deniedRule = newEngine('clean');
     deniedRule.setOverrides([], [{ target: 'generic.agent-instructions' }]);
@@ -210,7 +197,7 @@ test('local rule loader reports invalid JSON context and compatibility API throw
     writeFileSync(join(dir, 'rules/good.json'), JSON.stringify([pathRule('local.survives', 'survives/**')]));
     try {
         const result = loadRulesWithDiagnostics(dir);
-        assert.ok(result.rules.length >= 24);
+        assert.equal(result.rules.length, loadRules().length + 1, 'built-in rules stay loaded beside the broken local pack');
         assert.ok(result.rules.some((rule) => rule.id === 'local.survives'));
         assert.equal(result.errors.length, 1);
         assert.ok(result.errors[0] instanceof RulePackError);
@@ -277,16 +264,16 @@ test('duplicate rule IDs reject the entire local pack', () => {
     const dir = localRulesDir();
     writeFileSync(join(dir, 'rules/duplicate.json'), JSON.stringify([
         pathRule('local.unique', 'unique/**'),
-        pathRule('secret.dotenv', 'shadow/**'),
+        pathRule('claude.session-state', 'shadow/**'),
     ]));
     try {
         const { engine, errors } = newEngineWithDiagnostics('clean', dir);
         assert.equal(errors.length, 1);
         assert.equal(errors[0].code, 'DUPLICATE_RULE_ID');
-        assert.match(errors[0].message, /duplicate rule id "secret\.dotenv"/);
+        assert.match(errors[0].message, /duplicate rule id "claude\.session-state"/);
         // Pack loading is atomic: its otherwise-valid first rule is not retained.
         assert.equal(engine.checkPaths(['unique/file']).length, 0);
-        assert.equal(engine.checkPaths(['.env'])[0]?.source, 'builtin');
+        assert.equal(engine.checkPaths(['.claude/session.json'])[0]?.source, 'builtin');
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

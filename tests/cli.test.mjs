@@ -172,19 +172,16 @@ test('precommit names locally-ignored AI artifacts once per set change', () => {
 test('a vetoed ref update says the rejected commit object stays in the object store', () => {
     // F-B-02: the reference-transaction veto stops the ref, but the commit
     // object lingers in the local object store. Say so, with the conditional
-    // cleanup command, so a secret payload is not mistaken for gone — and
+    // cleanup command, so a blocked payload is not mistaken for gone — and
     // without claiming "unreachable", which is wrong for a commit another
     // ref already reaches.
     const dir = makeRepo('clean');
     try {
-        writeFileSync(
-            join(dir, 'key.pem'),
-            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
-        );
-        execFileSync('git', ['add', 'key.pem'], { cwd: dir });
+        writeFileSync(join(dir, '.claude.json'), '{"session":true}\n');
+        execFileSync('git', ['add', '-f', '.claude.json'], { cwd: dir });
 
         const veto = spawnSync('git', ['commit', '--no-verify', '-m', 'wip'], { cwd: dir, encoding: 'utf8' });
-        assert.notEqual(veto.status, 0, 'the secret commit went through');
+        assert.notEqual(veto.status, 0, 'the blocked commit went through');
         assert.match(veto.stderr, /rejected before refs changed/);
         assert.match(veto.stderr, /remains in the local object store/);
         assert.match(veto.stderr, /git gc --prune=now/);
@@ -295,6 +292,9 @@ test('an unchanged file over the per-file scan budget does not wedge commits tha
         assert.notEqual(wedged.status, 0);
         assert.match(wedged.stderr, /scan incomplete \(skipped: size-limit=1 file\)/);
         assert.match(wedged.stderr, /raise AIMHOOMAN_MAX_FILE_BYTES \/ AIMHOOMAN_MAX_TOTAL_BYTES/);
+        // The early hooks warn on clean; the reference-transaction guard is
+        // what actually stops the ref from moving.
+        assert.match(wedged.stderr, /rejected before refs changed/);
 
         const raised = spawnSync('git', ['commit', '-m', 'update vendor'], {
             cwd: dir,
@@ -325,32 +325,36 @@ test('the scan budget knob refuses a value that is not a byte count, and caps th
         assert.match(huge.stderr, /AIMHOOMAN_MAX_TOTAL_BYTES must be between 1 and 1073741824 bytes/);
 
         // Lowering needs no ceiling: a smaller budget only skips more, and a
-        // skipped file is already an incomplete scan.
+        // skipped file is an incomplete scan — a warning on clean, a stop on
+        // strict.
         writeFileSync(join(dir, 'notes.md'), 'a tracked file with some bytes in it\n');
         execFileSync('git', ['add', 'notes.md'], { cwd: dir });
         const lowered = result('check', ['--tracked'], dir, undefined, {
             AIMHOOMAN_MAX_FILE_BYTES: '8',
         });
-        assert.equal(lowered.status, 31, lowered.stderr);
-        assert.match(lowered.stderr, /scan incomplete \(skipped: size-limit=1 file\)/);
+        assert.equal(lowered.status, 0, lowered.stderr);
+        assert.match(lowered.stderr, /warning: scan incomplete \(skipped: size-limit=1 file\)/);
+
+        const loweredStrict = result('check', ['--tracked', '--profile', 'strict'], dir, undefined, {
+            AIMHOOMAN_MAX_FILE_BYTES: '8',
+        });
+        assert.equal(loweredStrict.status, 31, loweredStrict.stderr);
+        assert.match(loweredStrict.stderr, /scan incomplete \(skipped: size-limit=1 file\)/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('precommit: the clean repair reports the rule that took each file, not one guessed noun', () => {
     // The repair line was the only output for a clean-profile block, and its noun
-    // was hardcoded to "AI artifact(s)". Seven of the rules that reach it are
-    // secret rules, so a private key and a live AWS key were announced as AI
-    // leftovers — asserting a false cause and withholding the true one at the one
-    // moment the answer is "rotate this credential".
+    // was hardcoded to "AI artifact(s)". The rules that reach it span several
+    // categories, so each finding must carry its own rule id, path and
+    // remediation instead of a shared label that fits none of them.
     const dir = makeRepo('clean');
     try {
-        writeFileSync(
-            join(dir, 'id_rsa'),
-            '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n',
-        );
+        mkdirSync(join(dir, '.claude'));
+        writeFileSync(join(dir, '.claude/session-2026-07-13.json'), '{}');
         mkdirSync(join(dir, '.playwright-mcp'));
         writeFileSync(join(dir, '.playwright-mcp/trace.json'), '{}');
-        execFileSync('git', ['add', '-f', 'id_rsa', '.playwright-mcp/trace.json'], { cwd: dir });
+        execFileSync('git', ['add', '-f', '.claude/session-2026-07-13.json', '.playwright-mcp/trace.json'], { cwd: dir });
 
         const out = result('precommit', [], dir);
         // Repairing the index leaves nothing staged, so the commit stops
@@ -360,8 +364,8 @@ test('precommit: the clean repair reports the rule that took each file, not one 
         assert.doesNotMatch(out.stderr, /AI artifact/);
         // Both categories are in the set, and each finding carries its own rule
         // id, path and remediation instead of a shared label that fits neither.
-        assert.match(out.stderr, /secret\.private-key/);
-        assert.match(out.stderr, /id_rsa/);
+        assert.match(out.stderr, /claude\.session-state/);
+        assert.match(out.stderr, /\.claude\/session-2026-07-13\.json/);
         assert.match(out.stderr, /\.playwright-mcp\/trace\.json/);
         const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {
             cwd: dir,
@@ -382,19 +386,7 @@ test('precommit: strict blocks and exits 10', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('precommit: clean fails closed when a known secret cannot be unstaged', () => {
-    const dir = makeRepo('clean');
-    try {
-        writeFileSync(join(dir, '.env'), 'SECRET=x');
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
-        writeFileSync(join(dir, '.git/index.lock'), 'held');
-        const out = result('precommit', [], dir);
-        assert.equal(out.status, 10);
-        assert.match(out.stderr, /commit stopped; repair the index and retry/);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('precommit: clean stops when a non-secret artifact cannot be unstaged', () => {
+test('precommit: clean stops when a blocked artifact cannot be unstaged', () => {
     const dir = makeRepo('clean');
     try {
         mkdirSync(join(dir, '.playwright-mcp'), { recursive: true });
@@ -501,7 +493,13 @@ test('check --json reports an unloadable local rule pack as an incomplete scan',
         const out = result('check', ['--staged', '--json'], dir);
         const report = JSON.parse(out.stdout);
         assert.equal(report.complete, false, 'a pack that never ran cannot be a complete scan');
-        assert.equal(out.status, 31, out.stderr);
+        // Clean reports the gap and continues; strict refuses to run at all
+        // (fail-closed 20, covered for precommit below).
+        assert.equal(out.status, 0, out.stderr);
+
+        const strictOut = result('check', ['--staged', '--json', '--profile', 'strict'], dir);
+        assert.equal(strictOut.status, 20, strictOut.stderr);
+        assert.match(strictOut.stderr, /rule pack|broken\.json/i);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -616,11 +614,11 @@ test('fix: strict fails closed (exit 31) when a local message rule cannot evalua
 test('strict staged check catches rename destination', () => {
     const dir = makeRepo('strict');
     try {
-        execFileSync('git', ['mv', 'README.md', '.env'], { cwd: dir });
+        execFileSync('git', ['mv', 'README.md', '.aider.log'], { cwd: dir });
         const out = result('check', ['--staged', '--json'], dir);
         assert.equal(out.status, 10);
         const report = JSON.parse(out.stdout);
-        assert.equal(report.findings[0]?.path, '.env');
+        assert.equal(report.findings[0]?.path, '.aider.log');
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -649,16 +647,24 @@ test('strict staged checks keep instruction deletion and rename source review-re
 test('clean precommit fully unstages a blocked rename', () => {
     const dir = makeRepo('clean');
     try {
+        // A local path rule keeps the destination out of the managed excludes,
+        // so the summary line cannot lean on the "AI artifact" noun at all.
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+            id: 'local.forbidden', version: 1, provider: 'local', category: 'custom', kind: 'path',
+            match: { paths: ['forbidden.txt'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'forbidden by local policy',
+        }]));
         execFileSync('git', ['config', 'diff.renames', 'false'], { cwd: dir });
-        execFileSync('git', ['mv', 'README.md', '.env'], { cwd: dir });
+        execFileSync('git', ['mv', 'README.md', 'forbidden.txt'], { cwd: dir });
         const out = result('precommit', [], dir);
         // Repairing the index leaves nothing staged, so the commit stops
         // rather than land empty.
         assert.equal(out.status, 10, out.stderr);
-        // .env is a credential, not an AI leftover. The summary counts files and
-        // the stanza names the rule that took it.
+        // The summary counts files and the stanza names the rule that took it.
         assert.match(out.stderr, /unstaged 1 file\(s\)/);
-        assert.match(out.stderr, /secret\.dotenv/);
+        assert.match(out.stderr, /local\.forbidden/);
         assert.doesNotMatch(out.stderr, /AI artifact/);
         const staged = execFileSync('git', ['diff', '--cached', '--name-status'], {
             cwd: dir,
@@ -669,14 +675,21 @@ test('clean precommit fully unstages a blocked rename', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('clean precommit preserves both index sides of a renamed file with secret content', () => {
+test('clean precommit preserves both index sides of a renamed file with blocked content', () => {
     const dir = makeRepo('clean');
     try {
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+            id: 'local.blocked-content', version: 1, provider: 'local', category: 'custom', kind: 'code',
+            match: { content: ['BLOCKED-CONTENT'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'blocked content',
+        }]));
         writeFileSync(join(dir, 'old.txt'), 'safe\n');
         execFileSync('git', ['add', 'old.txt'], { cwd: dir });
         execFileSync('git', ['commit', '--no-verify', '-q', '-m', 'add source'], { cwd: dir });
         execFileSync('git', ['mv', 'old.txt', 'new.txt'], { cwd: dir });
-        writeFileSync(join(dir, 'new.txt'), 'safe\n-----BEGIN ' + 'PRIVATE KEY-----\nsecret\n');
+        writeFileSync(join(dir, 'new.txt'), 'safe\nBLOCKED-CONTENT\n');
         execFileSync('git', ['add', 'new.txt'], { cwd: dir });
         const worktreeBytes = readFileSync(join(dir, 'new.txt'));
         const headBytes = execFileSync('git', ['show', 'HEAD:old.txt'], { cwd: dir });
@@ -689,48 +702,62 @@ test('clean precommit preserves both index sides of a renamed file with secret c
             execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: dir, encoding: 'utf8' }).trim(),
             '',
         );
-        assert.equal(readFileSync(join(dir, 'new.txt'), 'utf8').includes('PRIVATE KEY'), true);
+        assert.equal(readFileSync(join(dir, 'new.txt'), 'utf8').includes('BLOCKED-CONTENT'), true);
         assert.deepEqual(readFileSync(join(dir, 'new.txt')), worktreeBytes);
         assert.deepEqual(execFileSync('git', ['show', 'HEAD:old.txt'], { cwd: dir }), headBytes);
         assert.equal(existsSync(join(dir, 'old.txt')), false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('strict staged check flags a secret renamed to a neutral path', () => {
-    // Path-only secrets (e.g. .env) are detected by filename. A `git mv` to a
-    // neutral name must not smuggle them past the destination scan, which only
-    // catches content-shaped secrets. The finding is reported on the destination
-    // (where the bytes now live) with the rename source preserved.
+test('strict staged check flags a local secret path renamed to a neutral name', () => {
+    // Path-only rules fire by filename. A `git mv` to a neutral name must not
+    // smuggle a local secret-category rule past the destination scan, which
+    // only catches content-shaped matches. The finding is reported on the
+    // destination (where the bytes now live) with the rename source preserved.
     const dir = makeRepo('strict');
     try {
-        writeFileSync(join(dir, '.env'), 'DB_PASSWORD=hunter2\n');
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+            id: 'local.acme-env', version: 1, provider: 'local', category: 'secret', kind: 'path',
+            match: { paths: ['acme.env'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'ACME env file holds credentials',
+        }]));
+        writeFileSync(join(dir, 'acme.env'), 'ACME_PASSWORD=hunter2\n');
+        execFileSync('git', ['add', 'acme.env'], { cwd: dir });
         execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'track env'], { cwd: dir });
-        execFileSync('git', ['mv', '.env', 'config'], { cwd: dir });
+        execFileSync('git', ['mv', 'acme.env', 'config'], { cwd: dir });
 
         const out = result('check', ['--staged', '--json'], dir);
         assert.equal(out.status, 10, out.stderr);
         const findings = JSON.parse(out.stdout).findings;
         assert.ok(findings.some((finding) => (
-            finding.ruleId === 'secret.dotenv'
+            finding.ruleId === 'local.acme-env'
             && finding.decision === 'block'
             && finding.path === 'config'
             && finding.status === 'R'
-            && finding.sourcePath === '.env'
-        )), `expected a reattributed rename-secret finding, got ${JSON.stringify(findings)}`);
+            && finding.sourcePath === 'acme.env'
+        )), `expected a reattributed rename finding, got ${JSON.stringify(findings)}`);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('clean precommit removes a secret renamed to a neutral path', () => {
-    // The finding must point at the destination so clean repair unstages the blob
-    // carrying the secret. A source-path finding would unstage the old name and
-    // leave the secret staged under the new one.
+test('clean precommit removes a local secret path renamed to a neutral name', () => {
+    // The finding must point at the destination so clean repair unstages the
+    // blob carrying the match. A source-path finding would unstage the old
+    // name and leave the blocked file staged under the new one.
     const dir = makeRepo('clean');
     try {
-        writeFileSync(join(dir, '.env'), 'DB_PASSWORD=hunter2\n');
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+            id: 'local.acme-env', version: 1, provider: 'local', category: 'secret', kind: 'path',
+            match: { paths: ['acme.env'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'ACME env file holds credentials',
+        }]));
+        writeFileSync(join(dir, 'acme.env'), 'ACME_PASSWORD=hunter2\n');
+        execFileSync('git', ['add', 'acme.env'], { cwd: dir });
         execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'track env'], { cwd: dir });
-        execFileSync('git', ['mv', '.env', 'config'], { cwd: dir });
+        execFileSync('git', ['mv', 'acme.env', 'config'], { cwd: dir });
 
         const out = result('precommit', [], dir);
         // Repairing the index leaves nothing staged, so the commit stops
@@ -744,20 +771,27 @@ test('clean precommit removes a secret renamed to a neutral path', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('deleting a secret path is not itself a finding', () => {
+test('deleting a local secret path is not itself a finding', () => {
     // Removing a forbidden path is hygiene, not a violation: the delete branch of
-    // the rename/delete review scan must keep suppressing secret findings.
+    // the rename/delete review scan must keep suppressing the finding.
     const dir = makeRepo('strict');
     try {
-        writeFileSync(join(dir, '.env'), 'DB_PASSWORD=hunter2\n');
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+            id: 'local.acme-env', version: 1, provider: 'local', category: 'secret', kind: 'path',
+            match: { paths: ['acme.env'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'ACME env file holds credentials',
+        }]));
+        writeFileSync(join(dir, 'acme.env'), 'ACME_PASSWORD=hunter2\n');
+        execFileSync('git', ['add', 'acme.env'], { cwd: dir });
         execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'track env'], { cwd: dir });
-        execFileSync('git', ['rm', '-q', '.env'], { cwd: dir });
+        execFileSync('git', ['rm', '-q', 'acme.env'], { cwd: dir });
 
         const out = result('check', ['--staged', '--json'], dir);
         assert.equal(out.status, 0, out.stderr);
         const findings = JSON.parse(out.stdout).findings;
-        assert.ok(!findings.some((finding) => finding.matchedRuleIds?.includes('secret.dotenv')));
+        assert.ok(!findings.some((finding) => finding.matchedRuleIds?.includes('local.acme-env')));
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -776,7 +810,7 @@ test('staged check safely skips oversized files instead of hitting child-process
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('precommit fails closed on incomplete scans in clean and compliance profiles', () => {
+test('precommit warns on incomplete scans in clean/compliance and stops in strict', () => {
     for (const profile of ['clean', 'compliance']) {
         const dir = makeRepo(profile);
         try {
@@ -785,8 +819,11 @@ test('precommit fails closed on incomplete scans in clean and compliance profile
             writeFileSync(join(dir, 'large.txt'), 'data line\n'.repeat(350000));
             execFileSync('git', ['add', 'large.txt'], { cwd: dir });
             const out = result('precommit', [], dir);
-            assert.equal(out.status, 31, `${profile}: ${out.stderr}`);
-            assert.match(out.stderr, /scan incomplete/i);
+            // Frictionless profiles let the commit through with a warning; the
+            // reference-transaction guard is the fail-closed stop for the
+            // skipped content before any ref moves.
+            assert.equal(out.status, 0, `${profile}: ${out.stderr}`);
+            assert.match(out.stderr, /warning: scan incomplete/i);
             assert.equal(
                 execFileSync('git', ['diff', '--cached', '--name-only'], {
                     cwd: dir,
@@ -797,6 +834,18 @@ test('precommit fails closed on incomplete scans in clean and compliance profile
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
+    }
+
+    const strictDir = makeRepo('strict');
+    try {
+        writeFileSync(join(strictDir, 'large.txt'), 'data line\n'.repeat(350000));
+        execFileSync('git', ['add', 'large.txt'], { cwd: strictDir });
+        const out = result('precommit', [], strictDir);
+        assert.equal(out.status, 31, out.stderr);
+        assert.match(out.stderr, /scan incomplete/i);
+        assert.doesNotMatch(out.stderr, /warning: scan incomplete/i);
+    } finally {
+        rmSync(strictDir, { recursive: true, force: true });
     }
 });
 
@@ -813,9 +862,16 @@ test('staged and tracked scans skip gitlink content without losing path checks',
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('audit scans secrets from every unresolved conflict stage', () => {
+test('audit scans blocked content from every unresolved conflict stage', () => {
     const dir = makeRepo('clean');
     try {
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+            id: 'local.blocked-content', version: 1, provider: 'local', category: 'custom', kind: 'code',
+            match: { content: ['BLOCKED-CONTENT'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'blocked content',
+        }]));
         const main = execFileSync(
             'git', ['branch', '--show-current'], { cwd: dir, encoding: 'utf8' },
         ).trim();
@@ -823,19 +879,16 @@ test('audit scans secrets from every unresolved conflict stage', () => {
         execFileSync('git', ['add', 'conflict.txt'], { cwd: dir });
         execFileSync('git', ['commit', '--no-verify', '-q', '-m', 'conflict base'], { cwd: dir });
 
-        execFileSync('git', ['checkout', '-q', '-b', 'secret-side'], { cwd: dir });
-        writeFileSync(
-            join(dir, 'conflict.txt'),
-            '-----BEGIN ' + 'PRIVATE KEY-----\nsecret\n',
-        );
+        execFileSync('git', ['checkout', '-q', '-b', 'blocked-side'], { cwd: dir });
+        writeFileSync(join(dir, 'conflict.txt'), 'BLOCKED-CONTENT\n');
         execFileSync('git', ['add', 'conflict.txt'], { cwd: dir });
-        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'secret side'], { cwd: dir });
+        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'blocked side'], { cwd: dir });
 
         execFileSync('git', ['checkout', '-q', main], { cwd: dir });
         writeFileSync(join(dir, 'conflict.txt'), 'safe side\n');
         execFileSync('git', ['add', 'conflict.txt'], { cwd: dir });
         execFileSync('git', ['commit', '--no-verify', '-q', '-m', 'safe side'], { cwd: dir });
-        const merge = spawnSync('git', ['merge', 'secret-side'], { cwd: dir, encoding: 'utf8' });
+        const merge = spawnSync('git', ['merge', 'blocked-side'], { cwd: dir, encoding: 'utf8' });
         assert.equal(merge.status, 1);
 
         const audit = result('audit', ['--json'], dir);
@@ -845,7 +898,7 @@ test('audit scans secrets from every unresolved conflict stage', () => {
         assert.match(audit.stderr, /no single staged snapshot exists/);
         assert.ok(report.findings.some((finding) => (
             finding.path === 'conflict.txt'
-            && finding.ruleId === 'secret.private-key-content'
+            && finding.ruleId === 'local.blocked-content'
         )));
     } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -855,15 +908,15 @@ test('audit scans secrets from every unresolved conflict stage', () => {
 test('range and audit targets catch a violation already committed with hooks bypassed', () => {
     const dir = makeRepo('strict');
     try {
-        writeFileSync(join(dir, 'safe-name'), 'secret');
+        writeFileSync(join(dir, 'safe-name'), 'safe\n');
         execFileSync('git', ['add', 'safe-name'], { cwd: dir });
         execFileSync('git', ['commit', '--no-verify', '-q', '-m', 'base'], { cwd: dir });
-        execFileSync('git', ['mv', 'safe-name', '.env'], { cwd: dir });
+        execFileSync('git', ['mv', 'safe-name', '.aider.log'], { cwd: dir });
         execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'rename'], { cwd: dir });
 
         const range = result('check', ['--range', 'HEAD~1..HEAD', '--json'], dir);
         assert.equal(range.status, 10, range.stderr);
-        assert.equal(JSON.parse(range.stdout).findings[0]?.path, '.env');
+        assert.equal(JSON.parse(range.stdout).findings[0]?.path, '.aider.log');
 
         const audit = result('audit', ['--json'], dir);
         assert.equal(audit.status, 10, audit.stderr);
@@ -983,11 +1036,11 @@ test('strict agent guard denies combined add and commit when no Git guard is ins
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('clean reports a malformed local rule pack as an incomplete precommit scan', () => {
-    // A pack that never loaded is a coverage gap, not an empty result, and gets
-    // the treatment local-input-limit already has in every profile: clean stops
-    // at 31 rather than certifying a scan its own rules never took part in.
-    // strict still fails closed at 20 (below).
+test('clean warns about a malformed local rule pack in precommit and continues', () => {
+    // A pack that never loaded is a coverage gap, not an empty result. Clean
+    // warns and continues — the reference-transaction guard vetoes the commit
+    // if the gap is still there when refs move. strict still fails closed at
+    // 20 (below).
     const dir = makeRepo('clean');
     try {
         mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
@@ -995,7 +1048,7 @@ test('clean reports a malformed local rule pack as an incomplete precommit scan'
         writeFileSync(join(dir, 'normal.txt'), 'x');
         execFileSync('git', ['add', 'normal.txt'], { cwd: dir });
         const out = result('precommit', [], dir);
-        assert.equal(out.status, 31, out.stderr);
+        assert.equal(out.status, 0, out.stderr);
         assert.match(out.stderr, /pack skipped/);
         // The other skip reasons are budgets the user can shrink; a pack that
         // will not compile is not, so the stock hint would misdirect.
@@ -1029,7 +1082,7 @@ test('clean precommit reports review-required paths without blocking', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('CLI override scopes block new paths and require an explicit secret-path allow', () => {
+test('CLI override scopes block new paths and allow them again', () => {
     const dir = makeRepo('strict');
     try {
         writeFileSync(join(dir, 'blocked.txt'), 'ordinary content\n');
@@ -1039,65 +1092,19 @@ test('CLI override scopes block new paths and require an explicit secret-path al
         assert.equal(checked.status, 10, checked.stderr);
         assert.equal(JSON.parse(checked.stdout).findings[0]?.ruleId, 'override.path-deny');
 
-        execFileSync('git', ['reset', '-q'], { cwd: dir });
-        writeFileSync(join(dir, '.env'), 'SECRET=value\n');
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
-        // A bare allow of a secret-matching path used to report success yet
-        // leave the block in place; it now fails closed and directs to the
-        // explicit secret-path scope (a local override must not hide a key).
-        const bareAllow = result('allow', ['.env'], dir);
-        assert.equal(bareAllow.status, 20, bareAllow.stderr);
-        assert.match(bareAllow.stderr, /matches a secret rule/);
-        assert.match(bareAllow.stderr, /--scope secret-path/);
-        checked = result('check', ['--staged', '--json'], dir);
-        assert.equal(checked.status, 10, checked.stderr);
-        assert.equal(JSON.parse(checked.stdout).findings[0]?.ruleId, 'secret.dotenv');
-
-        assert.equal(result('allow', ['.env', '--scope', 'secret-path'], dir).status, 0);
+        assert.equal(result('allow', ['blocked.txt'], dir).status, 0);
         checked = result('check', ['--staged', '--json'], dir);
         assert.equal(checked.status, 0, checked.stderr);
         assert.deepEqual(JSON.parse(checked.stdout).findings, []);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('CLI rejects a rule-scope allow for a secret rule and directs to secret-path', () => {
+test('CLI retires the secret-path override scope with built-in secret scanning', () => {
     const dir = makeRepo('clean');
     try {
-        const denied = result('allow', ['secret.dotenv'], dir);
-        assert.equal(denied.status, 20, denied.stderr);
-        assert.match(denied.stderr, /secret rules cannot be allowed at --scope rule/);
-        assert.match(denied.stderr, /--scope secret-path/);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('CLI refuses a path allow for a file whose content holds a secret and directs to secret-path', () => {
-    // UT-01: the name matches no path rule; only the content does. A bare
-    // allow used to report success yet leave the commit blocked — a broken
-    // allow. The guard now reads the file's content too and fails closed.
-    const dir = makeRepo('clean');
-    try {
-        writeFileSync(
-            join(dir, 'fixture.pem'),
-            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
-        );
-        execFileSync('git', ['add', 'fixture.pem'], { cwd: dir });
-        const bareAllow = result('allow', ['fixture.pem'], dir);
-        assert.equal(bareAllow.status, 20, bareAllow.stderr);
-        assert.match(bareAllow.stderr, /matches a secret rule/);
-        assert.match(bareAllow.stderr, /--scope secret-path/);
-        let checked = result('check', ['--staged', '--json'], dir);
-        assert.equal(checked.status, 10, checked.stderr);
-        assert.equal(JSON.parse(checked.stdout).findings[0]?.ruleId, 'secret.private-key-content');
-
-        // The explicit scope remains the supported way to allow a fixture.
-        assert.equal(result('allow', ['fixture.pem', '--scope', 'secret-path'], dir).status, 0);
-        checked = result('check', ['--staged', '--json'], dir);
-        assert.equal(checked.status, 0, checked.stderr);
-
-        // A path without secret content is unaffected by the content guard.
-        execFileSync('git', ['reset', '-q'], { cwd: dir });
-        writeFileSync(join(dir, 'notes.txt'), 'ordinary content\n');
-        assert.equal(result('allow', ['notes.txt'], dir).status, 0);
+        const out = result('allow', ['.env', '--scope', 'secret-path'], dir);
+        assert.equal(out.status, 20, out.stderr);
+        assert.match(out.stderr, /invalid value for --scope: "secret-path"/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1120,8 +1127,7 @@ test('versioned project policy overrides the per-clone profile', () => {
     const dir = makeRepo('clean');
     try {
         writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'strict' }));
-        writeFileSync(join(dir, '.env'), 'SECRET=x');
-        execFileSync('git', ['add', '-f', '.aimhooman.json', '.env'], { cwd: dir });
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
         const guard = result('precommit', [], dir);
         assert.equal(guard.status, 10, guard.stderr);
         const weakened = result('check', ['--staged', '--profile', 'clean'], dir);

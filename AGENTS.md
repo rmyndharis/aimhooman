@@ -12,13 +12,16 @@ Its policy:
   `.copilot/*`, `.cursor/session*`, `.cursor/chats/*`, `.cursor/logs/*`,
   `.aider.*`, `.specstory/*`, `.continue/sessions/*`, `.playwright-mcp/*`,
   `.remember/*`, `.superpowers/*`, and `.agent/*`. The examples are not
-  exhaustive; the packaged `rules/paths.json` is the detection source of truth.
-  If one is staged, unstage it and keep it out of Git instead.
+  exhaustive; the packaged `rules/paths.json` is the detection source of truth
+  for these artifacts. If one is staged, unstage it and keep it out of Git
+  instead.
 - Never commit secrets: a real `.env` (not `.env.example`), private keys
   (`id_rsa` and files containing a private-key header), `.aws/credentials`,
   `.claude/.credentials.json`, service-account keys, or a provider API key
   (GitHub, GitLab, npm, Slack, Anthropic, OpenAI, Google, Stripe, Hugging Face,
-  SendGrid). Public certificates are allowed.
+  SendGrid). Public certificates are allowed. aimhooman does not scan for
+  secrets — this rule is on you, and a dedicated scanner such as gitleaks is
+  the right backstop for it.
 - Never add AI attribution to commit messages: no `Co-authored-by` trailer naming
   an AI (Claude, Copilot, Codex), no "Generated with/by <AI>" lines, no AI-service
   noreply emails. A commit message reads as if a human wrote it.
@@ -49,7 +52,7 @@ npm test
 npm run test:coverage
 ```
 
-aimhooman also enforces this at commit time, so a blocked commit means a real
-violation to fix, not a check to bypass. The rule is simple: AI works, hoomans
-ship.
+aimhooman also enforces the artifact and attribution rules at commit time, so
+a blocked commit means a real violation to fix, not a check to bypass. The rule
+is simple: AI works, hoomans ship.
 <!-- aimhooman:ruleset-end -->

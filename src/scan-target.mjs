@@ -389,8 +389,8 @@ function scanEntryGroup(repo, engine, entries, policy, accumulator, options = {}
     // Content scanning can target a narrower set than the path check. When
     // contentEntries is provided (e.g. only changed files in a commit), read
     // blobs only for those entries instead of the full snapshot. Path-based
-    // rules already ran on the full tree above, so secrets like .env are still
-    // caught even when their blob isn't re-read.
+    // rules already ran on the full tree above, so a path-only finding still
+    // fires even when its blob isn't re-read.
     const contentScannable = (options.contentEntries ?? entries)
         .filter((entry) => entry.status !== 'D' && entry.type !== 'deleted');
     const remaining = accumulator.remaining();
@@ -405,14 +405,14 @@ function scanEntryGroup(repo, engine, entries, policy, accumulator, options = {}
 function scanReviewPathChanges(engine, entries, policy, accumulator, options = {}) {
     for (const entry of entries) {
         // A deleted path is gone, so only structural policy rules (agent
-        // instructions, project policy) can still matter: deleting a secret or a
-        // session file is hygiene, not a violation. A renamed-away path is
-        // different — its content survives under a new name, so a path-only
-        // secret (e.g. .env) must still fire or a `git mv` to a neutral name
-        // would slip past the destination scan, which only catches content-shaped
-        // secrets. That finding is reported on the destination path (where the
-        // bytes now live) so clean-profile repair unstages the blob that carries
-        // the secret rather than the old name.
+        // instructions, project policy) can still matter: deleting a flagged
+        // file is hygiene, not a violation. A renamed-away path is different —
+        // its content survives under a new name, so a path-only secret-category
+        // rule from a local pack must still fire or a `git mv` to a neutral
+        // name would slip past the destination scan, which only catches
+        // content-shaped matches. That finding is reported on the destination
+        // path (where the bytes now live) so clean-profile repair unstages the
+        // blob that carries the match rather than the old name.
         const deleted = entry.status === 'D' || entry.type === 'deleted';
         const renamed = entry.status === 'R' && entry.sourcePath && entry.sourcePath !== entry.path;
         if (!deleted && !renamed) continue;

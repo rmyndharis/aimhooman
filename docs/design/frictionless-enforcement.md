@@ -2,19 +2,23 @@
 
 This document describes aimhooman's enforcement model. aimhooman is designed to
 prevent known AI-tool residue from leaking into Git history **without editing
-`.gitignore`, and with repair before rejection on the default ordinary commit path.**
-Plugin startup provides best-effort prevention without `init`; complete Git-boundary
-enforcement requires local or global hook setup.
+`.gitignore` by default, and with repair before rejection on the default ordinary
+commit path.** Plugin startup provides best-effort prevention without `init`;
+complete Git-boundary enforcement requires local or global hook setup.
 
 ## Goals
 
 - **Zero-activation for Claude Code:** the plugin is active every session
   (SessionStart), no `init`.
-- **No `.gitignore` burden:** known AI artifacts are auto-excluded via
-  `.git/info/exclude` (local, never committed, never the user's `.gitignore`).
+- **No `.gitignore` burden by default:** known AI artifacts are auto-excluded via
+  `.git/info/exclude` (local, never committed). `init --gitignore` is the opt-in
+  variant that writes the same managed block to the worktree `.gitignore`, so a
+  team can commit it and share the ignore set across clones.
 - **Repair-first for hygiene by default:** AI artifacts are excluded before
-  staging or unstaged at commit. If a block cannot be repaired, remains in the
-  pinned tree, or cannot be scanned completely, the operation stops.
+  staging or unstaged at commit. If a block cannot be repaired or remains in the
+  pinned tree, the operation stops. An incomplete scan warns on
+  `clean`/`compliance` and stops on `strict`; the final ref guard stops on it
+  at every profile.
 - **Broad, community-updatable rule catalog:** covers many AI tools; extendable
   via PR (core) and local rules (personal).
 - **Block remains available as opt-in** (`strict` profile) for teams that want
@@ -41,8 +45,9 @@ enforcement requires local or global hook setup.
 3. **PreToolUse cannot unstage.** It runs before the tool executes; at `git add X`,
    X is not staged yet. So unstage is a git-tier (`pre-commit`) capability; the
    plugin tier does prevention (excludes) plus advisory (warn).
-4. **`.gitignore` stays clean** because aimhooman writes `.git/info/exclude`
-   (local, not committed, not `.gitignore`).
+4. **`.gitignore` stays clean by default** because aimhooman writes
+   `.git/info/exclude` (local, not committed). The opt-in `init --gitignore`
+   writes the same managed block to `.gitignore` for teams that want it committed.
 
 ## Design
 
@@ -54,16 +59,18 @@ enforcement requires local or global hook setup.
 | 1. Catch-all | `pre-commit` hook unstages AI artifacts from the index | git hook | proceeds after repair; stops if repair fails |
 | 2. Agent guard | PreToolUse reports paths and rejects unprovable protected Git mutations | plugin | advisory for paths; fail-closed for boundary bypass |
 | 3. Strict policy | `strict` profile blocks instead of repairing (exit 10) | both | block |
-| 4. Pinned tree | `commit-msg` checks the exact would-be tree and message | git hook | blocks a remaining violation or incomplete scan |
+| 4. Pinned tree | `commit-msg` checks the exact would-be tree and message | git hook | blocks a remaining violation; an incomplete scan warns on clean/compliance, stops on strict |
 | 5. Final ref check | prepared `reference-transaction` scans what each commit introduced to `HEAD` or a branch changes (and the message of commits authored locally) | git hook | blocks a violation or incomplete scan |
 
 Default profile `clean` uses layers 0, 1, 2, 4, and 5. Successful repair keeps the
 ordinary path low-friction. The pinned-tree and final-ref scans deliberately stop if
-a block remains on a path the commit actually changes, or if any scan is incomplete.
+a block remains on a path the commit actually changes. The final-ref scan also stops
+when it is incomplete, on every profile; an incomplete pinned-tree scan warns on
+`clean`/`compliance` and stops on `strict`.
 A file already in history is not re-tried on every later commit: the final ref check
 judges a commit by its change set, so an inherited path no longer blocks unrelated
 work. Use `aimhooman check --tracked` (or scan the PR range in CI) to surface legacy
-secrets without bricking the branch.
+artifacts without bricking the branch.
 Git 2.54 also emits an earlier `preparing` reference-transaction callback. The
 hook checks dispatcher integrity there without scanning unresolved references,
 then keeps the scan veto at `prepared`, after Git has locked them.
@@ -95,14 +102,15 @@ rather than run the command on its own, which is the friction this tier exists t
 ### Components
 
 1. **Rule catalog** — `rules/paths.json`, `rules/attribution.json`,
-   `rules/markers.json`, `rules/secrets.json`. Covers Claude, Codex, Copilot, Cursor, Aider, SpecStory,
+   `rules/markers.json`. Covers Claude, Codex, Copilot, Cursor, Aider, SpecStory,
    Continue, Playwright MCP, Remember, Superpowers, and a generic agent dir.
    Community extends via PR (core); personal extensions via
    `<common-git-dir>/aimhooman/rules/*.json` (local, shared by linked worktrees,
    loaded after core, and only able to add restrictions).
 2. **Auto-exclude** — `applyExclude` writes patterns derived from unambiguous
    `ephemeral-state` and `local-settings` rules to `.git/info/exclude` from
-   SessionStart, init, and the agent guard. Secrets and review paths remain visible.
+   SessionStart, init, and the agent guard. Review-required and policy paths
+   remain visible.
 3. **Git boundary** — the `pre-commit` hook scans staged paths; for any AI
    artifact it removes it from the index, then lets the commit proceed only when
    that repair succeeds. `commit-msg` removes complete exact high-confidence attribution lines
@@ -133,8 +141,10 @@ means local rules only add restrictions and can never override a core block.
 ## Implementation notes
 
 - **Category-aware failure.** On `clean`, a malformed local rule pack is skipped
-  with a warning because built-in rules remain active. Corrupt override state,
-  unreadable Git inputs, and incomplete staged-content scans stop every profile.
+  with a warning because built-in rules remain active. Corrupt override state and
+  unreadable Git inputs stop every profile. An incomplete staged-content scan warns
+  on `clean`/`compliance` and stops `strict`; the final ref guard fails closed on it
+  at every profile.
   Any automatic unstage failure stops; allowing it through would only defer the
   same block to the pinned-tree or final-ref scan. `strict` also vetoes policy
   findings and reviews.
@@ -146,7 +156,7 @@ means local rules only add restrictions and can never override a core block.
 - **HEAD-safe unstage.** `git restore --staged` needs HEAD; on a repository's
   initial commit it falls back to `git rm --cached --ignore-unmatch`.
 - **Repair never mints an empty commit.** When the pre-commit repair unstages the last
-  staged path (stage only a `.env`, then `git commit`), it exits 10 so Git stops, the
+  staged path (stage only a `.claude.json`, then `git commit`), it exits 10 so Git stops, the
   same outcome as committing with nothing staged. Carrying on would create a commit Git
   itself would have refused and leave the developer a junk commit to `git reset --hard`.
 - **Anchored attribution rules.** The AI-noreply rule is anchored to trailer

@@ -11,7 +11,7 @@ import { normalizeGitPath } from './git-path.mjs';
 
 const PROFILES = new Set(['clean', 'strict', 'compliance']);
 const OVERRIDE_SCOPES = new Set([
-    'path', 'rule', 'secret-path', 'reviewed-instruction', 'reviewed-policy-file', 'policy-migration',
+    'path', 'rule', 'reviewed-instruction', 'reviewed-policy-file', 'policy-migration',
 ]);
 const OVERRIDE_FIELDS = new Set([
     'target', 'scope', 'reason', 'actor', 'at', 'head', 'transition', 'oldObjectId', 'newObjectId', 'newMode',
@@ -121,20 +121,29 @@ export function loadConfig(stateDir, root) {
         throw new LocalConfigError(file, `invalid JSON: ${error.message}`, error);
     }
     const normalized = normalizeLocalConfig(config, file);
-    return { profile: normalized.profile, source: 'local', file };
+    return {
+        profile: normalized.profile,
+        source: 'local',
+        file,
+        ...(normalized.gitignore ? { gitignore: normalized.gitignore } : {}),
+    };
 }
 
 export function saveConfig(stateDir, config) {
     const file = join(stateDir, 'config.json');
     const normalized = normalizeLocalConfig(config, file);
-    atomicWriteJson(file, { schema_version: 1, profile: normalized.profile });
+    atomicWriteJson(file, {
+        schema_version: 1,
+        profile: normalized.profile,
+        ...(normalized.gitignore ? { gitignore: normalized.gitignore } : {}),
+    });
 }
 
 function normalizeLocalConfig(config, file) {
     if (!config || typeof config !== 'object' || Array.isArray(config)) {
         throw new LocalConfigError(file, 'root must be a JSON object');
     }
-    const unknown = Object.keys(config).filter((key) => !['schema_version', 'profile'].includes(key));
+    const unknown = Object.keys(config).filter((key) => !['schema_version', 'profile', 'gitignore'].includes(key));
     if (unknown.length) {
         throw new LocalConfigError(file, `unsupported field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
     }
@@ -147,7 +156,32 @@ function normalizeLocalConfig(config, file) {
     if (!PROFILES.has(config.profile)) {
         throw new LocalConfigError(file, 'profile must be clean, strict, or compliance');
     }
-    return { profile: config.profile };
+    const gitignore = normalizeGitignoreConfig(config.gitignore, file);
+    return { profile: config.profile, ...(gitignore ? { gitignore } : {}) };
+}
+
+// The gitignore field records an `init --gitignore` opt-in for this clone:
+// enabled says the worktree .gitignore carries our managed block, created says
+// the file did not exist before we wrote it (so uninstall may delete a file we
+// introduced once the block leaves it empty). It stays out of the project
+// policy on purpose — whether this clone created its .gitignore is per-clone
+// state, never team policy. Absent means disabled, and a disabled record
+// normalizes away so the two spellings cannot drift apart.
+function normalizeGitignoreConfig(value, file) {
+    if (value === undefined) return undefined;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new LocalConfigError(file, 'gitignore must be an object');
+    }
+    const unknown = Object.keys(value).filter((key) => !['enabled', 'created'].includes(key));
+    if (unknown.length) {
+        throw new LocalConfigError(file, `gitignore has unsupported field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
+    }
+    for (const field of ['enabled', 'created']) {
+        if (typeof value[field] !== 'boolean') {
+            throw new LocalConfigError(file, `gitignore.${field} must be a boolean`);
+        }
+    }
+    return value.enabled ? { enabled: true, created: value.created } : undefined;
 }
 
 export function loadOverrides(stateDir) {
@@ -196,18 +230,33 @@ function normalizeOverrides(value, file) {
     if (value.schema_version !== undefined && value.schema_version !== 1) {
         throw new LocalOverridesError(file, 'schema_version must be 1');
     }
-    return {
-        allow: overrideEntries(value.allow, 'allow', file),
-        deny: overrideEntries(value.deny, 'deny', file),
+    const dropped = { count: 0 };
+    const normalized = {
+        allow: overrideEntries(value.allow, 'allow', file, dropped),
+        deny: overrideEntries(value.deny, 'deny', file, dropped),
     };
+    if (dropped.count) {
+        process.stderr.write(
+            `aimhooman: warning: ${file}: dropped ${dropped.count} override(s) with retired scope "secret-path"; built-in secret scanning was removed in v0.3.0\n`
+        );
+    }
+    return normalized;
 }
 
-function overrideEntries(value, key, file) {
+function overrideEntries(value, key, file, dropped = { count: 0 }) {
     if (value === undefined) return [];
     if (!Array.isArray(value)) {
         throw new LocalOverridesError(file, `${key} must be an array`);
     }
     return value.map((entry, index) => {
+        // Built-in secret scanning and its secret-path override scope were
+        // removed in v0.3.0. An overrides file written by an older version may
+        // still carry such entries; drop them (one warning per file, below)
+        // instead of failing the whole load.
+        if (entry && typeof entry === 'object' && !Array.isArray(entry) && entry.scope === 'secret-path') {
+            dropped.count += 1;
+            return null;
+        }
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
             throw new LocalOverridesError(file, `${key}[${index}] must be an object`);
         }
@@ -260,7 +309,7 @@ function overrideEntries(value, key, file) {
             normalized.transition = normalized.transition.toLowerCase();
         }
         return normalized;
-    });
+    }).filter((entry) => entry !== null);
 }
 
 function isRfc3339DateTime(value) {

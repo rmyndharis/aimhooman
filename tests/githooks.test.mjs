@@ -911,8 +911,8 @@ test('commit-msg performs the full captured-tree scan when pre-commit is missing
             const root = makeRepo(base);
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
             rmSync(join(root, '.git', 'hooks', 'pre-commit'));
-            writeFileSync(join(root, '.env'), 'SECRET=bad\n');
-            git(root, ['add', '-f', '.env']);
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
             const before = git(root, ['rev-parse', 'HEAD']);
 
             const commit = spawnSync('git', ['commit', '-m', 'safe message'], {
@@ -921,7 +921,7 @@ test('commit-msg performs the full captured-tree scan when pre-commit is missing
             });
             assert.notEqual(commit.status, 0, commit.stderr);
             assert.equal(git(root, ['rev-parse', 'HEAD']), before);
-            assert.match(commit.stderr, /secret\.dotenv/);
+            assert.match(commit.stderr, /claude\.session-state/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -936,8 +936,8 @@ test('reference transaction rejects forbidden commits from cherry-pick, revert, 
                 const root = makeRepo(base);
                 const main = git(root, ['branch', '--show-current']);
                 git(root, ['checkout', '-q', '-b', 'bad-side']);
-                writeFileSync(join(root, '.env'), 'SECRET=bad\n');
-                git(root, ['add', '-f', '.env']);
+                writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+                git(root, ['add', '-f', '.claude.json']);
                 git(root, ['commit', '-q', '-m', 'bad side']);
                 const bad = git(root, ['rev-parse', 'HEAD']);
                 git(root, ['checkout', '-q', main]);
@@ -946,7 +946,7 @@ test('reference transaction rejects forbidden commits from cherry-pick, revert, 
                 const result = spawnSync('git', ['cherry-pick', bad], { cwd: root, encoding: 'utf8' });
                 assert.notEqual(result.status, 0, result.stderr);
                 assert.equal(git(root, ['rev-parse', 'HEAD']), before);
-                assert.match(result.stderr, /secret\.dotenv|rejected before refs changed/);
+                assert.match(result.stderr, /claude\.session-state|rejected before refs changed/);
                 spawnSync('git', ['cherry-pick', '--abort'], { cwd: root });
             });
         } finally { rmSync(base, { recursive: true, force: true }); }
@@ -957,18 +957,18 @@ test('reference transaction rejects forbidden commits from cherry-pick, revert, 
         try {
             isolatedGitConfig(base, () => {
                 const root = makeRepo(base);
-                writeFileSync(join(root, '.env'), 'SECRET=bad\n');
-                git(root, ['add', '-f', '.env']);
-                git(root, ['commit', '-q', '-m', 'add secret']);
-                git(root, ['rm', '-q', '.env']);
-                git(root, ['commit', '-q', '-m', 'remove secret']);
+                writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+                git(root, ['add', '-f', '.claude.json']);
+                git(root, ['commit', '-q', '-m', 'add session file']);
+                git(root, ['rm', '-q', '.claude.json']);
+                git(root, ['commit', '-q', '-m', 'remove session file']);
                 const removal = git(root, ['rev-parse', 'HEAD']);
                 execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
                 const before = git(root, ['rev-parse', 'HEAD']);
                 const result = spawnSync('git', ['revert', '--no-edit', removal], { cwd: root, encoding: 'utf8' });
                 assert.notEqual(result.status, 0, result.stderr);
                 assert.equal(git(root, ['rev-parse', 'HEAD']), before);
-                assert.match(result.stderr, /secret\.dotenv|rejected before refs changed/);
+                assert.match(result.stderr, /claude\.session-state|rejected before refs changed/);
                 spawnSync('git', ['revert', '--abort'], { cwd: root });
             });
         } finally { rmSync(base, { recursive: true, force: true }); }
@@ -981,9 +981,9 @@ test('reference transaction rejects forbidden commits from cherry-pick, revert, 
                 const root = makeRepo(base);
                 const main = git(root, ['branch', '--show-current']);
                 git(root, ['checkout', '-q', '-b', 'patch-side']);
-                writeFileSync(join(root, '.env'), 'SECRET=bad\n');
-                git(root, ['add', '-f', '.env']);
-                git(root, ['commit', '-q', '-m', 'mail secret']);
+                writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+                git(root, ['add', '-f', '.claude.json']);
+                git(root, ['commit', '-q', '-m', 'mail session file']);
                 const patch = execFileSync('git', ['format-patch', '-1', '--stdout'], { cwd: root });
                 git(root, ['checkout', '-q', main]);
                 execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
@@ -991,7 +991,7 @@ test('reference transaction rejects forbidden commits from cherry-pick, revert, 
                 const result = spawnSync('git', ['am'], { cwd: root, input: patch, encoding: 'utf8' });
                 assert.notEqual(result.status, 0, result.stderr);
                 assert.equal(git(root, ['rev-parse', 'HEAD']), before);
-                assert.match(result.stderr, /secret\.dotenv|rejected before refs changed/);
+                assert.match(result.stderr, /claude\.session-state|rejected before refs changed/);
                 spawnSync('git', ['am', '--abort'], { cwd: root });
             });
         } finally { rmSync(base, { recursive: true, force: true }); }
@@ -1004,9 +1004,9 @@ test('reference transaction rejects forbidden commits from cherry-pick, revert, 
                 const root = makeRepo(base);
                 const main = git(root, ['branch', '--show-current']);
                 git(root, ['checkout', '-q', '-b', 'feature']);
-                writeFileSync(join(root, '.env'), 'SECRET=bad\n');
-                git(root, ['add', '-f', '.env']);
-                git(root, ['commit', '-q', '-m', 'feature secret']);
+                writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+                git(root, ['add', '-f', '.claude.json']);
+                git(root, ['commit', '-q', '-m', 'feature session file']);
                 const featureBefore = git(root, ['rev-parse', 'refs/heads/feature']);
                 git(root, ['checkout', '-q', main]);
                 writeFileSync(join(root, 'upstream.txt'), 'upstream\n');
@@ -1017,7 +1017,7 @@ test('reference transaction rejects forbidden commits from cherry-pick, revert, 
                 const result = spawnSync('git', ['rebase', main], { cwd: root, encoding: 'utf8' });
                 assert.notEqual(result.status, 0, result.stderr);
                 assert.equal(git(root, ['rev-parse', 'refs/heads/feature']), featureBefore);
-                assert.match(result.stderr, /secret\.dotenv|rejected before refs changed/);
+                assert.match(result.stderr, /claude\.session-state|rejected before refs changed/);
                 spawnSync('git', ['rebase', '--abort'], { cwd: root });
             });
         } finally { rmSync(base, { recursive: true, force: true }); }
@@ -1031,8 +1031,8 @@ test('reference transaction scans old-to-new delta even when an ignored tag alre
             const root = makeRepo(base);
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
             const before = git(root, ['rev-parse', 'HEAD']);
-            writeFileSync(join(root, '.env'), 'SECRET=bad\n');
-            git(root, ['add', '-f', '.env']);
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
             const tree = git(root, ['write-tree']);
             const commit = execFileSync('git', ['commit-tree', tree, '-p', before, '-m', 'poison'], {
                 cwd: root,
@@ -1045,7 +1045,7 @@ test('reference transaction scans old-to-new delta even when an ignored tag alre
             });
             assert.notEqual(update.status, 0, update.stderr);
             assert.equal(git(root, ['rev-parse', 'HEAD']), before);
-            assert.match(update.stderr, /secret\.dotenv|rejected before refs changed/);
+            assert.match(update.stderr, /claude\.session-state|rejected before refs changed/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -1173,13 +1173,13 @@ test('final reference scan rechecks an identical no-verify retry from another Gi
     }
 });
 
-test('final reference scan judges a commit by what it changes, while audit still flags legacy tracked secrets', () => {
+test('final reference scan judges a commit by what it changes, while audit still flags legacy tracked files', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-ref-change-snapshot-'));
     try {
         isolatedGitConfig(base, () => {
             const root = makeRepo(base);
-            writeFileSync(join(root, '.env'), 'SECRET=already-tracked\n');
-            git(root, ['add', '-f', '.env']);
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
             git(root, ['commit', '--no-verify', '-q', '-m', 'legacy tracked file']);
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
             writeFileSync(
@@ -1192,9 +1192,9 @@ test('final reference scan judges a commit by what it changes, while audit still
             ], { cwd: root });
             const before = git(root, ['rev-parse', 'HEAD']);
 
-            // A commit that does not touch the legacy .env is no longer held
-            // hostage to it: the file already lives in history, and blocking an
-            // unrelated commit could not remove it. The commit lands.
+            // A commit that does not touch the legacy .claude.json is no longer
+            // held hostage to it: the file already lives in history, and
+            // blocking an unrelated commit could not remove it. The commit lands.
             const enabling = spawnSync('git', ['commit', '-m', 'enable strict'], {
                 cwd: root,
                 encoding: 'utf8',
@@ -1202,26 +1202,27 @@ test('final reference scan judges a commit by what it changes, while audit still
             assert.equal(enabling.status, 0, enabling.stderr);
             assert.notEqual(git(root, ['rev-parse', 'HEAD']), before);
 
-            // The legacy secret is not silently forgotten: a tracked audit still
+            // The legacy file is not silently forgotten: a tracked audit still
             // names it, so the team is told to clean it up without being bricked.
             const audit = spawnSync(process.execPath, [CLI, 'check', '--tracked'], {
                 cwd: root,
                 encoding: 'utf8',
             });
             assert.notEqual(audit.status, 0, audit.stderr);
-            assert.match(audit.stderr, /secret\.dotenv/);
+            assert.match(audit.stderr, /claude\.session-state/);
 
-            // A commit that introduces a NEW secret path is still stopped at the
+            // A commit that introduces a NEW blocked path is still stopped at the
             // final guard, even with --no-verify, because the path is in the
             // change set the guard scans.
-            writeFileSync(join(root, '.env.fresh'), 'SECRET=brand-new\n');
-            git(root, ['add', '-f', '.env.fresh']);
+            mkdirSync(join(root, '.claude'));
+            writeFileSync(join(root, '.claude', 'session-fresh.json'), '{}\n');
+            git(root, ['add', '-f', '.claude/session-fresh.json']);
             const smuggling = spawnSync('git', ['commit', '--no-verify', '-m', 'smuggle fresh'], {
                 cwd: root,
                 encoding: 'utf8',
             });
             assert.notEqual(smuggling.status, 0, smuggling.stderr);
-            assert.match(smuggling.stderr, /secret\.dotenv|rejected before refs changed/);
+            assert.match(smuggling.stderr, /claude\.session-state|rejected before refs changed/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -1280,25 +1281,25 @@ test('reference transaction ignores attribution on imported commits but still sc
     }
 });
 
-// A secret path allowed in once (then un-allowed) used to block every later
-// commit on the branch, because the full-tree scan re-tried the inherited file
-// on each new commit. Judging by the change set instead means an unrelated edit
-// lands; the secret stays visible to a tracked audit for cleanup.
-test('removing a secret-path override no longer blocks unrelated later commits', () => {
+// A path allowed in once (then un-allowed) used to block every later commit
+// on the branch, because the full-tree scan re-tried the inherited file on
+// each new commit. Judging by the change set instead means an unrelated edit
+// lands; the file stays visible to a tracked audit for cleanup.
+test('removing an override no longer blocks unrelated later commits', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-ref-override-removal-'));
     try {
         isolatedGitConfig(base, () => {
             const root = makeRepo(base);
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
-            writeFileSync(join(root, '.env.local'), 'TOKEN=fixture\n');
-            git(root, ['add', '-f', '.env.local']);
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
             execFileSync(process.execPath, [
-                CLI, 'allow', '.env.local', '--scope', 'secret-path', '--reason', 'fixture',
+                CLI, 'allow', '.claude.json', '--reason', 'fixture',
             ], { cwd: root });
-            git(root, ['commit', '-q', '-m', 'add fixture env']);
+            git(root, ['commit', '-q', '-m', 'add fixture file']);
             execFileSync(process.execPath, [CLI, 'override', 'reset', '--all'], { cwd: root });
 
-            // Override is gone, but a commit that does not re-stage .env.local
+            // Override is gone, but a commit that does not re-stage .claude.json
             // must still land: the file is already history, blocking will not
             // remove it.
             writeFileSync(join(root, 'README.md'), 'changed\n');
@@ -1309,16 +1310,16 @@ test('removing a secret-path override no longer blocks unrelated later commits',
             });
             assert.equal(after.status, 0, after.stderr);
 
-            // Re-staging the secret path is still caught, so the override removal
-            // is not a way to add more of the same secret.
-            writeFileSync(join(root, '.env.local'), 'TOKEN=changed\n');
-            git(root, ['add', '-f', '.env.local']);
+            // Re-staging the path is still caught, so the override removal is
+            // not a way to add more of the same file.
+            writeFileSync(join(root, '.claude.json'), '{"session":2}\n');
+            git(root, ['add', '-f', '.claude.json']);
             const restage = spawnSync('git', ['commit', '-m', 'touch fixture'], {
                 cwd: root,
                 encoding: 'utf8',
             });
             assert.notEqual(restage.status, 0, restage.stderr);
-            assert.match(restage.stderr, /secret\.dotenv|rejected before refs changed/);
+            assert.match(restage.stderr, /claude\.session-state|rejected before refs changed/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -1583,12 +1584,12 @@ test('pre-commit does not record a marker when it blocks (commit-msg must still 
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
             const markerPath = join(root, '.git', 'aimhooman', 'precommit-clean.json');
 
-            // Stage a secret. pre-commit blocks and must NOT record a marker, so
-            // commit-msg (if it ran) would fall back to the full scan.
-            writeFileSync(join(root, '.env'), 'TOKEN=secretvalue\n');
-            git(root, ['add', '-f', '.env']);
-            const commit = spawnSync('git', ['commit', '-m', 'secret'], { cwd: root, encoding: 'utf8' });
-            assert.notEqual(commit.status, 0, 'a staged secret must block the commit');
+            // Stage a blocked file. pre-commit blocks and must NOT record a
+            // marker, so commit-msg (if it ran) would fall back to the full scan.
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
+            const commit = spawnSync('git', ['commit', '-m', 'blocked'], { cwd: root, encoding: 'utf8' });
+            assert.notEqual(commit.status, 0, 'a staged blocked file must block the commit');
             assert.equal(existsSync(markerPath), false, 'a blocking pre-commit must not record a clean marker');
         });
     } finally {
@@ -1596,7 +1597,7 @@ test('pre-commit does not record a marker when it blocks (commit-msg must still 
     }
 });
 
-test('a --no-verify commit with a staged secret is still blocked by commit-msg (no marker fallback)', () => {
+test('a --no-verify commit with a staged blocked file is still stopped by commit-msg (no marker fallback)', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-marker-noverify-'));
     try {
         isolatedGitConfig(base, () => {
@@ -1605,13 +1606,13 @@ test('a --no-verify commit with a staged secret is still blocked by commit-msg (
             const markerPath = join(root, '.git', 'aimhooman', 'precommit-clean.json');
 
             // --no-verify skips pre-commit entirely, so no marker is written.
-            // commit-msg must still scan the staged tree and block the secret.
-            writeFileSync(join(root, '.env'), 'TOKEN=secretvalue\n');
-            git(root, ['add', '-f', '.env']);
-            const commit = spawnSync('git', ['commit', '--no-verify', '-m', 'secret'], { cwd: root, encoding: 'utf8' });
+            // commit-msg must still scan the staged tree and block the file.
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
+            const commit = spawnSync('git', ['commit', '--no-verify', '-m', 'blocked'], { cwd: root, encoding: 'utf8' });
             assert.notEqual(commit.status, 0, '--no-verify must not bypass commit-msg tree scan');
             assert.equal(existsSync(markerPath), false, 'no marker when pre-commit was skipped');
-            assert.match(commit.stderr, /secret\.dotenv/, 'commit-msg must still catch the staged secret');
+            assert.match(commit.stderr, /claude\.session-state/, 'commit-msg must still catch the staged file');
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -1703,7 +1704,7 @@ test('real commit scans files staged by a chained pre-commit hook', () => {
             const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
             writeFileSync(
                 join(hooks, 'pre-commit'),
-                "#!/bin/sh\nprintf 'SECRET=value\\n' > .env\ngit add -f .env\n",
+                "#!/bin/sh\nprintf '{\"session\":true}\\n' > .claude.json\ngit add -f .claude.json\n",
                 { mode: 0o755 }
             );
             chmodSync(join(hooks, 'pre-commit'), 0o755);
@@ -1718,7 +1719,7 @@ test('real commit scans files staged by a chained pre-commit hook', () => {
             });
             assert.notEqual(commit.status, 0, commit.stderr);
             assert.equal(git(root, ['rev-parse', 'HEAD']), before);
-            assert.match(git(root, ['diff', '--cached', '--name-only']), /\.env/);
+            assert.match(git(root, ['diff', '--cached', '--name-only']), /\.claude\.json/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -1920,8 +1921,8 @@ test('generated guard ignores injected Node runtime and PATH commands while pres
                 /AIMHOOMAN_COMMIT_TREE=\$\(PATH="\$AIMHOOMAN_PATH" git write-tree\)/,
             );
 
-            writeFileSync(join(root, '.env'), 'SECRET=blocked\n');
-            git(root, ['add', '-f', '.env']);
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
             const before = git(root, ['rev-parse', 'HEAD']);
             const preloadMarker = join(root, 'preload-ran.txt');
             const preload = join(root, 'preload.cjs');
@@ -1994,7 +1995,7 @@ test('generated guard ignores injected Node runtime and PATH commands while pres
                 env: injectedEnvironment,
             });
             assert.notEqual(commit.status, 0, commit.stderr);
-            assert.match(commit.stderr, /secret\.dotenv/);
+            assert.match(commit.stderr, /claude\.session-state/);
             assert.equal(git(root, ['rev-parse', 'HEAD']), before);
             assert.equal(readFileSync(chainedEnvironment, 'utf8'), nodeOptions);
             assert.equal(existsSync(preloadMarker), false);
@@ -2017,8 +2018,8 @@ test('pre-merge guard blocks forbidden content introduced by a real non-fast-for
             const main = git(root, ['branch', '--show-current']);
             const baseline = git(root, ['rev-parse', 'HEAD']);
             git(root, ['checkout', '-q', '-b', 'feature']);
-            writeFileSync(join(root, '.env'), 'SECRET=from-merge\n');
-            git(root, ['add', '-f', '.env']);
+            writeFileSync(join(root, '.claude.json'), '{"session":true}\n');
+            git(root, ['add', '-f', '.claude.json']);
             git(root, ['commit', '--no-verify', '-q', '-m', 'feature content']);
             git(root, ['checkout', '-q', main]);
             writeFileSync(join(root, 'README.md'), 'main changed\n');
@@ -2034,7 +2035,7 @@ test('pre-merge guard blocks forbidden content introduced by a real non-fast-for
             });
             assert.notEqual(merge.status, 0, merge.stderr);
             assert.equal(git(root, ['rev-parse', 'HEAD']), beforeMerge);
-            assert.match(merge.stderr, /\.env|secret\.env-file/);
+            assert.match(merge.stderr, /\.claude\.json|claude\.session-state/);
             git(root, ['merge', '--abort']);
         });
     } finally {

@@ -1,0 +1,30 @@
+name: aimhooman
+description: keeps AI session files and attribution out of commits
+inputs:
+  base:
+    description: base of the range to scan (triple-dot merge base applies); an all-zero object ID includes the root commit
+    required: true
+  head:
+    description: head of the range to scan
+    required: true
+  profile:
+    description: policy profile to enforce (clean, strict, compliance)
+    required: false
+    default: strict
+runs:
+  using: composite
+  steps:
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 24
+    - name: Install aimhooman
+      run: npm install -g @rmyndharis/aimhooman
+      shell: bash
+    - name: Check the introduced commits
+      run: aimhooman check --range "$BASE...$HEAD" --profile "$PROFILE"
+      shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+        HEAD: ${{ inputs.head }}
+        PROFILE: ${{ inputs.profile }}

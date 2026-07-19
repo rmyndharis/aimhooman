@@ -1,15 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { loadRules } from '../src/rules.mjs';
 import { newEngine } from '../src/scan.mjs';
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-// Private-key fixtures are assembled at runtime with the BEGIN marker kept in a
-// separate fragment so this test source does not itself trip the secret rule.
-const BEGIN = '-----BEGIN ';
 
 const contracts = {
     'attribution.claude-coauthor': {
@@ -76,22 +68,6 @@ const contracts = {
         positive: { path: '.continue/sessions/active.json' },
         nearMiss: { path: '.continue/config.yaml' },
     },
-    'secret.dotenv': {
-        positive: { path: 'services/api/.env.production' },
-        nearMiss: { path: 'services/api/.env.example' },
-    },
-    'secret.private-key': {
-        positive: { path: 'certificates/id_ed25519' },
-        nearMiss: { path: 'certificates/server.pem' },
-    },
-    'secret.aws-credentials': {
-        positive: { path: 'deploy/.aws/credentials' },
-        nearMiss: { path: 'deploy/.aws/config' },
-    },
-    'secret.claude-credentials': {
-        positive: { path: '.claude/.credentials.json' },
-        nearMiss: { path: '.claude/credentials.example.json' },
-    },
     'generic.agent-instructions': {
         positive: { path: 'packages/api/AGENTS.md' },
         nearMiss: { path: 'docs/agent-guide.md' },
@@ -115,22 +91,6 @@ const contracts = {
     'agent.state': {
         positive: { path: '.agent/state.json' },
         nearMiss: { path: '.agents/rules/aimhooman.md' },
-    },
-    'secret.private-key-content': {
-        positive: { path: 'config/credential.txt', text: `${BEGIN}OPENSSH PRIVATE KEY-----` },
-        nearMiss: { path: 'certificates/server.pem', text: '-----BEGIN CERTIFICATE-----' },
-    },
-    'secret.service-account-key': {
-        positive: { path: 'config/service-account.json', text: `  "private_key": "${BEGIN}PRIVATE KEY-----\\nMII..."` },
-        nearMiss: { path: 'config/service-account.example.json', text: '  "private_key": "${SERVICE_ACCOUNT_PRIVATE_KEY}"' },
-    },
-    'secret.aws-key-content': {
-        positive: { path: 'config/aws.ini', text: `aws_secret_access_key = ${'a'.repeat(40)}` },
-        nearMiss: { path: 'config/aws.example.ini', text: 'aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}' },
-    },
-    'secret.provider-token': {
-        positive: { path: 'config/token.txt', text: `ghp_${'a'.repeat(36)}` },
-        nearMiss: { path: 'config/token.example.txt', text: 'ghp_REPLACE_ME' },
     },
 };
 
@@ -168,68 +128,6 @@ test('every built-in rule has a positive and a meaningful near-miss contract', (
         const nearMiss = matchFor(findingsFor(engine, rule, contract.nearMiss), rule.id);
         assert.equal(nearMiss, undefined, `${rule.id} matched its near-miss contract`);
     }
-});
-
-test('aws access key IDs are blocked, but AWS\'s published example keys are not', () => {
-    const engine = newEngine('clean');
-    const matched = (text) => Boolean(
-        matchFor(engine.checkContent('infra/main.tf', text), 'secret.aws-key-content')
-    );
-
-    // Split so this file never carries a literal that trips the rule it tests.
-    const body = 'Q7QQVQ3ZK4WQ2XYZ';
-
-    // A real access key ID carries no naming context, which the aws_secret_access_key
-    // pattern needs, so the prefix has to stand on its own.
-    assert.ok(matched(`provider "aws" { access_key = "AKIA${body}" }`));
-    assert.ok(matched(`AWS_SESSION_ID=ASIA${body}`), 'STS keys use the ASIA prefix');
-
-    // AWS publishes these in its own docs, and they land in READMEs, Terraform
-    // samples, and test fixtures. Blocking them stops legitimate commits.
-    assert.equal(matched('access_key = "AKIAIOSFODNN7EXAMPLE"'), false);
-    assert.equal(matched('access_key = "ASIAIOSFODNN7EXAMPLE"'), false);
-    assert.equal(matched('access_key = "AKIAI44QH8DHBEXAMPLE"'), false);
-
-    // Word boundaries keep the prefix from matching a shorter or longer run.
-    assert.equal(matched('const region = "AKIA123";'), false);
-    assert.equal(matched(`token=XAKIA${body}`), false);
-    assert.equal(matched(`token=AKIA${body}9`), false);
-});
-
-// F-15e1: the AWS example secret access key (`wJalrXUtnFEMI/...EXAMPLEKEY`)
-// is printed next to `AKIAIOSFODNN7EXAMPLE` on every AWS docs page. The 0.1.5
-// exception only covered the access key ID; the secret access key stayed
-// blocked. The v3 pattern adds a lookbehind so a value ending in EXAMPLEKEY
-// (the documented example shape) is not flagged, while a real key that merely
-// contains EXAMPLEKEY as a substring stays blocked.
-test('AWS example secret access key is allowed, real keys are still blocked', () => {
-    const engine = newEngine('clean');
-    const matched = (text) => Boolean(
-        matchFor(engine.checkContent('config/aws.ini', text), 'secret.aws-key-content')
-    );
-
-    // AWS's documented example pair — the secret access key half. This was the
-    // original 0.1.5 miss: the access key ID (`AKIAIOSFODNN7EXAMPLE`) was
-    // excepted, but its printed pair was not.
-    const exampleSecret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
-    assert.equal(matched(`aws_secret_access_key = ${exampleSecret}`), false, 'AWS doc example secret must not block');
-    assert.equal(matched(`aws_secret_access_key = "${exampleSecret}"`), false, 'quoted AWS doc example secret must not block');
-    assert.equal(matched(`AWS_SESSION_TOKEN=${exampleSecret}`), false, 'AWS doc example session token must not block');
-
-    // Real-shape keys (no EXAMPLEKEY suffix) still block. Use a literal split so
-    // this file does not carry a single 40-char run that looks like a live key.
-    const realHead = 'wJalrXUtnFEMI7K7MDENG';
-    const realTail = 'bPxRfiCYzXmpir3Qw';
-    assert.ok(matched(`aws_secret_access_key = ${realHead}${realTail}`), 'real 40-char secret must block');
-    assert.ok(matched(`aws_secret_access_key = "${realHead}${realTail}"`), 'real quoted secret must block');
-
-    // A key that merely contains EXAMPLEKEY as a substring (not as a suffix) is
-    // a real key and must still block. The fix narrows the exception to the
-    // documented example shape (ends in EXAMPLEKEY), not to any value containing it.
-    assert.ok(
-        matched(`aws_secret_access_key = aEXAMPLEKEY${'a'.repeat(30)}`),
-        'real key with EXAMPLEKEY substring must still block',
-    );
 });
 
 test('source markers stay out of documentation, tests, dependencies, and generated output', () => {
@@ -319,15 +217,11 @@ test('corner-cut labels match case-insensitively without broadening near misses'
     }
 });
 
-test('secret, session and policy paths match case-insensitively; instruction paths do not', () => {
+test('session and policy paths match case-insensitively; instruction paths do not', () => {
     const engine = newEngine('strict');
     // On APFS and NTFS these are the same file as their lowercase spellings, and
     // Git records the case the caller typed rather than the case on disk.
     const cases = [
-        ['.ENV', 'secret.dotenv'],
-        ['nested/.EnV.Production', 'secret.dotenv'],
-        ['deploy/.AWS/CREDENTIALS', 'secret.aws-credentials'],
-        ['keys/ID_ED25519', 'secret.private-key'],
         ['.CLAUDE/session.json', 'claude.session-state'],
         ['.Claude/settings.local.json', 'claude.local-settings'],
         ['.Codex/sessions/rollout.jsonl', 'codex.session-state'],
@@ -337,7 +231,6 @@ test('secret, session and policy paths match case-insensitively; instruction pat
     for (const [path, ruleId] of cases) {
         assert.ok(matchFor(engine.checkPaths([path]), ruleId), path);
     }
-    assert.equal(engine.checkPaths(['.ENV.EXAMPLE']).length, 0);
 
     // The negative control for the opt-in: generic.agent-instructions stays
     // case-sensitive, so folding case is still a per-rule decision rather than a
@@ -359,23 +252,6 @@ test('the review-required rules print the bound review command as their fix', ()
         const fix = rule.remediation.join('\n');
         assert.match(fix, /aimhooman review .* --head <commit>/, `${rule.id} must name the bound command`);
         assert.equal(/aimhooman allow\b/.test(fix), false, `${rule.id} prints an unbound allow as its fix`);
-    }
-});
-
-// UT-03b: a content secret finding used to stop at "remove it, rotate it" and
-// never mentioned the one sanctioned way to keep an intentional fixture (docs
-// quoting a key header, a detection test fixture). The path secret rules set
-// that standard already; the content rules now print the bound secret-path
-// allow too. A bare allow cannot silence a secret, so this is the only command
-// they may honestly name.
-test('content secret rules name the deliberate-fixture escape hatch in their remediation', () => {
-    const secrets = loadRules().filter((rule) => rule.category === 'secret' && rule.kind === 'code');
-    assert.ok(secrets.length >= 4, 'the content secret rule set moved');
-    for (const rule of secrets) {
-        assert.ok(
-            rule.remediation.some((line) => line.includes('aimhooman allow <path> --scope secret-path')),
-            `${rule.id} does not name the secret-path allow in its remediation`,
-        );
     }
 });
 
@@ -501,144 +377,5 @@ test('generalized attribution patterns do not swallow ordinary trailers or prose
     ];
     for (const line of nearMisses) {
         assert.equal(clean.checkMessage(line).length, 0, line);
-    }
-});
-
-test('env placeholders are excepted by suffix while real env files still block', () => {
-    // The rule tells the user to commit a placeholder instead, so every ordering
-    // of a placeholder suffix has to be committable. The names that carry real
-    // credentials must not drift into the except along the way.
-    const engine = newEngine('strict');
-    for (const path of [
-        '.env.example',
-        '.env.local.example',
-        '.env.ci.template',
-        'services/api/.env.sample',
-        'deploy/.env.staging.dist',
-        '.env.defaults',
-    ]) {
-        assert.equal(engine.checkPaths([path]).length, 0, path);
-    }
-    for (const path of [
-        '.env',
-        '.env.local',
-        '.env.development',
-        '.env.production',
-        '.env.test',
-        'services/api/.env.production',
-    ]) {
-        assert.ok(matchFor(engine.checkPaths([path]), 'secret.dotenv'), path);
-    }
-});
-
-test('public certificates are allowed while private credential content is blocked', () => {
-    const engine = newEngine('clean');
-    const certificate = [
-        '-----BEGIN CERTIFICATE-----',
-        'MIIBplaceholderPublicCertificateMaterial',
-        '-----END CERTIFICATE-----',
-    ].join('\n');
-    assert.equal(engine.checkPaths(['certificates/server.pem']).length, 0);
-    assert.equal(engine.checkContent('certificates/server.pem', certificate).length, 0);
-
-    const privateKey = `${BEGIN}PRIVATE KEY-----\nMIIEplaceholder`;
-    assert.ok(matchFor(
-        engine.checkContent('certificates/server.pem', privateKey),
-        'secret.private-key-content'
-    ));
-    for (const privateHeader of [
-        `${BEGIN}ENCRYPTED PRIVATE KEY-----`,
-        `${BEGIN}PGP PRIVATE KEY BLOCK-----`,
-    ]) {
-        assert.ok(matchFor(
-            engine.checkContent('certificates/private.pem', `${privateHeader}\nplaceholder`),
-            'secret.private-key-content'
-        ));
-    }
-
-    const serviceAccount = `"private_key": "${BEGIN}PRIVATE KEY-----\\nMIIEplaceholder"`;
-    assert.ok(matchFor(
-        engine.checkContent('config/service-account.json', serviceAccount),
-        'secret.service-account-key'
-    ));
-});
-
-// The file holds an OAuth access token. Filed as ephemeral-state it rides the
-// hygiene path, which clean and compliance treat as advisory; as a secret it
-// reaches the backstop that stops a commit when the guard is bypassed.
-test('.claude/.credentials.json is classified as a secret, not as session state', () => {
-    for (const profile of ['clean', 'strict', 'compliance']) {
-        const engine = newEngine(profile);
-        const findings = engine.checkPaths(['.claude/.credentials.json']);
-        assert.ok(findings.length > 0, `${profile}: credentials file not flagged at all`);
-        assert.equal(
-            findings[0].category,
-            'secret',
-            `${profile}: an OAuth token file must carry the secret category`
-        );
-        assert.equal(findings[0].decision, 'block', `${profile}: credentials file must block`);
-    }
-});
-
-// Keys are assembled at runtime for the same reason the private-key fixtures
-// are: a literal key in this source would trip the rule it tests and break the
-// self-hosting guard below.
-test('secret.provider-token covers the LLM and SaaS key prefixes', () => {
-    const engine = newEngine('clean');
-    const keys = [
-        ['Anthropic', `sk-ant-api03-${'a'.repeat(95)}`],
-        ['OpenAI project', `sk-proj-${'a'.repeat(48)}`],
-        ['Google', `AIza${'a'.repeat(35)}`],
-        ['Stripe live secret', `sk_live_${'a'.repeat(24)}`],
-        ['Stripe restricted', `rk_live_${'a'.repeat(24)}`],
-        ['HuggingFace', `hf_${'a'.repeat(34)}`],
-        ['SendGrid', `SG.${'a'.repeat(22)}.${'b'.repeat(43)}`],
-    ];
-    for (const [label, key] of keys) {
-        const findings = engine.checkContent('src/llm.py', `API_KEY = "${key}"`);
-        assert.ok(matchFor(findings, 'secret.provider-token'), `${label} key reached the index undetected`);
-    }
-});
-
-test('provider key placeholders and environment references stay clean', () => {
-    const engine = newEngine('clean');
-    const benign = [
-        'ANTHROPIC_API_KEY = "sk-ant-api03-REPLACE_ME"',
-        'GOOGLE_API_KEY = "AIzaSyExample"',
-        'STRIPE_KEY = "sk_live_placeholder"',
-        'HF_TOKEN = "hf_your_token_here"',
-        'key = os.environ["ANTHROPIC_API_KEY"]',
-        'ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}',
-        'client = Anthropic(api_key=settings.anthropic_api_key)',
-    ];
-    for (const line of benign) {
-        const findings = engine.checkContent('src/llm.py', line);
-        assert.equal(
-            matchFor(findings, 'secret.provider-token'),
-            undefined,
-            `false positive on a placeholder that a real repo would hold: ${line}`
-        );
-    }
-});
-
-test("aimhooman's own rule pack and secret fixtures do not trip the secret rule", () => {
-    // Self-hosting guard: the shipped rule pack contains secret patterns and
-    // the tests embed private-key fixtures. These source files must not trip
-    // the secret rule, or CI range scans of this repository block on
-    // themselves. Fixtures build the header at runtime and the rule pack's PGP
-    // form is merged into the generic private-key pattern so neither self-matches.
-    const engine = newEngine('strict');
-    const files = [
-        'rules/secrets.json',
-        'tests/rule-contracts.test.mjs',
-        'tests/cli.test.mjs',
-    ];
-    for (const relative of files) {
-        const content = readFileSync(join(ROOT, relative), 'utf8');
-        const secretFindings = engine.checkContent(relative, content)
-            .filter((finding) => finding.category === 'secret');
-        assert.equal(secretFindings.length, 0, `${relative} trips the secret rule: ${
-            JSON.stringify(secretFindings.map((finding) => finding.ruleId))
-        }`);
     }
 });

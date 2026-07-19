@@ -19,7 +19,6 @@ export class Engine {
         this.rules = rules;
         this.allowPaths = new Set();
         this.allowRules = new Set();
-        this.allowSecretPaths = new Set();
         this.denyPaths = new Set();
         this.denyRules = new Set();
         this.scopedAllow = [];
@@ -33,7 +32,6 @@ export class Engine {
         const denied = this.#splitOverrides(deny);
         this.allowPaths = allowed.paths;
         this.allowRules = allowed.rules;
-        this.allowSecretPaths = allowed.secretPaths;
         this.denyPaths = denied.paths;
         this.denyRules = denied.rules;
         this.scopedAllow = scopedAllow.filter((entry) => (
@@ -59,8 +57,8 @@ export class Engine {
         //   - clean/compliance: review is ADVISORY (a stderr message, exit 0),
         //     so re-surfacing it on every edit of a reviewed agent-instruction
         //     file (CLAUDE.md, AGENTS.md) is pure friction with no security
-        //     payoff — the security boundary is secret scanning, strict blocks,
-        //     and reference-transaction. A LIVE-FILE review (newObjectId set)
+        //     payoff — the security boundary is strict blocks and the
+        //     reference-transaction guard. A LIVE-FILE review (newObjectId set)
         //     therefore persists per path + rule across edits. A TOMBSTONE
         //     review (newObjectId null — a reviewed deletion) keeps the exact
         //     match in every profile: a deletion review must not silently cover
@@ -80,20 +78,13 @@ export class Engine {
                     && entry.newObjectId === context.objectId
                     && entry.newMode === context.mode);
         })) return 'allow';
-        // A rule-level allow cannot bypass the secret-category guard that the
-        // path-level allow below enforces: secret rules require an explicit
-        // --scope secret-path override on a specific path, never a blanket rule allow.
-        if (this.allowRules.has(rule.id) && rule.category !== 'secret') return 'allow';
-        // A --scope secret-path allow is the explicit override for secret-category
-        // rules only; it must not also suppress a non-secret rule that happens to
-        // match the same path (principle of least privilege).
-        if (this.allowSecretPaths.has(target) && rule.category === 'secret') return 'allow';
-        if (this.allowPaths.has(target) && rule.category !== 'secret') return 'allow';
+        if (this.allowRules.has(rule.id)) return 'allow';
+        if (this.allowPaths.has(target)) return 'allow';
         return base;
     }
 
     #splitOverrides(entries) {
-        const result = { paths: new Set(), rules: new Set(), secretPaths: new Set() };
+        const result = { paths: new Set(), rules: new Set() };
         for (const entry of entries || []) {
             const target = typeof entry === 'string' ? entry : entry?.target;
             if (!target) continue;
@@ -101,7 +92,6 @@ export class Engine {
                 ? (this.lookup(target) ? 'rule' : 'path')
                 : (entry.scope ?? (this.lookup(target) ? 'rule' : 'path'));
             if (scope === 'rule') result.rules.add(target);
-            else if (scope === 'secret-path') result.secretPaths.add(target);
             else if (scope === 'path') result.paths.add(target);
         }
         return result;
@@ -138,13 +128,10 @@ export class Engine {
     checkContent(path, content, options = {}) {
         const out = [];
         const p = normalize(path);
-        const categories = Array.isArray(options.categories)
-            ? new Set(options.categories)
-            : null;
         // lineRanges narrows content scanning to changed hunks (W4, bug 12d-F1).
         // When provided (an array of inclusive 1-based {start,end} ranges), only
         // lines falling in a range are evaluated; this stops a file that contains
-        // a secret-bearing line ELSEWHERE (a PEM header inside a test string on
+        // a flagged line ELSEWHERE (a marker phrase inside a test fixture on
         // line 200) from blocking a commit that only edited line 50. Findings
         // keep their real line numbers because lineRecords already anchors them.
         // Absent = scan every line (the pre-W4 behaviour).
@@ -153,8 +140,8 @@ export class Engine {
             : null;
         for (const record of lineRecords(String(content))) {
             if (ranges && !ranges.some((range) => record.line >= range.start && record.line <= range.end)) continue;
-            this.#markLocalInputSkip('code', p, record.text, categories);
-            const result = this.#evaluate('code', p, record.text, { categories });
+            this.#markLocalInputSkip('code', p, record.text);
+            const result = this.#evaluate('code', p, record.text);
             if (result) out.push(finding(result, { path: p, line: record.line, text: record.text }));
         }
         return out;
@@ -198,11 +185,10 @@ export class Engine {
         return skipped;
     }
 
-    #markLocalInputSkip(kind, target, text, categories = null) {
+    #markLocalInputSkip(kind, target, text) {
         if (text.length <= MAX_LOCAL_MATCH_INPUT) return;
         const applicable = this.rules.some((rule) => {
             if (rule.source !== 'local' || rule.kind !== kind) return false;
-            if (categories && !categories.has(rule.category)) return false;
             if (kind !== 'code') return true;
             const candidate = rule.pathCaseInsensitive ? target.toLowerCase() : target;
             if (rule.pathRes.length && !rule.pathRes.some((regexp) => regexp.test(candidate))) return false;
@@ -216,7 +202,6 @@ export class Engine {
         for (const rule of this.rules) {
             if (rule.kind !== kind) continue;
             if (context.excludedRuleIds?.has(rule.id)) continue;
-            if (context.categories && !context.categories.has(rule.category)) continue;
             const matched = kind === 'path'
                 ? matchesPath(rule, target)
                 : matchesContent(rule, text, kind === 'code' ? target : undefined);

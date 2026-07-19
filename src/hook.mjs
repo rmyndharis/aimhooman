@@ -8,6 +8,7 @@ import { newEngineWithDiagnostics } from './scan.mjs';
 import { openRepo, stagedEntries } from './gitx.mjs';
 import { applyExclude, patternsForRules } from './exclude.mjs';
 import { activeGitHook, installedHooks } from './githooks.mjs';
+import { loadConfig } from './state.mjs';
 import { visible } from './report.mjs';
 import { extractRuleset } from './ruleset-text.mjs';
 import { resolvePolicy } from './policy-resolver.mjs';
@@ -84,7 +85,14 @@ export function hookSessionStart() {
         const repo = openRepo();
         const policy = resolvePolicy(repo, { target: 'worktree' });
         const { engine: eng } = newEngineWithDiagnostics(policy.profile, repo.stateDir);
-        applyExclude(repo.excludeFile, patternsForRules(eng.rules));
+        const patterns = patternsForRules(eng.rules);
+        applyExclude(repo.excludeFile, patterns);
+        // A clone that opted into the committed variant gets the same refresh in
+        // its worktree .gitignore; every failure degrades silently, same as the
+        // exclude write above.
+        if (loadConfig(repo.stateDir).gitignore?.enabled) {
+            applyExclude(join(repo.root, '.gitignore'), patterns);
+        }
     } catch {
         /* not a repo; nothing to exclude */
     }
@@ -383,10 +391,22 @@ function hookPreToolUse(input) {
     // above so a read-only .git/info (CI checkout, read-only volume, a
     // repository owned by another user) cannot decide what is allowed.
     if (repo) {
+        const patterns = patternsForRules(eng.rules);
         try {
-            applyExclude(repo.excludeFile, patternsForRules(eng.rules));
+            applyExclude(repo.excludeFile, patterns);
         } catch (e) {
             hygieneWarning = `could not refresh ${repo.excludeFile}: ${e.message}`;
+        }
+        // The committed variant of the block gets the same best-effort refresh
+        // when this clone opted into it; a failure there is housekeeping too,
+        // never part of the verdict.
+        try {
+            if (loadConfig(repo.stateDir).gitignore?.enabled) {
+                applyExclude(join(repo.root, '.gitignore'), patterns);
+            }
+        } catch (e) {
+            const gitignoreWarning = `could not refresh ${join(repo.root, '.gitignore')}: ${e.message}`;
+            hygieneWarning = hygieneWarning ? `${hygieneWarning}; ${gitignoreWarning}` : gitignoreWarning;
         }
     }
     // A strict policy cannot make a meaningful guarantee if Git's own guards
@@ -402,7 +422,7 @@ function hookPreToolUse(input) {
     // A preceding command that may have changed the repository or its hooks is
     // also a potential pre-commit bypass. Strict rejects it above; clean and
     // compliance still need the staged-content backstop so a hook mutation
-    // cannot expose a secret that was already in the index.
+    // cannot sneak a blocked staged file past the guard.
     const commitPrefixRisk = parsed.commands.some((candidate) => (
         (candidate.verb === 'commit' || candidate.verb === 'unknown')
         && candidate.prefixRisk
@@ -426,8 +446,8 @@ function hookPreToolUse(input) {
     // them. A build, a test run, ls — those leave pre-commit to answer, and
     // refusing them taught agents to drop the `&&` gate rather than to run the
     // command separately. hiddenBypass stays wider on purpose; it is what keeps
-    // the staged-content backstop reading the blobs, so a secret already in the
-    // index still stops the commit here.
+    // the staged-content backstop reading the blobs, so a blocked file already
+    // in the index still stops the commit here.
     const prefixHookBypass = opaqueCommitRisk
         || (commitPrefixRisk && (noVerify || bypassHooks || parsed.prefixHooksRisk));
     // The same distinction, for the deny paths that ask "will anything scan this
@@ -460,7 +480,7 @@ function hookPreToolUse(input) {
     const blocks = [];
     // potentialCommit treats a command as leading to a commit. uncertainShell
     // was too broad: it flagged any pipe, so a benign read-only pipeline
-    // (gh ... | tail) was scanned and denied as if it staged a secret.
+    // (gh ... | tail) was scanned and denied as if it staged a blocked file.
     // opaqueCommitHiding keeps every commit-hiding shape (subshells,
     // substitution, script-feeds, code-executing/unlisted pipe segments) while
     // excluding pipelines of known read-only commands.
@@ -503,8 +523,8 @@ function hookPreToolUse(input) {
     // disables the real pre-commit guard, leaving this hook the only check.
     // When the commit also stages files at commit time (-a/--all/-u/--patch, or
     // a preceding `git add`), those files are neither in stagedPaths(repo) now
-    // nor in addPaths, so they were never scanned. Rather than let an unscanned
-    // secret through, deny. (Strict already denied the bypass above.) The rare
+    // nor in addPaths, so they were never scanned. Rather than let unscanned
+    // content through, deny. (Strict already denied the bypass above.) The rare
     // false-positive on an explicit `git add <path> && git commit --no-verify`
     // is safe-side; drop --no-verify to proceed.
     //
@@ -512,7 +532,8 @@ function hookPreToolUse(input) {
     // a --no-verify inside the inner command, where parsed.noVerify cannot see
     // it (the parser only inspects literal argv). Such an uncertain commit is
     // therefore treated as a potential hook bypass for the clean/compliance
-    // secret backstop, so a secret cannot slip past the guard wrapped in eval.
+    // staged-content backstop, so a blocked file cannot slip past the guard
+    // wrapped in eval.
     const indexReplacement = parsed.commands.some((candidate) => (
         candidate.verb === 'commit' && candidate.indexMutationRisk
     ));
@@ -553,9 +574,9 @@ function hookPreToolUse(input) {
     }
     // clean / compliance: advisory only (the git pre-commit unstage is the real
     // enforcement) — except when --no-verify/core.hooksPath bypasses that hook.
-    // A bypassed guard is the one case clean cannot delegate to git, so a blocked
-    // secret is denied here, matching the documented "secret stops the commit when
-    // automatic unstaging fails"; hygiene findings stay advisory.
+    // A bypassed guard is the one case clean cannot delegate to git, so a
+    // secret-category finding (a local rule pack can still declare one) is
+    // denied here; hygiene findings stay advisory.
     const bypassed = Boolean(potentialCommit && hiddenBypass);
     if (bypassed && blocks.some((f) => f.category === 'secret')) {
         return emitDecision(

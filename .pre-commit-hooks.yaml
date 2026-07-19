@@ -1,0 +1,6 @@
+- id: aimhooman
+  name: aimhooman
+  description: keeps AI session files and attribution out of commits
+  entry: aimhooman check --staged
+  language: node
+  pass_filenames: false

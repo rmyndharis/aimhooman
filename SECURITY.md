@@ -1,7 +1,7 @@
 # Security Policy
 
 aimhooman is itself a security-adjacent tool: it guards repositories against
-AI-tool residue and secrets reaching Git history. This policy covers the
+AI-tool residue reaching Git history. This policy covers the
 security of aimhooman itself.
 
 ## Reporting a vulnerability
@@ -41,9 +41,11 @@ only the latest minor release will receive security fixes.
 - aimhooman **prevents leaks it has rules for**. It cannot catch novel AI-tool
   artifacts with no rule, and it does not rewrite existing history.
 - The default (`clean`) profile repairs ordinary hygiene findings when it can.
-  Invalid local rule packs are skipped with a warning, but corrupt override state,
-  incomplete staged-content scans, and unreadable Git targets stop every profile.
-  If any blocked path cannot be unstaged or safely repaired, the operation stops.
+  Invalid local rule packs are skipped with a warning, but corrupt override state
+  and unreadable Git targets stop every profile. An incomplete scan warns on
+  clean/compliance and stops on strict; the final reference-transaction guard
+  stops on every profile when it cannot fully scan. If any blocked path cannot
+  be unstaged or safely repaired, the operation stops.
   The pinned-tree and final-ref guards also stop a remaining or pre-existing tracked
   block. `strict` vetoes instead of attempting clean/compliance repairs and also
   stops review decisions.

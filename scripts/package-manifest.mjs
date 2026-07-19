@@ -16,7 +16,7 @@ export function assertPackageManifest(paths, sourceRoot) {
         throw new TypeError('package manifest paths must be non-empty strings');
     }
     const allowedFiles = new Set([
-        'package.json', 'docs/hosts.json',
+        'package.json', 'docs/hosts.json', 'docs/ai-artifacts.gitignore', 'docs/catalog.md',
         '.github/copilot-instructions.md', 'AGENTS.md', 'GEMINI.md', 'CHANGELOG.md',
         'CODE_OF_CONDUCT.md', 'CONTRIBUTING.md', 'LICENSE', 'README.md', 'SECURITY.md',
     ]);

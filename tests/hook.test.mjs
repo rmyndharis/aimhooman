@@ -8,6 +8,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { parseGit, asObject, shellPathIsAmbiguous } from '../src/hook.mjs';
+import { defaultPatterns, inspectExclude } from '../src/exclude.mjs';
 
 const CLI = join(process.cwd(), 'bin/aimhooman.mjs');
 
@@ -857,11 +858,11 @@ test('hook-affecting config cannot bypass the final ref guard for protected Git 
         try {
             const before = gitValue(dir, 'rev-parse', 'HEAD');
             const branch = gitValue(dir, 'branch', '--show-current');
-            writeFileSync(join(dir, '.env'), 'RELEASE_BLOCKER=secret\n');
-            execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+            writeFileSync(join(dir, '.claude.json'), '{"session":true}\n');
+            execFileSync('git', ['add', '-f', '.claude.json'], { cwd: dir });
             const tree = gitValue(dir, 'write-tree');
-            execFileSync('git', ['reset', '-q', 'HEAD', '--', '.env'], { cwd: dir });
-            rmSync(join(dir, '.env'));
+            execFileSync('git', ['reset', '-q', 'HEAD', '--', '.claude.json'], { cwd: dir });
+            rmSync(join(dir, '.claude.json'));
             const bad = execFileSync(
                 'git',
                 ['commit-tree', tree, '-p', before, '-m', 'forbidden tree'],
@@ -907,7 +908,7 @@ test('hook-affecting config cannot bypass the final ref guard for protected Git 
             );
             assert.notEqual(blocked.status, 0, `${profile}: ${blocked.stderr}`);
             assert.equal(gitValue(dir, 'rev-parse', 'HEAD'), before, profile);
-            assert.match(blocked.stderr, /secret\.dotenv|rejected before refs changed/, profile);
+            assert.match(blocked.stderr, /claude\.session-state|rejected before refs changed/, profile);
 
             const fetchBranch = `normal-fetch-${profile}`;
             const normalFetch = await invokePreToolUse(dir, {
@@ -1079,6 +1080,57 @@ test('hookSessionStart writes managed excludes into .git/info/exclude', async ()
     } finally {
         process.chdir(realCwd);
         process.stdout.write = origWrite;
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('hookSessionStart refreshes the .gitignore block only when the clone opted in', async () => {
+    const { hookSessionStart } = await import('../src/hook.mjs');
+    const dir = mkdtempSync(join(tmpdir(), 'aim-hook-gitignore-'));
+    const realCwd = process.cwd();
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = () => true; // suppress emit() JSON noise
+    process.chdir(dir);
+    try {
+        const { execFileSync } = await import('node:child_process');
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+        // No opt-in recorded: session start must not create a .gitignore.
+        hookSessionStart();
+        assert.equal(existsSync(join(dir, '.gitignore')), false);
+
+        execFileSync(process.execPath, [CLI, 'init', '--gitignore'], { cwd: dir });
+        const gitignore = join(dir, '.gitignore');
+        // Damage the block by hand; the session-start refresh rewrites it.
+        const patterns = defaultPatterns();
+        writeFileSync(gitignore, readFileSync(gitignore, 'utf8').replace(`${patterns[0]}\n`, ''));
+        hookSessionStart();
+        assert.deepEqual(inspectExclude(gitignore, patterns), { installed: true, current: true, missing: [] });
+    } finally {
+        process.chdir(realCwd);
+        process.stdout.write = origWrite;
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('pre-tool-use refreshes an opted-in .gitignore block without touching the verdict', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-gitignore-refresh-');
+    try {
+        // makeHookRepo ran a plain init; opting in is a re-init away.
+        execFileSync(process.execPath, [CLI, 'init', '--gitignore'], { cwd: dir });
+        const gitignore = join(dir, '.gitignore');
+        const patterns = defaultPatterns();
+        writeFileSync(gitignore, readFileSync(gitignore, 'utf8').replace(`${patterns[0]}\n`, ''));
+
+        // An artifact add emits an advisory on clean: the verdict must survive
+        // the housekeeping refresh untouched.
+        const out = await invokePreToolUse(dir, {
+            tool_name: 'Bash',
+            tool_input: { command: 'git add .playwright-mcp/trace.json' },
+        });
+        assert.notEqual(out.permissionDecision, 'deny');
+        assert.deepEqual(inspectExclude(gitignore, patterns), { installed: true, current: true, missing: [] });
+    } finally {
         rmSync(dir, { recursive: true, force: true });
     }
 });
@@ -1344,11 +1396,7 @@ test('POSIX control forms cannot hide a no-verify commit from strict or clean', 
             assert.equal(gitValue(strict, 'write-tree'), strictIndex, command);
         }
 
-        writeFileSync(
-            join(clean, 'ordinary.txt'),
-            'safe\n-----BEGIN ' + 'PRIVATE KEY-----\nfixture\n',
-        );
-        execFileSync('git', ['add', 'ordinary.txt'], { cwd: clean });
+        stageLocalSecretContent(clean, 'ordinary.txt');
         const cleanHead = gitValue(clean, 'rev-parse', 'HEAD');
         const cleanIndex = gitValue(clean, 'write-tree');
         for (const command of commands) {
@@ -1357,7 +1405,7 @@ test('POSIX control forms cannot hide a no-verify commit from strict or clean', 
                 tool_input: { command },
             });
             assert.equal(decision.permissionDecision, 'deny', command);
-            assert.match(decision.permissionDecisionReason, /secret\.private-key-content/, command);
+            assert.match(decision.permissionDecisionReason, /local\.blocked-secret/, command);
             assert.equal(gitValue(clean, 'rev-parse', 'HEAD'), cleanHead, command);
             assert.equal(gitValue(clean, 'write-tree'), cleanIndex, command);
         }
@@ -1417,10 +1465,7 @@ test('inline alias configuration is denied before its unproved expansion can run
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-inline-alias-${profile}-`);
         try {
-            writeFileSync(
-                join(dir, 'ordinary.txt'),
-                'safe\n-----BEGIN ' + 'PRIVATE KEY-----\nfixture\n',
-            );
+            writeFileSync(join(dir, 'ordinary.txt'), 'fixture\n');
             execFileSync('git', ['add', 'ordinary.txt'], { cwd: dir });
             const beforeHead = gitValue(dir, 'rev-parse', 'HEAD');
             const beforeIndex = gitValue(dir, 'write-tree');
@@ -1450,13 +1495,10 @@ test('inline and external Git commands cannot hide future index or hook mutation
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-unproved-alias-${profile}-`);
         try {
-            writeFileSync(
-                join(dir, 'future-secret.txt'),
-                '-----BEGIN ' + 'PRIVATE KEY-----\nfixture\n',
-            );
+            writeFileSync(join(dir, 'future-blocked.txt'), 'fixture\n');
             const before = gitValue(dir, 'rev-parse', 'HEAD');
             for (const command of [
-                "git -c 'alias.ship=!git add future-secret.txt && git -c core.hooksPath=/dev/null commit --no-verify -m leak' ship",
+                "git -c 'alias.ship=!git add future-blocked.txt && git -c core.hooksPath=/dev/null commit --no-verify -m leak' ship",
                 'git mystery-subcommand',
             ]) {
                 const decision = await invokePreToolUse(dir, {
@@ -1466,7 +1508,7 @@ test('inline and external Git commands cannot hide future index or hook mutation
                 assert.equal(decision.permissionDecision, 'deny', `${profile}: ${command}`);
                 assert.match(decision.permissionDecisionReason, /cannot prove.*managed reference-transaction guard/, command);
                 assert.equal(gitValue(dir, 'rev-parse', 'HEAD'), before, command);
-                assert.equal(gitValue(dir, 'status', '--short'), '?? future-secret.txt', command);
+                assert.equal(gitValue(dir, 'status', '--short'), '?? future-blocked.txt', command);
             }
         } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -1505,10 +1547,13 @@ test('alternate and replaced Git indexes are denied before a clean no-verify com
         const defaultIndex = join(dir, '.git', 'index');
         const alternateIndex = join(dir, '.git', 'alternate-index');
         copyFileSync(defaultIndex, alternateIndex);
-        writeFileSync(
-            join(dir, 'ordinary.txt'),
-            'safe\n-----BEGIN ' + 'PRIVATE KEY-----\nfixture\n',
-        );
+        writeLocalSecretRule(dir, {
+            id: 'local.blocked-secret',
+            kind: 'code',
+            match: { content: ['BLOCKED-SECRET'] },
+            reason: 'ACME token content',
+        });
+        writeFileSync(join(dir, 'ordinary.txt'), 'safe\nBLOCKED-SECRET\nfixture\n');
         execFileSync('git', ['add', 'ordinary.txt'], {
             cwd: dir,
             env: { ...process.env, GIT_INDEX_FILE: alternateIndex },
@@ -1549,9 +1594,9 @@ test('alternate and replaced Git indexes are denied before a clean no-verify com
 
         // A script that names neither the index nor the hooks reads as ordinary,
         // so the tool call proceeds. It really does swap the index underneath —
-        // what stops the secret is the guard it left alone. Run it, rather than
-        // assert against a fixture that never existed and a command that never
-        // ran.
+        // what stops the blocked file is the guard it left alone. Run it, rather
+        // than assert against a fixture that never existed and a command that
+        // never ran.
         const mutation = 'node mutate-index.mjs && git commit -m bypass';
         writeFileSync(
             join(dir, 'mutate-index.mjs'),
@@ -1565,11 +1610,11 @@ test('alternate and replaced Git indexes are denied before a clean no-verify com
         assert.equal(unmodelled, null);
         const execution = spawnSync(BASH, ['-c', mutation], { cwd: dir, encoding: 'utf8' });
         assert.equal(execution.status, 0, execution.stderr);
-        assert.match(execution.stderr, /secret\.private-key-content/);
+        assert.match(execution.stderr, /local\.blocked-secret/);
         assert.doesNotMatch(
             gitValue(dir, 'ls-tree', '-r', '--name-only', 'HEAD'),
             /ordinary\.txt/,
-            'the swapped-in index reached the commit and the key was not committed',
+            'the swapped-in index reached the commit and the file was not committed',
         );
         assert.doesNotMatch(gitValue(dir, 'ls-files'), /ordinary\.txt/);
     } finally {
@@ -1680,11 +1725,10 @@ test('a timing or scheduling prefix is treated as a direct commit, not a bypass'
             assert.equal(out, null, `a benign prefix was denied: ${command}`);
         }
 
-        // A staged secret committed through a timing prefix with --no-verify is
-        // still stopped: the prefix is transparent, so it does not launder the
-        // bypass or the unscanned blob past the guard.
-        writeFileSync(join(dir, '.env'), 'SECRET=x\n');
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        // A staged secret-category file committed through a timing prefix with
+        // --no-verify is still stopped: the prefix is transparent, so it does
+        // not launder the bypass or the unscanned blob past the guard.
+        stageLocalSecretPath(dir);
         const bypass = await invokePreToolUse(dir, {
             tool_name: 'Bash',
             tool_input: { command: 'time git commit --no-verify -m x' },
@@ -1765,12 +1809,11 @@ test('an alias that repoints the hooks path still stops the commit', async () =>
 
 // Letting an ordinary prefix through must not also let the staged-content
 // backstop go. The prefix stays part of hiddenBypass, so clean/compliance still
-// read the staged blobs and stop a secret that is already in the index.
-test('an ordinary command before a commit keeps the staged-secret backstop', async () => {
+// read the staged blobs and stop a blocked file that is already in the index.
+test('an ordinary command before a commit keeps the staged-content backstop', async () => {
     const dir = makeHookRepo('clean', 'aim-hook-prefix-secret-');
     try {
-        writeFileSync(join(dir, '.env'), `AWS_SECRET_ACCESS_KEY=${'a'.repeat(40)}\n`);
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        stageLocalSecretPath(dir);
         const out = await invokePreToolUse(dir, {
             tool_name: 'Bash',
             tool_input: { command: 'npm test && git commit -m x' },
@@ -1860,8 +1903,8 @@ test('an alias cannot shadow a Git builtin on the safe list', async () => {
     const dir = makeHookRepo('clean', 'aim-hook-builtin-alias-');
     try {
         execFileSync('git', ['config', 'alias.format-patch', '!git commit --no-verify -m alias'], { cwd: dir });
-        writeFileSync(join(dir, '.env'), `AWS_SECRET_ACCESS_KEY=${'a'.repeat(40)}\n`);
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        writeFileSync(join(dir, '.claude.json'), '{"session":true}\n');
+        execFileSync('git', ['add', '-f', '.claude.json'], { cwd: dir });
         const before = gitValue(dir, 'rev-parse', 'HEAD');
 
         const out = await invokePreToolUse(dir, {
@@ -1872,7 +1915,7 @@ test('an alias cannot shadow a Git builtin on the safe list', async () => {
         const execution = spawnSync(BASH, ['-c', 'git format-patch -1'], { cwd: dir, encoding: 'utf8' });
         assert.equal(execution.status, 0, execution.stderr);
         assert.equal(gitValue(dir, 'rev-parse', 'HEAD'), before, 'the alias must not have committed');
-        assert.match(gitValue(dir, 'ls-files'), /\.env/, 'the staged secret is still staged, not committed');
+        assert.match(gitValue(dir, 'ls-files'), /\.claude\.json/, 'the staged file is still staged, not committed');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -1937,7 +1980,16 @@ test('combined add and commit relies on the installed strict final guard', async
         assert.equal(safeCommit.status, 0, safeCommit.stderr);
 
         const beforeBlocked = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
-        writeFileSync(join(dir, '.env'), 'TOKEN=unsafe\n');
+        // A local custom-category path rule stays out of the managed excludes,
+        // so `git add -A` really stages it and the strict guard really stops it.
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+            id: 'local.forbidden', version: 1, provider: 'local', category: 'custom', kind: 'path',
+            match: { paths: ['forbidden.txt'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'forbidden by local policy',
+        }]));
+        writeFileSync(join(dir, 'forbidden.txt'), 'unsafe\n');
         const forbiddenDecision = await invokePreToolUse(dir, {
             tool_name: 'Bash',
             tool_input: { command: safeCommand },
@@ -1947,7 +1999,7 @@ test('combined add and commit relies on the installed strict final guard', async
         assert.notEqual(forbiddenCommit.status, 0);
         assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim(), beforeBlocked);
         execFileSync('git', ['reset', '-q'], { cwd: dir });
-        rmSync(join(dir, '.env'), { force: true });
+        rmSync(join(dir, 'forbidden.txt'), { force: true });
 
         writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'clean' }));
         const downgradeDecision = await invokePreToolUse(dir, {
@@ -2678,15 +2730,14 @@ test('malformed local overrides deny commands in every profile', async () => {
     }
 });
 
-test('clean denies a staged secret under git commit --no-verify (bypassed guard)', async () => {
+test('clean denies a staged secret-category file under git commit --no-verify (bypassed guard)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-noverify-secret-'));
     try {
         execFileSync('git', ['init', '-q'], { cwd: dir });
         execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
         execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
         execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: dir });
-        writeFileSync(join(dir, '.env'), 'TOKEN=value\n');
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        stageLocalSecretPath(dir);
         const out = await invokePreToolUse(dir, {
             tool_name: 'Bash',
             tool_input: { command: 'git commit --no-verify -m leak' },
@@ -2705,24 +2756,20 @@ test('clean scans staged blob content before allowing a --no-verify commit', asy
         execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
         execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
         execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: dir });
-        writeFileSync(
-            join(dir, 'notes.txt'),
-            'safe\n-----BEGIN ' + 'PRIVATE KEY-----\nsecret\n',
-        );
-        execFileSync('git', ['add', 'notes.txt'], { cwd: dir });
+        stageLocalSecretContent(dir);
         const out = await invokePreToolUse(dir, {
             tool_name: 'Bash',
             tool_input: { command: 'git commit --no-verify -m leak' },
         });
         assert.equal(out.permissionDecision, 'deny');
-        assert.match(out.permissionDecisionReason, /secret\.private-key-content/);
+        assert.match(out.permissionDecisionReason, /local\.blocked-secret/);
         assert.match(out.permissionDecisionReason, /bypasses the pre-commit guard/);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
 });
 
-test('clean denies a staged secret when an earlier command may disable Git hooks', async () => {
+test('clean denies a staged secret-category file when an earlier command may disable Git hooks', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-prefix-hook-secret-'));
     try {
         execFileSync('git', ['init', '-q'], { cwd: dir });
@@ -2736,11 +2783,7 @@ test('clean denies a staged secret when an earlier command may disable Git hooks
         execFileSync('git', ['config', 'alias.disable-hooks', 'config core.hooksPath empty-hooks'], { cwd: dir });
         execFileSync('git', ['config', 'alias.shell-disable-hooks', '!git config core.hooksPath empty-hooks'], { cwd: dir });
         execFileSync('git', ['config', 'alias.unsafe-commit', '!git commit --no-verify -m leak'], { cwd: dir });
-        writeFileSync(
-            join(dir, 'notes.txt'),
-            'safe\n-----BEGIN ' + 'PRIVATE KEY-----\nfixture\n',
-        );
-        execFileSync('git', ['add', 'notes.txt'], { cwd: dir });
+        stageLocalSecretContent(dir);
         const before = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
         for (const command of [
             'git config core.hooksPath empty-hooks && git commit -m leak',
@@ -2752,7 +2795,7 @@ test('clean denies a staged secret when an earlier command may disable Git hooks
             });
             assert.equal(out.permissionDecision, 'deny', command);
             assert.match(out.permissionDecisionReason, /earlier command may have changed/, command);
-            assert.match(out.permissionDecisionReason, /secret\.private-key-content/, command);
+            assert.match(out.permissionDecisionReason, /local\.blocked-secret/, command);
         }
         const shellAlias = await invokePreToolUse(dir, {
             tool_name: 'Bash',
@@ -2829,10 +2872,11 @@ test('clean fails closed when a bypassed staged-content scan is incomplete', asy
     }
 });
 
-test('clean denies a staged secret or uncertain target under indirect --no-verify', async () => {
-    // Literal eval/pipeline payloads use the clean secret backstop. Wrappers
-    // such as sudo can select cwd from external configuration, so they fail
-    // closed before policy lookup instead of scanning the caller's repository.
+test('clean denies a staged secret-category file or uncertain target under indirect --no-verify', async () => {
+    // Literal eval/pipeline payloads use the clean staged-content backstop.
+    // Wrappers such as sudo can select cwd from external configuration, so they
+    // fail closed before policy lookup instead of scanning the caller's
+    // repository.
     for (const [command, reason] of [
         ["eval 'git commit --no-verify -m leak'", /shell indirection|--no-verify/],
         ['sudo git commit --no-verify -m leak', /repository target|dynamic directory/],
@@ -2848,8 +2892,7 @@ test('clean denies a staged secret or uncertain target under indirect --no-verif
             execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
             execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: dir });
-            writeFileSync(join(dir, '.env'), 'TOKEN=value\n');
-            execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+            stageLocalSecretPath(dir);
             const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
             assert.equal(out.permissionDecision, 'deny', `decision for: ${command}`);
             assert.match(out.permissionDecisionReason, reason, `reason for: ${command}`);
@@ -2919,6 +2962,41 @@ function initializeHookRepo(dir, profile) {
 
 function makeHookRepo(profile, prefix) {
     return initializeHookRepo(mkdtempSync(join(tmpdir(), prefix)), profile);
+}
+
+// The retired built-in secret rules have a stand-in for the bypass tests: a
+// local pack can still declare category "secret", and that is the one category
+// the clean-profile backstop denies when the Git guard is bypassed.
+function writeLocalSecretRule(dir, rule = {}) {
+    mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+    writeFileSync(join(dir, '.git/aimhooman/rules/local.json'), JSON.stringify([{
+        id: 'local.acme-secret',
+        version: 1,
+        provider: 'local',
+        category: 'secret',
+        kind: 'path',
+        match: { paths: ['acme.env'] },
+        actions: { clean: 'block', strict: 'block', compliance: 'block' },
+        reason: 'ACME credential file',
+        ...rule,
+    }]));
+}
+
+function stageLocalSecretPath(dir) {
+    writeLocalSecretRule(dir);
+    writeFileSync(join(dir, 'acme.env'), 'ACME_TOKEN=value\n');
+    execFileSync('git', ['add', 'acme.env'], { cwd: dir });
+}
+
+function stageLocalSecretContent(dir, file = 'notes.txt') {
+    writeLocalSecretRule(dir, {
+        id: 'local.blocked-secret',
+        kind: 'code',
+        match: { content: ['BLOCKED-SECRET'] },
+        reason: 'ACME token content',
+    });
+    writeFileSync(join(dir, file), 'safe\nBLOCKED-SECRET\n');
+    execFileSync('git', ['add', file], { cwd: dir });
 }
 
 function gitValue(cwd, ...args) {
@@ -3004,16 +3082,15 @@ test('a failed .git/info/exclude refresh does not turn the staged verdict into a
     const info = join(dir, '.git', 'info');
     const command = 'git commit --no-verify -m x';
     try {
-        writeFileSync(join(dir, '.env'), `AWS_SECRET_ACCESS_KEY=${'a'.repeat(40)}\n`);
-        execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+        stageLocalSecretPath(dir);
 
         const control = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
-        assert.equal(control.permissionDecision, 'deny', 'control: the guard sees the staged secret');
+        assert.equal(control.permissionDecision, 'deny', 'control: the guard sees the staged file');
 
         chmodSync(info, 0o500);
         const readOnly = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
         assert.equal(readOnly.permissionDecision, 'deny', readOnly.permissionDecisionReason);
-        assert.match(readOnly.permissionDecisionReason, /secret\.dotenv|secret\.aws-key-content/);
+        assert.match(readOnly.permissionDecisionReason, /local\.acme-secret/);
         // The rules loaded fine; only the housekeeping write failed.
         assert.doesNotMatch(readOnly.permissionDecisionReason, /could not load policy rules/);
     } finally {

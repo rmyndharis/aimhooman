@@ -91,8 +91,8 @@ try {
     git(['add', 'README.md']);
     git(['commit', '-q', '-m', 'initial commit']);
     run(process.execPath, [installedCli, 'init', '--profile', 'strict'], { cwd: repository, env: environment });
-    writeFileSync(join(repository, '.env'), 'PACKAGE_SMOKE_SECRET=must-not-land\n');
-    git(['add', '-f', '.env']);
+    writeFileSync(join(repository, '.claude.json'), '{"session":"must-not-land"}\n');
+    git(['add', '-f', '.claude.json']);
     const blocked = spawnSync('git', ['commit', '-q', '-m', 'must be blocked'], {
         cwd: repository,
         env: environment,
@@ -100,8 +100,8 @@ try {
     });
     if (blocked.error) throw blocked.error;
     if (blocked.status === 0) throw new Error('installed strict hook allowed a forbidden path');
-    git(['reset', '-q', 'HEAD', '--', '.env']);
-    rmSync(join(repository, '.env'));
+    git(['reset', '-q', 'HEAD', '--', '.claude.json']);
+    rmSync(join(repository, '.claude.json'));
     writeFileSync(join(repository, 'README.md'), 'package hook smoke test\n');
     git(['add', 'README.md']);
     git(['commit', '-q', '-m', 'exercise installed hooks']);

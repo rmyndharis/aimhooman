@@ -7,33 +7,6 @@
 // for the rest. The JSON report (aimhooman review / --json) is never capped.
 const HUMAN_FINDING_CAP = 20;
 
-// UT-06: prefix -> provider for secret.provider-token findings. The rule packs
-// every provider into one pattern set (rules/secrets.json), so the provider
-// name is recovered from the raw matched line at report time — before the
-// redaction below runs. Only the label is ever rendered, never the token.
-// Mirrors the rule's patterns; keep the rule's alternation order.
-const TOKEN_PROVIDERS = [
-    ['ghp_', 'GitHub'], ['gho_', 'GitHub'], ['ghu_', 'GitHub'], ['ghs_', 'GitHub'],
-    ['ghr_', 'GitHub'], ['github_pat_', 'GitHub'],
-    ['glpat-', 'GitLab'],
-    ['npm_', 'npm'],
-    ['xoxb-', 'Slack'], ['xoxp-', 'Slack'], ['xoxa-', 'Slack'], ['xoxr-', 'Slack'], ['xoxs-', 'Slack'],
-    ['sk-ant-', 'Anthropic'],
-    ['sk-proj-', 'OpenAI'],
-    ['AIza', 'Google'],
-    ['sk_live_', 'Stripe'], ['rk_live_', 'Stripe'],
-    ['hf_', 'Hugging Face'],
-    ['SG.', 'SendGrid'],
-];
-
-function tokenProvider(text) {
-    if (!text) return undefined;
-    for (const [prefix, provider] of TOKEN_PROVIDERS) {
-        if (text.includes(prefix)) return provider;
-    }
-    return undefined;
-}
-
 export function human(findings, tone) {
     if (!findings.length) return '';
     let out = tone === 'professional' ? '\n' : '\nnot very hooman.\n\n';
@@ -56,14 +29,7 @@ export function human(findings, tone) {
         const related = (f.matchedRuleIds || []).filter((id) => id !== f.ruleId);
         const identity = related.length ? `${f.ruleId} (+ ${related.join(', ')})` : f.ruleId;
         const commit = f.commit ? ` [commit ${String(f.commit).slice(0, 12)}]` : '';
-        // UT-06: a provider-token finding used to say only "a provider access
-        // token", leaving the developer to guess which credential to revoke.
-        // Name the provider in the reason; the token itself stays redacted.
-        const provider = f.ruleId === 'secret.provider-token' ? tokenProvider(f.text) : undefined;
-        const reason = provider
-            ? f.reason.replace('provider access token', `provider access token (${provider})`)
-            : f.reason;
-        out += `${f.decision.toUpperCase().padEnd(6)} ${identity}${commit}\n       ${loc}\n       ${reason}\n`;
+        out += `${f.decision.toUpperCase().padEnd(6)} ${identity}${commit}\n       ${loc}\n       ${f.reason}\n`;
         if (f.text && f.text.trim()) {
             out += `       > ${isSensitive(f) ? '[redacted]' : visible(f.text.trim())}\n`;
         }
@@ -111,13 +77,22 @@ export function jsonReport(findings, metadata = {}) {
     return JSON.stringify({ schema_version: 1, ...metadata, findings: safe }, null, 2);
 }
 
+// Built-in secret scanning is gone, but a local rule pack can still declare
+// category "secret"; findings from such a rule keep their matched text out of
+// every report, the same courtesy the built-in rules got.
 function isSensitive(finding) {
     return finding?.category === 'secret'
         || finding?.matchedRules?.some((match) => match.category === 'secret') === true;
 }
 
 // Exit codes: 0 clean, 10 blocked, 11 review required, 31 incomplete scan.
-export function exitCode(findings, profile, complete = true) {
+// An incomplete scan stops the operation only where no later guard can vouch
+// for the skipped content: on the strict profile, or when the caller is the
+// final ref boundary (failClosedIncomplete). Frictionless profiles warn and
+// continue — the reference-transaction guard still scans introduced commits
+// with failClosedIncomplete set, so the skipped content is checked before any
+// ref moves.
+export function exitCode(findings, profile, complete = true, { failClosedIncomplete = false } = {}) {
     let block = false;
     let review = false;
     for (const f of findings) {
@@ -125,7 +100,7 @@ export function exitCode(findings, profile, complete = true) {
         else if (f.decision === 'review') review = true;
     }
     if (block) return 10;
-    if (!complete) return 31;
+    if (!complete && (profile === 'strict' || failClosedIncomplete)) return 31;
     if (review && findings.some((finding) => (finding.scanProfile || profile) !== 'clean')) return 11;
     return 0;
 }

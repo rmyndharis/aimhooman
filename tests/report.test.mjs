@@ -108,19 +108,28 @@ test('exitCode: a block wins over an incomplete scan and over review', () => {
     assert.equal(exitCode([block, review], 'clean', false), 10);
 });
 
-test('exitCode: an incomplete scan without a block stops at 31', () => {
+test('exitCode: an incomplete scan stops at 31 only on strict or the final boundary', () => {
     const review = { decision: 'review' };
-    assert.equal(exitCode([], 'clean', false), 31);
+    assert.equal(exitCode([], 'clean', false), 0);
+    assert.equal(exitCode([], 'compliance', false), 0);
     assert.equal(exitCode([], 'strict', false), 31);
-    assert.equal(exitCode([review], 'clean', false), 31);
+    assert.equal(exitCode([review], 'clean', false), 0);
     assert.equal(exitCode([review], 'strict', false), 31);
+    // failClosedIncomplete keeps the reference-transaction guard vetoing an
+    // unchecked remainder on every profile.
+    assert.equal(exitCode([], 'clean', false, { failClosedIncomplete: true }), 31);
+    assert.equal(exitCode([], 'compliance', false, { failClosedIncomplete: true }), 31);
+    assert.equal(exitCode([review], 'compliance', false, { failClosedIncomplete: true }), 31);
 });
 
-test('exitCode: review becomes 11 only off clean and only when the scan is complete', () => {
+test('exitCode: review becomes 11 only off clean, even when the scan is incomplete', () => {
     const review = { decision: 'review' };
     assert.equal(exitCode([review], 'strict', true), 11);
     assert.equal(exitCode([review], 'compliance', true), 11);
     assert.equal(exitCode([review], 'clean', true), 0);
+    // Incomplete no longer masks the review exit on compliance; strict still
+    // stops at 31 first.
+    assert.equal(exitCode([review], 'compliance', false), 11);
     // A finding's own scanProfile stricter than the report profile still surfaces.
     assert.equal(exitCode([{ decision: 'review', scanProfile: 'strict' }], 'clean', true), 11);
     // A finding whose scanProfile is clean does not escalate under a strict report.
@@ -208,56 +217,6 @@ test('human report caps printed findings and signals truncation; JSON is uncappe
     const json = jsonReport(many);
     const parsed = JSON.parse(json);
     assert.equal(parsed.findings.length, 30);
-});
-
-// UT-06: a provider-token finding used to render the generic reason "A provider
-// access token must not enter Git history." even though the matched line makes
-// the provider obvious (ghp_..., xoxb-...). The developer needs the provider
-// name to revoke the right credential, so the human report names it. The raw
-// token is only read for the label and is never printed.
-test('human report names the provider for provider-token findings and still redacts', () => {
-    const providerFinding = (text) => ({
-        ...secretFinding,
-        ruleId: 'secret.provider-token',
-        matchedRuleIds: ['secret.provider-token'],
-        matchedRules: [{ ...secretFinding.matchedRules[0], ruleId: 'secret.provider-token' }],
-        reason: 'A provider access token must not enter Git history.',
-        text,
-    });
-    // Tokens assembled at runtime so this source carries no literal that trips
-    // the rule it tests.
-    const cases = [
-        ['GitHub', `ghp_${'a'.repeat(36)}`],
-        ['GitHub', `github_pat_${'a'.repeat(60)}`],
-        ['GitLab', `glpat-${'a'.repeat(20)}`],
-        ['npm', `npm_${'a'.repeat(36)}`],
-        ['Slack', `xoxb-${'a'.repeat(20)}`],
-        ['Anthropic', `sk-ant-api03-${'a'.repeat(95)}`],
-        ['OpenAI', `sk-proj-${'a'.repeat(48)}`],
-        ['Google', `AIza${'a'.repeat(35)}`],
-        ['Stripe', `sk_live_${'a'.repeat(24)}`],
-        ['Stripe', `rk_live_${'a'.repeat(24)}`],
-        ['Hugging Face', `hf_${'a'.repeat(34)}`],
-        ['SendGrid', `SG.${'a'.repeat(22)}.${'b'.repeat(43)}`],
-    ];
-    for (const [provider, token] of cases) {
-        const report = human([providerFinding(`TOKEN=${token}`)], 'professional');
-        assert.match(
-            report,
-            new RegExp(`A provider access token \\(${provider}\\) must not enter Git history\\.`),
-            `${provider} token not named`,
-        );
-        assert.doesNotMatch(report, new RegExp(token.replace(/[.]/g, '\\.')), `${provider} token leaked into the report`);
-        assert.match(report, /\[redacted\]/);
-    }
-    // A finding whose text matches no known prefix keeps the generic reason.
-    const unknown = human([providerFinding('TOKEN=zz-no-known-prefix')], 'professional');
-    assert.match(unknown, /A provider access token must not enter Git history\./);
-    assert.doesNotMatch(unknown, /access token \(/);
-    // Other rules are untouched even when their text carries a token prefix.
-    const other = human([{ ...secretFinding, text: 'see ghp_ docs' }], 'professional');
-    assert.match(other, /secret-like content/);
-    assert.doesNotMatch(other, /\(GitHub\)/);
 });
 
 // UT-08: a repeated rule (20 hits of the same secret rule) used to reprint the

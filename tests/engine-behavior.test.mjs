@@ -55,41 +55,33 @@ test('matching rules reduce to one order-independent path decision', () => {
 
 test('rule allow affects only that match and a deny still wins', () => {
     const dir = stateWithRules([
-        rule('local.dotenv', 'path', { paths: ['.env'] }),
+        rule('local.session-state', 'path', { paths: ['.claude/session.json'] }),
     ]);
     try {
         const engine = newEngine('clean', dir);
-        engine.setOverrides(['local.dotenv'], []);
-        const secret = engine.checkPaths(['.env']);
-        assert.equal(secret[0]?.decision, 'block');
-        assert.equal(secret[0]?.ruleId, 'secret.dotenv');
-        assert.deepEqual(secret[0]?.matchedRuleIds, ['local.dotenv', 'secret.dotenv']);
+        engine.setOverrides(['local.session-state'], []);
+        const allowed = engine.checkPaths(['.claude/session.json']);
+        assert.equal(allowed[0]?.decision, 'block');
+        assert.equal(allowed[0]?.ruleId, 'claude.session-state');
+        assert.deepEqual(allowed[0]?.matchedRuleIds, ['claude.session-state', 'local.session-state']);
 
-        engine.setOverrides(['.env'], ['local.dotenv']);
-        const denied = engine.checkPaths(['.env']);
+        engine.setOverrides(['.claude/session.json'], ['local.session-state']);
+        const denied = engine.checkPaths(['.claude/session.json']);
         assert.equal(denied[0]?.decision, 'block');
-        assert.equal(denied[0]?.ruleId, 'secret.dotenv');
+        assert.equal(denied[0]?.ruleId, 'local.session-state');
         assert.equal(
-            denied[0]?.matchedRules.find((match) => match.ruleId === 'local.dotenv')?.decision,
-            'block',
+            denied[0]?.matchedRules.find((match) => match.ruleId === 'claude.session-state')?.decision,
+            'allow',
         );
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
 });
 
-test('override scopes distinguish paths, rules, secrets, and unmatched path denies', () => {
+test('override scopes distinguish paths, rules, and unmatched path denies', () => {
     const engine = newEngine('clean');
-    engine.setOverrides([{ target: '.env', scope: 'path' }], []);
-    assert.equal(engine.checkPaths(['.env'])[0]?.ruleId, 'secret.dotenv');
-
-    engine.setOverrides([{ target: '.env', scope: 'secret-path' }], []);
-    assert.deepEqual(engine.checkPaths(['.env']), []);
-
-    // A secret-path allow is scoped to secret-category rules only: it must not
-    // also suppress a non-secret rule that happens to match the same path.
-    engine.setOverrides([{ target: 'AGENTS.md', scope: 'secret-path' }], []);
-    assert.ok(engine.checkPaths(['AGENTS.md']).length, 'non-secret rule still fires under a secret-path allow');
+    engine.setOverrides([{ target: '.claude/session.json', scope: 'path' }], []);
+    assert.deepEqual(engine.checkPaths(['.claude/session.json']), []);
 
     engine.setOverrides([], [{ target: 'blocked.txt', scope: 'path' }]);
     assert.equal(engine.checkPaths(['blocked.txt'])[0]?.ruleId, 'override.path-deny');
@@ -101,6 +93,28 @@ test('override scopes distinguish paths, rules, secrets, and unmatched path deni
     engine.setOverrides([], [{ target: 'generic.agent-instructions', scope: 'rule' }]);
     assert.equal(engine.checkPaths(['AGENTS.md'])[0]?.decision, 'block');
     assert.deepEqual(engine.checkPaths(['generic.agent-instructions']), []);
+});
+
+// Built-in secret scanning is gone, but a local pack can still declare
+// category "secret" (its findings stay redacted in reports). Such a rule is
+// the operator's own policy, so the ordinary override scopes apply to it.
+test('a local secret-category rule follows the ordinary override scopes', () => {
+    const dir = stateWithRules([{
+        ...rule('local.acme-token', 'code', { content: ['acme-token'] }),
+        category: 'secret',
+    }]);
+    try {
+        const engine = newEngine('clean', dir);
+        assert.equal(engine.checkContent('app.js', 'const t = "acme-token"')[0]?.category, 'secret');
+
+        engine.setOverrides([{ target: 'app.js', scope: 'path' }], []);
+        assert.deepEqual(engine.checkContent('app.js', 'const t = "acme-token"'), []);
+
+        engine.setOverrides([{ target: 'local.acme-token', scope: 'rule' }], []);
+        assert.deepEqual(engine.checkContent('app.js', 'const t = "acme-token"'), []);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test('review-scoped allows require the exact reviewed blob object', () => {

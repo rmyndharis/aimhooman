@@ -52,10 +52,10 @@ export function scanEntries(repo, engine, entries, options = {}) {
     }
 
     // Oversized files: probe the first 8 KB to separate binary from text.
-    // A binary file (PSD, WOFF, PNG) can't hide text-pattern secrets that
-    // the full content scan would find, so it skips as 'binary' (complete).
-    // A text file that exceeds the budget is a genuine 'size-limit' skip
-    // (incomplete) and the caller must raise the limit to cover it.
+    // A binary file (PSD, WOFF, PNG) holds no text lines the content rules
+    // could match, so it skips as 'binary' (complete). A text file that
+    // exceeds the budget is a genuine 'size-limit' skip (incomplete) and the
+    // caller must raise the limit to cover it.
     // Cap probing at 16 MiB: cat-file --batch reads the full blob into memory,
     // so probing a 500 MB file just to check for NULs is wasteful. Files above
     // the cap are classified as size-limit without probing.
@@ -100,25 +100,18 @@ export function scanEntries(repo, engine, entries, options = {}) {
         // Binary detection still reads the blob. Count every examined byte so
         // later commits cannot reset the total budget merely by using NUL data.
         stats.bytes_scanned += blob.length;
-        let matched;
         if (isBinary(blob)) {
+            // Content rules match text lines, so a binary blob carries nothing
+            // they could fire on. Skipping it loses no coverage: the skip is
+            // recorded as 'binary', which does not mark the scan incomplete.
             increment(stats.skipped, 'binary');
             appendPath(stats.skippedPaths, 'binary', entry.path, blob.length);
-            // Binary classification only skips text-oriented policy rules. Secret
-            // signatures are ASCII byte sequences, so latin1 preserves a
-            // one-byte-to-one-code-unit view and keeps the existing byte limits.
-            // Stripping NULs is what defeats hiding credential material behind
-            // them: one injected NUL breaks a signature, and a multi-byte
-            // encoding like UTF-16 injects one per character.
-            matched = engine.checkContent(entry.path, blob.toString('latin1').replace(/\0/g, ''), {
-                categories: ['secret'],
-            });
-        } else {
-            stats.files_scanned += 1;
-            const ranges = lineRanges.get(entry.path);
-            matched = engine.checkContent(entry.path, blob.toString('utf8'),
-                ranges && ranges.length ? { lineRanges: ranges } : {});
+            continue;
         }
+        stats.files_scanned += 1;
+        const ranges = lineRanges.get(entry.path);
+        const matched = engine.checkContent(entry.path, blob.toString('utf8'),
+            ranges && ranges.length ? { lineRanges: ranges } : {});
         stats.findings_total += matched.length;
         for (const finding of matched) {
             if (findings.length >= limits.maxFindings) continue;
@@ -253,8 +246,8 @@ function isBinary(buffer) {
 //
 // Entries without commit/parents (tracked snapshots, staged views, root
 // commits) are omitted from the map; the caller treats a missing key as "scan
-// the whole blob" — the safe side for a secret scanner is to scan MORE, not
-// less, so a failure to compute hunks falls back to the pre-W4 behaviour.
+// the whole blob" — the safe side is to scan MORE, not less, so a failure to
+// compute hunks falls back to the pre-W4 behaviour.
 function collectLineRanges(repo, entries) {
     // Group text-candidate entries by their first parent to batch the diffs.
     // Key by `${commit}\0${parent}` so a merge with multiple parents produces

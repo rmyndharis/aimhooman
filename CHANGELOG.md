@@ -5,6 +5,66 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-19
+
+This release narrows aimhooman to the job it does better than anyone else:
+keeping AI tooling residue and attribution out of Git history. Secret
+scanning leaves the product — dedicated tools do it better, and
+`docs/secrets.md` shows the gitleaks setup that replaces it. Commits also
+get less brittle: a scan that cannot cover everything now warns on the
+frictionless profiles instead of stopping the first hook, while the final
+reference-transaction guard keeps its veto on every profile.
+
+### Removed
+
+- **Breaking: built-in secret scanning is gone.** `rules/secrets.json` and
+  the four secret path rules (`secret.dotenv`, `secret.private-key`,
+  `secret.aws-credentials`, `secret.claude-credentials`) no longer ship, so
+  `.env` files, private keys, and provider tokens are not detected by
+  aimhooman anymore. Pair it with gitleaks — `docs/secrets.md` has the
+  pre-commit and GitHub Actions setup. The agent-facing instruction files
+  still tell agents not to commit secrets; only the mechanical scanner
+  moved out.
+- `init --grandfather-secrets` and the `--scope secret-path` override are
+  gone with the scanner. Legacy `secret-path` entries in an existing
+  `overrides.json` are dropped on load with a warning naming the file.
+  A secret already in history needs rotation and a gitleaks run, not
+  aimhooman.
+- With no rule reading binary content, an oversized binary file no longer
+  makes a scan incomplete; oversized text still does.
+
+### Added
+
+- `aimhooman init --gitignore`: opt-in that also writes the managed
+  AI-artifact pattern block into the worktree `.gitignore`, so a team can
+  commit it and share the ignore set across clones. The default stays
+  local (`.git/info/exclude`); `status` shows the block and `uninstall`
+  removes it. Gitignore matching is case-sensitive.
+- `docs/ai-artifacts.gitignore` and `docs/catalog.md`: the detection
+  catalog as a standalone resource, generated from `rules/*.json` by
+  `npm run sync:catalog` and kept honest in CI. Just want the ignore
+  list? Copy the first file.
+- `.pre-commit-hooks.yaml`: run aimhooman from the pre-commit.com
+  framework (`aimhooman check --staged`).
+- `action.yml`: a composite GitHub Action that runs
+  `aimhooman check --range <base>...<head>` in CI. See
+  `docs/integrations.md` for it, the pre-commit.com config, and honest
+  husky/lint-staged notes.
+- Docs gained `docs/policy.md`, `docs/cli-reference.md`, `docs/faq.md`,
+  `docs/integrations.md`, and `docs/secrets.md`.
+
+### Changed
+
+- An incomplete scan (an oversized file, a budget hit, an unloadable
+  local rule pack) now warns and continues on `clean`/`compliance` in
+  `check`, `fix`, `pre-commit`, and `commit-msg` instead of stopping at
+  exit 31. `strict` stays fail-closed, and so does the
+  reference-transaction guard on every profile — the stop moved from the
+  first hook to the final ref boundary, which `--no-verify` cannot skip.
+- The README slimmed from 481 to 162 lines. The detail it carried —
+  versioned team policy, overrides, command and exit-code references,
+  the FAQ — moved into `docs/` unchanged in substance.
+
 ## [0.2.0] - 2026-07-19
 
 This release works through the findings of the cross-ecosystem field test

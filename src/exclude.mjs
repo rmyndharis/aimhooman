@@ -8,8 +8,8 @@ const END = '# <<< aimhooman managed excludes';
 
 // Local AI residue kept out of `git status`. Deriving this list from the rule
 // catalog prevents the prevention layer from drifting behind enforcement. We
-// intentionally exclude only unambiguous tooling state/settings: secret and
-// review-required rules must remain visible to users.
+// intentionally exclude only unambiguous tooling state/settings: review-
+// required and policy rules must remain visible to users.
 const AUTO_EXCLUDE_CATEGORIES = new Set(['ephemeral-state', 'local-settings']);
 
 export function patternsForRules(rules) {

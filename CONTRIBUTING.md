@@ -31,9 +31,8 @@ npm run verify    # schemas, workflows, dead code, coverage, package, installed 
 ## Adding a rule
 
 Rules live in `rules/` as JSON arrays: `paths.json` (staged paths),
-`attribution.json` (commit-message lines), `markers.json` (staged content),
-`secrets.json` (high-confidence secret patterns). Each
-rule has the shape:
+`attribution.json` (commit-message lines), `markers.json` (staged content).
+Each rule has the shape:
 
 ```json
 {

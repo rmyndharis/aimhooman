@@ -94,4 +94,6 @@ const ids = new Set(rules.map((rule) => rule.id));
 if (ids.size !== rules.length) throw new Error('built-in rule IDs are not unique');
 loadProjectPolicy(ROOT);
 
-console.log(`validated ${tracked.filter((path) => path.endsWith('.json')).length} JSON files, ${rules.length} rules, source syntax, and version ${pkg.version}`);
+execFileSync(process.execPath, ['scripts/sync-catalog.mjs', '--check'], { cwd: ROOT });
+
+console.log(`validated ${tracked.filter((path) => path.endsWith('.json')).length} JSON files, ${rules.length} rules, source syntax, catalog sync, and version ${pkg.version}`);

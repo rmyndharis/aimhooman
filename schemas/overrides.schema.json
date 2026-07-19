@@ -14,7 +14,10 @@
             "required": ["target"],
             "properties": {
                 "target": { "type": "string", "minLength": 1 },
-                "scope": { "enum": ["path", "rule", "secret-path"] },
+                "scope": {
+                    "enum": ["path", "rule"],
+                    "$comment": "v0.3.0 retired the secret-path scope with built-in secret scanning; the loader drops legacy entries with a warning instead of failing the file."
+                },
                 "reason": { "type": "string" },
                 "actor": { "type": "string" },
                 "at": { "type": "string", "format": "date-time" }

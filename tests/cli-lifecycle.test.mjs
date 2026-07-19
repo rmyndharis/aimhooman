@@ -16,6 +16,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inspectExclude, managedPatterns, patternsForRules } from '../src/exclude.mjs';
+import { loadRules } from '../src/rules.mjs';
 
 const CLI = fileURLToPath(new URL('../bin/aimhooman.mjs', import.meta.url));
 const ATTRIBUTION = 'Fix the parser\n\nCo-authored-by: Claude <noreply@anthropic.com>\n';
@@ -103,7 +105,7 @@ test('main commands reject unknown options before doing work', async (t) => {
             ['commitmsg', message, '--unknown'],
             ['init', '--unknown'],
             ['status', '--unknown'],
-            ['explain', 'secret.dotenv', '--unknown'],
+            ['explain', 'claude.session-state', '--unknown'],
             ['allow', 'README.md', '--unknown'],
             ['deny', 'README.md', '--unknown'],
             ['override', 'list', '--unknown'],
@@ -160,7 +162,7 @@ test('repeatable-looking singleton flags and conflicting modes are rejected', as
             ['audit', '--staged'],
             ['scan', '--commit', 'HEAD'],
             ['init', '--global', '--profile', 'clean'],
-            ['init', '--global', '--grandfather-secrets'],
+            ['init', '--global', '--gitignore'],
             ['override', 'reset', '--allow', '--deny'],
             ['policy-review', '--staged', '--transition', 'HEAD'],
             ['uninstall', '--global', '--purge-state'],
@@ -193,107 +195,172 @@ test('init output names the local ignore note and the undo command', () => {
     }
 });
 
-test('init --grandfather-secrets allows already-tracked secret fixtures and still blocks new ones', () => {
-    // UT-03a: a repository that already tracks secret-looking fixtures (the
-    // OpenSSL scenario) would see every commit touching one blocked. The flag
-    // writes a --scope secret-path allow per pre-existing finding; files added
-    // after init keep the default posture.
+test('init --gitignore writes the managed block into .gitignore and .git/info/exclude', () => {
     const repo = createRepo();
     try {
-        mkdirSync(join(repo.root, 'tests', 'certs'), { recursive: true });
-        writeFileSync(
-            join(repo.root, 'tests', 'certs', 'old-key.pem'),
-            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
-        );
-        git(repo, ['add', 'tests/certs/old-key.pem']);
-        git(repo, ['commit', '--no-verify', '-q', '-m', 'Import fixtures']);
-
-        const initialized = run(repo, ['init', '--grandfather-secrets']);
+        const gitignore = join(repo.root, '.gitignore');
+        writeFileSync(gitignore, 'node_modules/\n');
+        const initialized = run(repo, ['init', '--gitignore']);
         assert.equal(initialized.status, 0, initialized.stderr);
-        assert.match(initialized.stdout, /grandfathered 1 tracked secret path\(s\)/);
+        assert.match(initialized.stdout, /wrote AI-artifact ignores to \.gitignore — commit it to share them with every clone/);
+        assert.match(initialized.stdout, /case-sensitive/);
 
-        const overrides = JSON.parse(readFileSync(join(stateDir(repo), 'overrides.json'), 'utf8'));
-        const grandfathered = overrides.allow.filter((entry) => entry.scope === 'secret-path');
-        assert.deepEqual(grandfathered.map((entry) => entry.target), ['tests/certs/old-key.pem']);
-        assert.match(grandfathered[0].reason, /grandfathered at init/);
+        // Both files carry the same catalog-derived block; the user's own
+        // .gitignore lines are left alone beside it.
+        const patterns = patternsForRules(loadRules());
+        assert.deepEqual(inspectExclude(gitignore, patterns), { installed: true, current: true, missing: [] });
+        assert.deepEqual(inspectExclude(gitPath(repo, 'info/exclude'), patterns), { installed: true, current: true, missing: [] });
+        assert.deepEqual(managedPatterns(gitignore), patterns);
+        assert.match(readFileSync(gitignore, 'utf8'), /^node_modules\/$/m);
 
-        // A commit touching the grandfathered path now passes the guard.
-        writeFileSync(
-            join(repo.root, 'tests', 'certs', 'old-key.pem'),
-            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\nAAAA\n-----END PRIVATE KEY-----\n',
-        );
-        git(repo, ['add', 'tests/certs/old-key.pem']);
-        git(repo, ['commit', '-q', '-m', 'Rotate fixture bytes']);
-
-        // A NEW file with the same secret content is still blocked.
-        writeFileSync(
-            join(repo.root, 'new-key.pem'),
-            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
-        );
-        git(repo, ['add', 'new-key.pem']);
-        const blocked = spawnSync('git', ['commit', '-m', 'Add a new key'], {
-            cwd: repo.root,
-            env: repo.env,
-            encoding: 'utf8',
-        });
-        assert.notEqual(blocked.status, 0, blocked.stdout + blocked.stderr);
-        assert.match(blocked.stderr, /secret\.private-key-content/);
-        assert.equal(git(repo, ['log', '-1', '--format=%s']), 'Rotate fixture bytes');
+        // The file predates us, so the record says we did not create it.
+        const config = JSON.parse(readFileSync(join(stateDir(repo), 'config.json'), 'utf8'));
+        assert.deepEqual(config.gitignore, { enabled: true, created: false });
     } finally {
         cleanup(repo);
     }
 });
 
-test('init --grandfather-secrets outside a repository fails like a plain init', () => {
-    const root = mkdtempSync(join(tmpdir(), 'aim-lifecycle-norepo-'));
-    const home = mkdtempSync(join(tmpdir(), 'aim-lifecycle-home-'));
-    const repo = {
-        root,
-        home,
-        env: {
-            ...process.env,
-            HOME: home,
-            XDG_CONFIG_HOME: join(home, '.config'),
-            GIT_CONFIG_NOSYSTEM: '1',
-            GIT_TERMINAL_PROMPT: '0',
-        },
-    };
+test('init --gitignore records created when it introduces the .gitignore', () => {
+    const repo = createRepo();
     try {
-        const result = run(repo, ['init', '--grandfather-secrets']);
-        assert.equal(result.status, 30, result.stderr);
-        assert.match(result.stderr, /not a git repository/);
+        assert.equal(existsSync(join(repo.root, '.gitignore')), false);
+        const initialized = run(repo, ['init', '--gitignore']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        const config = JSON.parse(readFileSync(join(stateDir(repo), 'config.json'), 'utf8'));
+        assert.deepEqual(config.gitignore, { enabled: true, created: true });
     } finally {
         cleanup(repo);
     }
 });
 
-test('init --grandfather-secrets seeds the allow in a repository with submodule pins', () => {
-    // Companion to the gitx regression test: the OpenSSL field run showed the
-    // grandfather scan dying on a promisor fetch for gitlink OIDs and seeding
-    // zero allows. Here the gitlink simply rides along while the fixture gets
-    // its allow; the crash itself is pinned in tests/gitx.test.mjs.
+test('re-init refreshes the .gitignore block idempotently and a plain re-init keeps it', () => {
+    const repo = createRepo();
+    const gitignore = join(repo.root, '.gitignore');
+    const config = () => JSON.parse(readFileSync(join(stateDir(repo), 'config.json'), 'utf8'));
+    try {
+        const initialized = run(repo, ['init', '--gitignore']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        const first = readFileSync(gitignore, 'utf8');
+
+        const again = run(repo, ['init', '--gitignore']);
+        assert.equal(again.status, 0, again.stderr);
+        assert.equal(readFileSync(gitignore, 'utf8'), first);
+
+        // User lines around the block survive a refresh; the block is written
+        // once, in canonical form (user lines above, block last).
+        writeFileSync(gitignore, `top-line/\n${first}bottom-line/\n`);
+        const refreshed = run(repo, ['init', '--gitignore']);
+        assert.equal(refreshed.status, 0, refreshed.stderr);
+        const after = readFileSync(gitignore, 'utf8');
+        assert.match(after, /^top-line\/$/m);
+        assert.match(after, /^bottom-line\/$/m);
+        assert.equal(after.match(/>>> aimhooman managed excludes/g).length, 1);
+        assert.deepEqual(config().gitignore, { enabled: true, created: true });
+
+        // A plain re-init refreshes per the stored record; it must not drop the
+        // block a teammate may already have committed.
+        const plain = run(repo, ['init']);
+        assert.equal(plain.status, 0, plain.stderr);
+        assert.equal(readFileSync(gitignore, 'utf8'), after);
+        assert.deepEqual(config().gitignore, { enabled: true, created: true });
+    } finally {
+        cleanup(repo);
+    }
+});
+
+test('a failed init --gitignore restores or removes the .gitignore it touched', () => {
+    // The failure injection mirrors the exclude rollback tests: malformed
+    // managed markers in .git/info/exclude throw on the core exclude write,
+    // which runs after the .gitignore block was written.
+    const createdRepo = createRepo();
+    const existingRepo = createRepo();
+    try {
+        for (const [repo, prior] of [[createdRepo, null], [existingRepo, 'user-pattern/\n']]) {
+            const gitignore = join(repo.root, '.gitignore');
+            const exclude = gitPath(repo, 'info/exclude');
+            if (prior !== null) writeFileSync(gitignore, prior);
+            mkdirSync(dirname(exclude), { recursive: true });
+            writeFileSync(exclude, '# >>> aimhooman managed excludes (do not edit by hand)\nmissing end marker\n');
+
+            const failed = run(repo, ['init', '--gitignore']);
+            assert.equal(failed.status, 30, failed.stderr);
+            assert.match(failed.stderr, /prior files were restored/);
+            assert.match(failed.stderr, /markers are malformed/);
+            if (prior === null) {
+                assert.equal(existsSync(gitignore), false, 'the .gitignore aimhooman created must be removed');
+            } else {
+                assert.equal(readFileSync(gitignore, 'utf8'), prior);
+            }
+            assert.match(readFileSync(exclude, 'utf8'), /missing end marker/);
+            assert.equal(existsSync(join(stateDir(repo), 'config.json')), false);
+        }
+    } finally {
+        cleanup(createdRepo, existingRepo);
+    }
+});
+
+test('uninstall strips the .gitignore block and deletes the file only when aimhooman created it', () => {
+    const created = createRepo();
+    const appended = createRepo();
+    const existing = createRepo();
+    const plain = createRepo('clean');
+    try {
+        // created=true and the file only ever held our block: it goes with it.
+        let initialized = run(created, ['init', '--gitignore']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        let uninstalled = run(created, ['uninstall']);
+        assert.equal(uninstalled.status, 0, uninstalled.stdout + uninstalled.stderr);
+        assert.equal(existsSync(join(created.root, '.gitignore')), false);
+
+        // created=true, but the user added a line after install: the file stays.
+        initialized = run(appended, ['init', '--gitignore']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        const appendedGitignore = join(appended.root, '.gitignore');
+        writeFileSync(appendedGitignore, readFileSync(appendedGitignore, 'utf8') + 'their-own/\n');
+        uninstalled = run(appended, ['uninstall']);
+        assert.equal(uninstalled.status, 0, uninstalled.stdout + uninstalled.stderr);
+        assert.equal(readFileSync(appendedGitignore, 'utf8'), 'their-own/\n');
+
+        // created=false: a user-authored file keeps every line but the block.
+        const gitignore = join(existing.root, '.gitignore');
+        writeFileSync(gitignore, 'node_modules/\n');
+        initialized = run(existing, ['init', '--gitignore']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        uninstalled = run(existing, ['uninstall']);
+        assert.equal(uninstalled.status, 0, uninstalled.stdout + uninstalled.stderr);
+        assert.equal(readFileSync(gitignore, 'utf8'), 'node_modules/\n');
+
+        // No opt-in recorded: uninstall leaves the worktree .gitignore alone.
+        writeFileSync(join(plain.root, '.gitignore'), 'user-only/\n');
+        uninstalled = run(plain, ['uninstall']);
+        assert.equal(uninstalled.status, 0, uninstalled.stdout + uninstalled.stderr);
+        assert.equal(readFileSync(join(plain.root, '.gitignore'), 'utf8'), 'user-only/\n');
+    } finally {
+        cleanup(created, appended, existing, plain);
+    }
+});
+
+test('status reports the .gitignore block state when the opt-in is recorded', () => {
     const repo = createRepo();
     try {
-        writeFileSync(
-            join(repo.root, 'old-key.pem'),
-            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
-        );
-        git(repo, ['add', 'old-key.pem']);
-        execFileSync('git', [
-            'update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},vendor/sub`,
-        ], { cwd: repo.root, env: repo.env });
-        git(repo, ['commit', '--no-verify', '-q', '-m', 'Import fixtures and a submodule pin']);
+        let status = run(repo, ['status']);
+        assert.equal(status.status, 0, status.stderr);
+        assert.doesNotMatch(status.stdout, /^gitignore:/m);
 
-        const initialized = run(repo, ['init', '--grandfather-secrets']);
+        const initialized = run(repo, ['init', '--gitignore']);
         assert.equal(initialized.status, 0, initialized.stderr);
-        assert.doesNotMatch(initialized.stderr, /grandfather scan failed/);
-        assert.match(initialized.stdout, /grandfathered 1 tracked secret path\(s\)/);
+        status = run(repo, ['status']);
+        assert.equal(status.status, 0, status.stderr);
+        assert.match(status.stdout, /gitignore:\s+current/);
 
-        const overrides = JSON.parse(readFileSync(join(stateDir(repo), 'overrides.json'), 'utf8'));
-        assert.deepEqual(
-            overrides.allow.filter((entry) => entry.scope === 'secret-path').map((entry) => entry.target),
-            ['old-key.pem'],
-        );
+        // Drop one pattern from the block by hand: reported out of date.
+        const gitignore = join(repo.root, '.gitignore');
+        const patterns = patternsForRules(loadRules());
+        writeFileSync(gitignore, readFileSync(gitignore, 'utf8').replace(`${patterns[0]}\n`, ''));
+        status = run(repo, ['status']);
+        assert.equal(status.status, 0, status.stderr);
+        assert.match(status.stdout, /gitignore:\s+out of date \(run: aimhooman init\)/);
     } finally {
         cleanup(repo);
     }
@@ -598,11 +665,18 @@ test('instruction review binds the exact staged blob and rejects absent, changed
         )));
         assert.match(checked.stderr, /all conflict stages were scanned/);
 
-        const secret = hashBlob(`aws_secret_access_key = ${'a'.repeat(40)}\n`);
+        mkdirSync(join(stateDir(repo), 'rules'), { recursive: true });
+        writeFileSync(join(stateDir(repo), 'rules/local.json'), JSON.stringify([{
+            id: 'local.blocked-content', version: 1, provider: 'local', category: 'custom', kind: 'code',
+            match: { content: ['BLOCKED-CONTENT'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'blocked content',
+        }]));
+        const blocked = hashBlob('BLOCKED-CONTENT\n');
         execFileSync('git', ['update-index', '--index-info'], {
             cwd: repo.root,
             env: repo.env,
-            input: `100644 ${base} 1\tAGENTS.md\n100644 ${ours} 2\tAGENTS.md\n100644 ${secret} 3\tAGENTS.md\n`,
+            input: `100644 ${base} 1\tAGENTS.md\n100644 ${ours} 2\tAGENTS.md\n100644 ${blocked} 3\tAGENTS.md\n`,
         });
         checked = run(repo, ['check', '--staged', '--json']);
         assert.equal(checked.status, 10, checked.stderr);
@@ -610,7 +684,7 @@ test('instruction review binds the exact staged blob and rejects absent, changed
         assert.equal(report.complete, false);
         assert.equal(report.stats.entries, 3);
         assert.ok(report.findings.some((finding) => (
-            finding.objectId === secret && finding.matchedRuleIds.includes('secret.aws-key-content')
+            finding.objectId === blocked && finding.matchedRuleIds.includes('local.blocked-content')
         )));
     } finally {
         cleanup(repo);

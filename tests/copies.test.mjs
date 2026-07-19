@@ -25,7 +25,6 @@ const providerTerms = new Map([
     ['playwright-mcp', '.playwright-mcp'],
     ['remember', '.remember'],
     ['superpowers', '.superpowers'],
-    ['aws', '.aws'],
 ]);
 
 test('adapter copies contain only their wrapper and the ordered canonical ruleset', () => {

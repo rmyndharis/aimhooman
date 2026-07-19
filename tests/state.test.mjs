@@ -65,6 +65,37 @@ test('missing local config defaults clean but malformed local config fails close
     }
 });
 
+test('the gitignore opt-in round-trips and validates its shape', () => {
+    const root = mkdtempSync(join(tmpdir(), 'aim-gitignore-config-'));
+    const state = join(root, 'state');
+    const file = join(state, 'config.json');
+    try {
+        saveConfig(state, { profile: 'clean', gitignore: { enabled: true, created: true } });
+        assert.deepEqual(loadConfig(state).gitignore, { enabled: true, created: true });
+        assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).gitignore, { enabled: true, created: true });
+
+        // A disabled record normalizes away: absent and disabled are one spelling.
+        saveConfig(state, { profile: 'clean', gitignore: { enabled: false, created: false } });
+        assert.equal(loadConfig(state).gitignore, undefined);
+        assert.equal(JSON.parse(readFileSync(file, 'utf8')).gitignore, undefined);
+        saveConfig(state, { profile: 'clean' });
+        assert.equal(loadConfig(state).gitignore, undefined);
+
+        for (const [value, pattern] of [
+            [true, /gitignore must be an object/],
+            [{}, /gitignore\.enabled must be a boolean/],
+            [{ enabled: true }, /gitignore\.created must be a boolean/],
+            [{ enabled: true, created: false, extra: 1 }, /gitignore has unsupported field: extra/],
+        ]) {
+            writeFileSync(file, JSON.stringify({ profile: 'clean', gitignore: value }));
+            assert.throws(() => loadConfig(state), pattern, JSON.stringify(value));
+            assert.throws(() => saveConfig(state, { profile: 'clean', gitignore: value }), pattern);
+        }
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('missing overrides are empty but corrupt or unreadable overrides are errors', () => {
     const root = mkdtempSync(join(tmpdir(), 'aim-overrides-'));
     const state = join(root, 'state');
@@ -142,11 +173,31 @@ test('override state accepts legacy entries but rejects unsupported schema field
         writeFileSync(file, JSON.stringify({ allow: [{ target: 'README.md' }], deny: [] }));
         assert.equal(loadOverrides(state).allow[0].scope, undefined);
 
+        // v0.3.0 retired the secret-path scope with built-in secret scanning:
+        // legacy entries drop with a one-line stderr warning naming the file
+        // instead of failing the load, and the rest of the file survives.
         writeFileSync(file, JSON.stringify({
-            allow: [],
-            deny: [{ target: '.env', scope: 'secret-path' }],
+            allow: [
+                { target: '.env', scope: 'secret-path' },
+                { target: 'README.md', scope: 'path' },
+            ],
+            deny: [{ target: '.aws/credentials', scope: 'secret-path' }],
         }));
-        assert.throws(() => loadOverrides(state), /secret-path is only valid for allow/);
+        const writes = [];
+        const originalWrite = process.stderr.write.bind(process.stderr);
+        process.stderr.write = (chunk) => { writes.push(String(chunk)); return true; };
+        let migrated;
+        try {
+            migrated = loadOverrides(state);
+        } finally {
+            process.stderr.write = originalWrite;
+        }
+        assert.deepEqual(migrated.allow, [{ target: 'README.md', scope: 'path' }]);
+        assert.deepEqual(migrated.deny, []);
+        assert.equal(writes.length, 1);
+        assert.match(writes[0], /dropped 2 override\(s\) with retired scope "secret-path"/);
+        assert.ok(writes[0].includes(file), 'warning names the overrides file');
+
         writeFileSync(file, JSON.stringify({
             allow: [],
             deny: [{ target: '.aimhooman.json', scope: 'policy-migration' }],

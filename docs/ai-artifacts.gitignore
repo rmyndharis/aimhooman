@@ -1,0 +1,63 @@
+# AI tooling artifacts for .gitignore
+#
+# These patterns cover the session and state files that AI coding tools
+# write into a working tree: transcripts, history, caches, logs, and local
+# settings. aimhooman keeps them out of commits. Copy the lines below into
+# your .gitignore as-is. Matching follows normal gitignore rules and is
+# case-sensitive. The machine-enforced version of this list lives in the
+# aimhooman CLI, which blocks these paths at commit time; this file is the
+# standalone copy for anyone who wants the same coverage without the hooks.
+#
+# Generated from rules/*.json by `npm run sync:catalog`; do not edit by hand.
+# `npm run check` fails when this file is stale.
+
+# >>> aimhooman:catalog-start
+**/.agent/**
+**/.aider.*
+**/.claude.json
+**/.claude/history*
+**/.claude/logs/**
+**/.claude/projects/**
+**/.claude/session*.json
+**/.claude/settings.local.json
+**/.claude/shell-snapshots/**
+**/.claude/statsig/**
+**/.claude/todos/**
+**/.codex/history*
+**/.codex/log/**
+**/.codex/logs/**
+**/.codex/sessions/**
+**/.continue/sessions/**
+**/.copilot/**
+**/.cursor/chats/**
+**/.cursor/logs/**
+**/.cursor/session*
+**/.playwright-mcp/**
+**/.remember/**
+**/.specstory/**
+**/.superpowers/**
+.agent/**
+.aider.*
+.claude.json
+.claude/history*
+.claude/logs/**
+.claude/projects/**
+.claude/session*.json
+.claude/settings.local.json
+.claude/shell-snapshots/**
+.claude/statsig/**
+.claude/todos/**
+.codex/history*
+.codex/log/**
+.codex/logs/**
+.codex/sessions/**
+.continue/sessions/**
+.copilot/**
+.cursor/chats/**
+.cursor/logs/**
+.cursor/session*
+.playwright-mcp/**
+.remember/**
+.specstory/**
+.superpowers/**
+# <<< aimhooman:catalog-end

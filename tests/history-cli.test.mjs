@@ -137,9 +137,9 @@ test('range scans retain forbidden paths and code markers that later disappear',
         const base = addCommit(repo, ['README.md'], 'base');
         initialize(repo, 'strict');
 
-        write(repo, '.env', 'TOKEN=temporary\n');
-        const addedSecret = addCommit(repo, ['.env'], 'temporarily add environment', { force: true });
-        git(repo, ['rm', '-q', '--', '.env']);
+        write(repo, '.claude.json', 'TOKEN=temporary\n');
+        const addedConfig = addCommit(repo, ['.claude.json'], 'temporarily add environment', { force: true });
+        git(repo, ['rm', '-q', '--', '.claude.json']);
         git(repo, ['commit', '--no-verify', '--no-gpg-sign', '-q', '-m', 'remove environment']);
 
         write(repo, '.codex/sessions/state.json', '{}\n');
@@ -159,7 +159,7 @@ test('range scans retain forbidden paths and code markers that later disappear',
 
         const { report } = jsonScan(repo, ['--range', `${base}..HEAD`], 10);
         assert.ok(report.findings.some((finding) => (
-            finding.path === '.env' && finding.commit === addedSecret
+            finding.path === '.claude.json' && finding.commit === addedConfig
         )));
         assert.ok(report.findings.some((finding) => (
             finding.path === '.codex/sessions/state.json' && finding.commit === addedSession
@@ -231,12 +231,12 @@ test('strict CLI reports an incomplete scan when a local regex input is capped',
 test('deleting an ordinary forbidden path does not report its old path or content', () => {
     const repo = repository();
     try {
-        write(repo, '.env', 'TOKEN=old\n');
+        write(repo, '.claude.json', 'TOKEN=old\n');
         write(repo, 'src/app.js', '// ponytail: old shortcut\n');
-        const base = addCommit(repo, ['.env', 'src/app.js'], 'historical files', { force: true });
+        const base = addCommit(repo, ['.claude.json', 'src/app.js'], 'historical files', { force: true });
         initialize(repo, 'strict');
 
-        git(repo, ['rm', '-q', '--', '.env', 'src/app.js']);
+        git(repo, ['rm', '-q', '--', '.claude.json', 'src/app.js']);
         const deletion = git(repo, ['commit', '--no-verify', '--no-gpg-sign', '-q', '-m', 'remove old files']);
         const deletedCommit = git(repo, ['rev-parse', 'HEAD']);
 
@@ -256,9 +256,9 @@ test('an all-zero base scans root history and keeps an add that is later deleted
         write(repo, 'README.md', 'root\n');
         addCommit(repo, ['README.md'], 'root');
         initialize(repo, 'strict');
-        write(repo, '.env', 'TOKEN=temporary\n');
-        const introduced = addCommit(repo, ['.env'], 'add temporary file', { force: true });
-        git(repo, ['rm', '-q', '--', '.env']);
+        write(repo, '.claude.json', 'TOKEN=temporary\n');
+        const introduced = addCommit(repo, ['.claude.json'], 'add temporary file', { force: true });
+        git(repo, ['rm', '-q', '--', '.claude.json']);
         git(repo, ['commit', '--no-verify', '--no-gpg-sign', '-q', '-m', 'remove temporary file']);
 
         const zero = '0'.repeat(40);
@@ -267,10 +267,10 @@ test('an all-zero base scans root history and keeps an add that is later deleted
         assert.equal(report.range.scan_base, zero);
         assert.equal(report.range.commits_scanned, 3);
         assert.ok(report.findings.some((finding) => (
-            finding.path === '.env' && finding.commit === introduced
+            finding.path === '.claude.json' && finding.commit === introduced
         )));
         assert.ok(!report.findings.some((finding) => (
-            finding.path === '.env' && finding.commit !== introduced
+            finding.path === '.claude.json' && finding.commit !== introduced
         )));
         assert.ok(report.range.head);
     } finally {
@@ -489,13 +489,13 @@ test('two-dot and three-dot ranges report their distinct scan bases', () => {
 test('--commit scans a root commit without requiring a parent', () => {
     const repo = repository();
     try {
-        write(repo, '.env', 'TOKEN=root\n');
-        const root = addCommit(repo, ['.env'], 'Generated with Codex', { force: true });
+        write(repo, '.claude.json', 'TOKEN=root\n');
+        const root = addCommit(repo, ['.claude.json'], 'Generated with Codex', { force: true });
         initialize(repo, 'strict');
 
         const { report } = jsonScan(repo, ['--commit', root], 10);
         assert.equal(report.commit, root);
-        assert.ok(report.findings.some((finding) => finding.path === '.env'));
+        assert.ok(report.findings.some((finding) => finding.path === '.claude.json'));
         assert.ok(report.findings.some((finding) => finding.category === 'ai-attribution'));
     } finally {
         cleanup(repo);
@@ -508,8 +508,8 @@ test('merge history output is deterministic and retains per-parent findings', ()
         write(repo, 'README.md', 'base\n');
         const base = addCommit(repo, ['README.md'], 'base');
         git(repo, ['checkout', '-q', '-b', 'left']);
-        write(repo, '.env', 'TOKEN=left\n');
-        const left = addCommit(repo, ['.env'], 'left change', { force: true });
+        write(repo, '.claude.json', 'TOKEN=left\n');
+        const left = addCommit(repo, ['.claude.json'], 'left change', { force: true });
         git(repo, ['checkout', '-q', '-b', 'right', base]);
         write(repo, '.codex/sessions/state.json', '{}\n');
         const right = addCommit(repo, ['.codex/sessions/state.json'], 'right change');
@@ -524,7 +524,7 @@ test('merge history output is deterministic and retains per-parent findings', ()
         const first = jsonScan(repo, ['--range', `${base}..${merge}`], 10).report;
         const second = jsonScan(repo, ['--range', `${base}..${merge}`], 10).report;
         assert.deepEqual(second, first);
-        assert.ok(first.findings.some((finding) => finding.commit === left && finding.path === '.env'));
+        assert.ok(first.findings.some((finding) => finding.commit === left && finding.path === '.claude.json'));
         assert.ok(first.findings.some((finding) => (
             finding.commit === right && finding.path === '.codex/sessions/state.json'
         )));
@@ -545,8 +545,8 @@ test('range scans preserve unusual Git path bytes represented by valid UTF-8', (
         const base = addCommit(repo, ['README.md'], 'base');
         initialize(repo, 'strict');
         const unusual = process.platform === 'win32'
-            ? 'odd unicode å and spaces/.env'
-            : 'odd å\tline\nbreak/.env';
+            ? 'odd unicode å and spaces/.claude.json'
+            : 'odd å\tline\nbreak/.claude.json';
         write(repo, unusual, 'TOKEN=unusual\n');
         const commit = addCommit(repo, [unusual], 'add unusual path', { force: true });
 
@@ -570,12 +570,12 @@ test('POSIX history keeps literal backslashes distinct from path separators', (t
         const base = addCommit(repo, ['README.md'], 'base');
         initialize(repo, 'strict');
         const sessionNearMiss = '.codex\\sessions/state.js';
-        const secretPath = 'odd\\segment/.env';
+        const blockedPath = 'odd\\segment/.claude.json';
         write(repo, sessionNearMiss, '// ponytail: verify literal backslash\n');
-        write(repo, secretPath, 'TOKEN=literal-backslash\n');
+        write(repo, blockedPath, 'TOKEN=literal-backslash\n');
         const commit = addCommit(
             repo,
-            [sessionNearMiss, secretPath],
+            [sessionNearMiss, blockedPath],
             'add literal backslash paths',
             { force: true },
         );
@@ -588,7 +588,7 @@ test('POSIX history keeps literal backslashes distinct from path separators', (t
         assert.ok(!marker.matchedRuleIds.includes('codex.session-state'));
         assert.ok(!report.findings.some((finding) => finding.path === '.codex/sessions/state.js'));
         assert.ok(report.findings.some((finding) => (
-            finding.path === secretPath && finding.commit === commit
+            finding.path === blockedPath && finding.commit === commit
         )));
     } finally {
         cleanup(repo);
@@ -691,13 +691,13 @@ test('history scanning accepts SHA-256 repositories when supported by Git', (t) 
         return;
     }
     try {
-        write(repo, '.env', 'TOKEN=sha256\n');
-        const commit = addCommit(repo, ['.env'], 'sha256 root', { force: true });
+        write(repo, '.claude.json', 'TOKEN=sha256\n');
+        const commit = addCommit(repo, ['.claude.json'], 'sha256 root', { force: true });
         initialize(repo, 'strict');
 
         const { report } = jsonScan(repo, ['--commit', commit], 10);
         assert.match(report.commit, /^[0-9a-f]{64}$/);
-        const finding = report.findings.find((candidate) => candidate.path === '.env');
+        const finding = report.findings.find((candidate) => candidate.path === '.claude.json');
         assert.match(finding.objectId, /^[0-9a-f]{64}$/);
     } finally {
         cleanup(repo);

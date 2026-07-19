@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, lstatSync, readdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, readdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
@@ -26,7 +26,6 @@ import { applyExclude, inspectExclude, managedPatterns, patternsForRules, remove
 import { effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
-import { DEFAULT_SCAN_LIMITS } from '../src/scan-session.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
 import { atomicWrite, withLock } from '../src/atomic-write.mjs';
 import { commitParents, resolveCommit } from '../src/history-scan.mjs';
@@ -113,7 +112,6 @@ function configuredEngine(profile, repo) {
             entry.scope === undefined
             || entry.scope === 'path'
             || entry.scope === 'rule'
-            || entry.scope === 'secret-path'
         ));
         engine.setOverrides(ordinary(ov.allow), ordinary(ov.deny));
     }
@@ -215,7 +213,7 @@ function emitDiagnostics(diagnostics = []) {
     }
 }
 
-function incompleteMessage(scan) {
+function incompleteMessage(scan, { blocking = true } = {}) {
     const reasons = scan.stats?.skipped || {};
     // Each count is how many items were skipped, not the limit that fired:
     // "(size-limit=1)" read as a one-byte budget. Name the noun so the number
@@ -228,14 +226,17 @@ function incompleteMessage(scan) {
     // the error, so point at that instead of misdirecting to the limits. When a
     // byte budget is what stopped the scan, name the budget: the caller whose own
     // tree outgrew it needs to raise one, and "reduce the limits" sends them the
-    // wrong way down a road they cannot leave.
+    // wrong way down a road they cannot leave. A blocking stop says "and retry";
+    // a warning names what to change so the next run covers what this one
+    // skipped — this run is already through.
+    const tail = blocking ? 'and retry' : 'so the next scan covers it';
     const budgeted = reasons['size-limit'] || reasons['total-byte-limit'];
     const hint = reasons['local-pack-error']
-        ? 'fix the reported rule pack and retry'
+        ? `fix the reported rule pack ${tail}`
         : budgeted
-            ? 'reduce the target, or raise AIMHOOMAN_MAX_FILE_BYTES / AIMHOOMAN_MAX_TOTAL_BYTES, and retry'
-            : 'reduce the target or limits and retry';
-    let message = `aimhooman: scan incomplete${skipped ? ` (skipped: ${skipped})` : ''}; ${hint}\n`;
+            ? `reduce the target, or raise AIMHOOMAN_MAX_FILE_BYTES / AIMHOOMAN_MAX_TOTAL_BYTES, ${tail}`
+            : `reduce the target or limits ${tail}`;
+    let message = `aimhooman: ${blocking ? '' : 'warning: '}scan incomplete${skipped ? ` (skipped: ${skipped})` : ''}; ${hint}\n`;
     const skippedPaths = scan.stats?.skippedPaths || {};
     const pathLines = [];
     for (const [reason, entries] of Object.entries(skippedPaths)) {
@@ -442,8 +443,12 @@ function cmdPrecommit(args) {
     if (!blocks.length) {
         if (reviews.length) process.stderr.write(human(reviews, tone()));
         if (!scan.complete) {
-            process.stderr.write(incompleteMessage(scan));
-            return 31;
+            // Strict stops on an unchecked remainder. Clean/compliance go ahead
+            // with a warning: the reference-transaction guard rescans the
+            // introduced commit before any ref moves. The clean marker stays
+            // unwritten so commit-msg does not skip its own tree scan.
+            process.stderr.write(incompleteMessage(scan, { blocking: profile === 'strict' }));
+            return profile === 'strict' ? 31 : 0;
         }
         // W5 marker dedup: record that this staged tree scanned clean so the
         // upcoming commit-msg hook can skip its duplicate tree scan. The tree
@@ -515,22 +520,25 @@ function cmdPrecommit(args) {
         );
         return 10;
     }
-    // Seven of the rules that can reach the summary above are secret rules, so it
-    // cannot name a cause without guessing wrong for a private key or an AWS
-    // credential — and it used to be the only thing printed for a block. Let the
-    // findings speak instead: human() already carries the rule id, the path, the
-    // reason and the remediation, and already redacts secret text. It labels each
-    // one BLOCK, which is the decision that unstaged the path, not a stopped
-    // commit; the summary above says what actually happened to them.
+    // The summary above cannot name a cause without guessing which rule fired,
+    // and it used to be the only thing printed for a block. Let the findings
+    // speak instead: human() already carries the rule id, the path, the reason
+    // and the remediation, and redacts secret-category text from local packs.
+    // It labels each one BLOCK, which is the decision that unstaged the path,
+    // not a stopped commit; the summary above says what actually happened to
+    // them.
     process.stderr.write(human([...blocks, ...reviews], tone()));
-    if (!scan.complete) process.stderr.write(incompleteMessage(scan));
+    // Only frictionless profiles reach the repair path (strict returned 10
+    // above), so an incomplete post-repair scan is a warning, not a stop: the
+    // reference-transaction guard rescans the introduced commit.
+    if (!scan.complete) process.stderr.write(incompleteMessage(scan, { blocking: false }));
     // Git refuses a commit with nothing staged; repair runs after git has already
     // decided otherwise, so carrying on here mints the empty commit git would
     // not. The request was to commit the artifact, not to stamp the history with
     // its message and no content.
     if (emptied) return 10;
     if (scan.complete) noticeIgnoredArtifacts(repo);
-    return scan.complete ? 0 : 31;
+    return 0;
 }
 
 function cmdCommitmsg(args) {
@@ -606,6 +614,9 @@ function cmdCommitmsg(args) {
             if (!treeScan.complete) process.stderr.write(incompleteMessage(treeScan));
             return treeCode;
         }
+        // exitCode passes an incomplete tree scan on frictionless profiles; the
+        // skip still names itself so the commit does not sail through silently.
+        if (!treeScan.complete) process.stderr.write(incompleteMessage(treeScan, { blocking: false }));
     }
     if (dispatchHooksChanged(repo, profile)) return 20;
     // Strict must fail closed on an incomplete scan: a block still wins (10),
@@ -615,7 +626,7 @@ function cmdCommitmsg(args) {
         process.stderr.write(incompleteMessage(scan));
         return findings.some((finding) => finding.decision === 'block') ? 10 : 31;
     }
-    if (!scan.complete) process.stderr.write(incompleteMessage(scan));
+    if (!scan.complete) process.stderr.write(incompleteMessage(scan, { blocking: false }));
     if (!findings.length) return 0;
     const blocks = findings.filter((finding) => finding.decision === 'block');
     if (profile === 'strict') {
@@ -792,7 +803,11 @@ function cmdRefcheck(args) {
             return expectedErrorCode(error);
         }
         emitDiagnostics(scan.diagnostics);
-        const code = exitCode(scan.findings, scan.profile, scan.complete);
+        // The reference transaction is the final boundary --no-verify cannot
+        // skip, so an incomplete scan vetoes the update on every profile, even
+        // though earlier guards let frictionless profiles through with a
+        // warning.
+        const code = exitCode(scan.findings, scan.profile, scan.complete, { failClosedIncomplete: true });
         if (code !== 0) {
             process.stderr.write(human(scan.findings, tone()));
             if (!scan.complete) process.stderr.write(incompleteMessage(scan));
@@ -889,7 +904,7 @@ function cmdCheck(args) {
     }
     else {
         process.stderr.write(human(findings, tone()));
-        if (!scan.complete) process.stderr.write(incompleteMessage(scan));
+        if (!scan.complete) process.stderr.write(incompleteMessage(scan, { blocking: scan.profile === 'strict' }));
     }
     return exitCode(findings, scan.profile, scan.complete);
 }
@@ -900,9 +915,9 @@ function cmdInit(args) {
             profile: { names: ['--profile'], type: 'string', choices: [...PROFILES] },
             global: { names: ['--global'], type: 'boolean' },
             yes: { names: ['--yes'], type: 'boolean' },
-            grandfatherSecrets: { names: ['--grandfather-secrets'], type: 'boolean' },
+            gitignore: { names: ['--gitignore'], type: 'boolean' },
         },
-        conflicts: [['profile', 'global'], ['grandfatherSecrets', 'global']],
+        conflicts: [['profile', 'global'], ['gitignore', 'global']],
         maxPositionals: 0,
     });
     if (rejectUnsupportedGit()) return 20;
@@ -1016,10 +1031,26 @@ function cmdInit(args) {
         const hookFiles = hookState.some((hook) => hook.shared)
             ? []
             : [...new Set(hookState.flatMap((hook) => [hook.path, hook.chainedPath]))];
+        // --gitignore opts the clone into the committed variant of the managed
+        // block. A plain re-init keeps a previously recorded choice instead of
+        // silently dropping a block a teammate may already have committed. The
+        // record lives in the local config: whether this clone created its
+        // .gitignore is per-clone state, never team policy.
+        let previousGitignore;
+        try {
+            previousGitignore = loadConfig(repo.stateDir).gitignore;
+        } catch {
+            // An unreadable local config is rewritten by saveConfig below, the
+            // same recovery a plain init has always had.
+            previousGitignore = undefined;
+        }
+        const gitignoreFile = join(repo.root, '.gitignore');
+        const gitignoreWanted = Boolean(options.gitignore) || Boolean(previousGitignore?.enabled);
         let snapshots = [];
         let rep;
         try {
             snapshots = [join(repo.stateDir, 'config.json'), repo.excludeFile, ...hookFiles]
+                .concat(gitignoreWanted ? [gitignoreFile] : [])
                 .map(snapshotFile);
             rep = installHooks(repo, CLI_PATH);
             const activeHooks = installedHooks(repo);
@@ -1040,11 +1071,21 @@ function cmdInit(args) {
                     : '';
                 throw new Error(`hook installation incomplete; ${cause}repository guard is not active.${remedy}`);
             }
-            saveConfig(repo.stateDir, { profile });
-            applyExclude(repo.excludeFile, patternsForRules(eng.rules));
+            const patterns = patternsForRules(eng.rules);
+            // created is sticky: once aimhooman introduced the file it stays
+            // recorded as ours, so uninstall can remove an emptied husk it made.
+            const gitignore = gitignoreWanted
+                ? { enabled: true, created: Boolean(previousGitignore?.created) || !existsSync(gitignoreFile) }
+                : undefined;
+            saveConfig(repo.stateDir, gitignore ? { profile, gitignore } : { profile });
+            // The opt-in worktree file goes first, so every later failure —
+            // including the core exclude write — rolls it back with the rest.
+            if (gitignore) applyExclude(gitignoreFile, patterns);
+            applyExclude(repo.excludeFile, patterns);
             const saved = loadConfig(repo.stateDir);
-            const excludes = inspectExclude(repo.excludeFile, patternsForRules(eng.rules));
-            if (saved.profile !== profile || !excludes.current) {
+            const excludes = inspectExclude(repo.excludeFile, patterns);
+            if (saved.profile !== profile || !excludes.current
+                || (gitignore && !inspectExclude(gitignoreFile, patterns).current)) {
                 throw new Error('post-install state verification failed');
             }
         } catch (error) {
@@ -1076,76 +1117,17 @@ function cmdInit(args) {
         console.log(`  state:    ${repo.stateDir}`);
         console.log(`  excludes: ${repo.excludeFile}`);
         console.log(`  note:     known AI artifacts are now ignored locally; see them with 'git status --ignored'`);
+        if (options.gitignore) {
+            console.log('aimhooman: wrote AI-artifact ignores to .gitignore — commit it to share them with every clone');
+            console.log('  note:     gitignore matching is case-sensitive; the commit hooks still catch case variants');
+        }
         if (rep.installed.length) console.log(`  hooks:    ${rep.installed.join(', ')}`);
         if (rep.chained.length) console.log(`  chained:  ${rep.chained.join(', ')} (existing hooks preserved)`);
         for (const warning of rep.warnings) console.log(`  warning:  ${warning}`);
         console.log('  undo:     aimhooman uninstall');
         return 0;
     }, LIFECYCLE_LOCK_OPTIONS);
-    if (code === 0 && options.grandfatherSecrets) grandfatherTrackedSecrets(repo);
     return code;
-}
-
-// --grandfather-secrets: a repository that already tracks secret-looking
-// fixtures (test certs, sample keys) would see every commit touching one
-// blocked, and allowing each path by hand does not scale. After a successful
-// init, scan the tracked tree once and write a --scope secret-path allow for
-// every path with a secret finding. The posture for NEW files is unchanged —
-// only paths found in this scan get an allow, so a secret added after init is
-// still blocked. A failed or incomplete scan never fails the init itself: the
-// guard is already active by then, so the gap is reported as a warning.
-function grandfatherTrackedSecrets(repo) {
-    let scan;
-    try {
-        // Commit-time budgets exist for latency, but a grandfather scan that
-        // stops at the default 64 MiB total or 1,000 findings silently misses
-        // fixtures in exactly the large, fixture-heavy repositories it exists
-        // for (OpenSSL tracks ~200 MiB and its 279 key files produce more
-        // than a thousand PEM findings). This is a one-shot, operator-invoked
-        // scan of the operator's own repository, so the defaults here are the
-        // same cap an env raise could reach plus a generous finding budget;
-        // the per-file budget and an explicit env override still apply.
-        scan = scanGitTarget(repo, {
-            kind: 'tracked',
-            limits: { maxTotalBytes: MAX_SCAN_LIMIT_BYTES, maxFindings: 100_000, ...scanLimits() },
-        });
-    } catch (error) {
-        console.error(`aimhooman: warning: grandfather scan failed (${error.message}); no pre-existing secret paths were allowed`);
-        return;
-    }
-    if (!scan.complete) {
-        console.error('aimhooman: warning: tracked scan was incomplete, so the grandfathered set may be partial; allow the remaining paths with --scope secret-path');
-    }
-    const paths = [...new Set(scan.findings
-        .filter((finding) => finding.category === 'secret' && finding.path)
-        .map((finding) => finding.path))].sort();
-    if (!paths.length) {
-        console.log('aimhooman: no tracked secret findings to grandfather');
-        return;
-    }
-    const { engine } = newEngineWithDiagnostics('clean', repo.stateDir);
-    const added = withLock(join(repo.stateDir, 'overrides.json.lock'), () => {
-        const ov = loadOverrides(repo.stateDir);
-        let count = 0;
-        for (const path of paths) {
-            const entry = {
-                target: path,
-                scope: 'secret-path',
-                reason: 'pre-existing tracked fixture (grandfathered at init)',
-                actor: gitConfig(repo.root, 'user.email'),
-                at: new Date().toISOString(),
-            };
-            const sameAllow = (candidate) => (
-                candidate.target === path && effectiveOverrideScope(candidate, engine) === 'secret-path'
-            );
-            if (ov.allow.some(sameAllow)) continue;
-            ov.allow = upsert(ov.allow, entry, sameAllow);
-            count += 1;
-        }
-        saveOverrides(repo.stateDir, ov);
-        return count;
-    });
-    console.log(`aimhooman: grandfathered ${added} tracked secret path(s) with --scope secret-path allows; new files with secrets are still blocked`);
 }
 
 function cmdStatus(args) {
@@ -1189,6 +1171,24 @@ function cmdStatus(args) {
         excludeError = e.message;
         excludes = { current: false, installed: false };
     }
+    // The committed variant is reported only when the local config records the
+    // opt-in; anything else in a worktree .gitignore is the user's own file.
+    let gitignoreRecord;
+    try {
+        gitignoreRecord = loadConfig(repo.stateDir).gitignore;
+    } catch {
+        gitignoreRecord = undefined;
+    }
+    let gitignoreExcludes;
+    let gitignoreError = null;
+    if (gitignoreRecord?.enabled) {
+        try {
+            gitignoreExcludes = inspectExclude(join(repo.root, '.gitignore'), patternsForRules(engine.rules));
+        } catch (e) {
+            gitignoreError = e.message;
+            gitignoreExcludes = { current: false, installed: false };
+        }
+    }
     // The pre-commit and reference-transaction guards resolve the policy from
     // the index, so the staged profile is what is actually enforced. Report it
     // first; the worktree file is shown alongside so an edit that has not been
@@ -1215,6 +1215,9 @@ function cmdStatus(args) {
     console.log(`rules:    ${builtin} built-in${local ? ` + ${local} local` : ''}`);
     console.log(`overrides: ${overrides.allow.length} allow, ${overrides.deny.length} deny`);
     console.log(`excludes: ${excludeError ? `unknown (malformed markers: ${excludeError}; run: aimhooman init)` : excludes.current ? 'current' : excludes.installed ? 'out of date (run: aimhooman init)' : 'not installed (run: aimhooman init)'}`);
+    if (gitignoreRecord?.enabled) {
+        console.log(`gitignore: ${gitignoreError ? `unknown (malformed markers: ${gitignoreError}; run: aimhooman init)` : gitignoreExcludes.current ? 'current' : gitignoreExcludes.installed ? 'out of date (run: aimhooman init)' : 'not installed (run: aimhooman init --gitignore)'}`);
+    }
     for (const error of errors) console.log(`warning:  ${error.message}`);
     const localHooks = gitConfigAtScope(repo.root, '--local', 'core.hooksPath');
     const globalHooks = gitConfigAtScope(repo.root, '--global', 'core.hooksPath');
@@ -1258,31 +1261,12 @@ function cmdExplain(args) {
     return 0;
 }
 
-// The content half of the secret-allow guard in cmdOverride: run the engine's
-// own secret-category content rules over the target's bytes. Files over the
-// scanner's per-file budget, unreadable paths, and non-regular files skip it —
-// this guard is a UX safety net against an allow that would report success yet
-// leave the block in place, and the commit-time scanner still fails closed on
-// whatever was not checked here.
-function fileContentMatchesSecret(engine, repo, target) {
-    let content;
-    try {
-        const file = join(repo.root, target);
-        const stat = lstatSync(file);
-        if (!stat.isFile() || stat.size > DEFAULT_SCAN_LIMITS.maxFileBytes) return false;
-        content = readFileSync(file, 'utf8');
-    } catch {
-        return false;
-    }
-    return engine.checkContent(target, content, { categories: ['secret'] }).length > 0;
-}
-
 function cmdOverride(args, allow) {
     const verb = allow ? 'allow' : 'deny';
     const { options, positionals } = parseArguments(args, {
         options: {
             reason: { names: ['--reason'], type: 'string', nonEmpty: false },
-            scope: { names: ['--scope'], type: 'string', choices: ['path', 'rule', 'secret-path'] },
+            scope: { names: ['--scope'], type: 'string', choices: ['path', 'rule'] },
         },
         minPositionals: 1,
         maxPositionals: 1,
@@ -1298,31 +1282,6 @@ function cmdOverride(args, allow) {
     const scope = options.scope || (engine.lookup(target) ? 'rule' : 'path');
     if (scope === 'rule' && !engine.lookup(target)) {
         throw new ArgumentError(`unknown rule ID "${target}"; use --scope path for a path with this spelling`);
-    }
-    if (allow && scope === 'rule' && engine.lookup(target)?.category === 'secret') {
-        throw new ArgumentError(
-            `secret rules cannot be allowed at --scope rule (that would suppress every matching secret path under every profile); use --scope secret-path <path> to allow a specific secret path`,
-        );
-    }
-    // A path that matches a secret rule cannot be silenced by a path (or rule)
-    // allow: only --scope secret-path suppresses secret findings, deliberately,
-    // so a local override cannot hide a possible leaked key. Without this check
-    // a bare `allow .env.minimal` would report success but leave the block in
-    // place, which reads as a broken allow. checkPaths only evaluates path
-    // rules, so a content-shaped secret (a private key inside an
-    // ordinary-looking filename) would slip past it; the content half of the
-    // guard closes that hole.
-    if (allow && scope !== 'secret-path'
-        && (engine.checkPaths([target]).some((finding) => finding.category === 'secret')
-            || fileContentMatchesSecret(engine, repo, target))) {
-        throw new ArgumentError(
-            `"${target}" matches a secret rule, so a ${scope} allow cannot silence it `
-            + '(a local override must not hide a possible leaked key); '
-            + 'use --scope secret-path to explicitly allow this specific path',
-        );
-    }
-    if (scope === 'secret-path' && !allow) {
-        throw new ArgumentError('--scope secret-path is only valid with allow');
     }
     const entry = {
         target,
@@ -1646,7 +1605,7 @@ function cmdFix(args) {
         return expectedErrorCode(e);
     }
     emitDiagnostics(scan.diagnostics);
-    if (!scan.complete) process.stderr.write(incompleteMessage(scan));
+    if (!scan.complete) process.stderr.write(incompleteMessage(scan, { blocking: scan.profile === 'strict' }));
     if (scan.profile === 'compliance') {
         if (options.apply) throw new ArgumentError('--apply is only valid when the active profile is strict');
         if (scan.findings.length) process.stderr.write(human(scan.findings, tone()));
@@ -1928,6 +1887,32 @@ function cmdUninstall(args) {
         } catch (error) {
             excludeFailure = `exclude block left in ${repo.excludeFile}: ${error.message}`;
         }
+        // The committed variant of the block is only touched while the local
+        // config says this clone opted in; without that record the worktree
+        // .gitignore is treated as user-authored and left alone.
+        let gitignoreRecord;
+        try {
+            gitignoreRecord = loadConfig(repo.stateDir).gitignore;
+        } catch {
+            gitignoreRecord = undefined;
+        }
+        if (gitignoreRecord?.enabled) {
+            const gitignoreFile = join(repo.root, '.gitignore');
+            try {
+                removeExclude(gitignoreFile);
+                // We introduced the file: once the block is gone and nothing
+                // else remains, delete it rather than leave an empty husk. A
+                // file with any other content is user-authored and stays.
+                if (gitignoreRecord.created
+                    && existsSync(gitignoreFile)
+                    && readFileSync(gitignoreFile, 'utf8').trim() === '') {
+                    rmSync(gitignoreFile, { force: true });
+                }
+            } catch (error) {
+                const gitignoreFailure = `gitignore block left in ${gitignoreFile}: ${error.message}`;
+                excludeFailure = excludeFailure ? `${excludeFailure}; ${gitignoreFailure}` : gitignoreFailure;
+            }
+        }
         // Trust the directory, not the report. Every refusal below leaves a working
         // dispatcher behind, and one printed under "uninstalled" reads as done.
         const remaining = remainingDispatchers(repo);
@@ -2024,14 +2009,14 @@ function usage() {
     process.stdout.write(`aimhooman ${VERSION} - AI works. Hoomans ship.
 
 Usage:
-  aimhooman init [--profile clean|strict|compliance] [--grandfather-secrets]
+  aimhooman init [--profile clean|strict|compliance] [--gitignore]
   aimhooman init --global --yes
   aimhooman check [--staged] [-m <file>|--message <file>] [--profile ...] [--json]
   aimhooman check --commit <rev> | --range <base>...<head> | --tracked
   aimhooman audit|scan [--json] [--profile ...]
   aimhooman status
   aimhooman explain <rule-id>
-  aimhooman allow <path|rule-id> [--scope path|rule|secret-path] [--reason "..."]
+  aimhooman allow <path|rule-id> [--scope path|rule] [--reason "..."]
   aimhooman deny <path|rule-id> [--scope path|rule] [--reason "..."]
   aimhooman override list [--json]
   aimhooman override remove <target>
