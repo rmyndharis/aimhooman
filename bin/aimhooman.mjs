@@ -24,6 +24,7 @@ import { applyExclude, inspectExclude, patternsForRules, removeExclude } from '.
 import { effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
+import { DEFAULT_SCAN_LIMITS } from '../src/scan-session.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
 import { atomicWrite, withLock } from '../src/atomic-write.mjs';
 import { commitParents, resolveCommit } from '../src/history-scan.mjs';
@@ -214,8 +215,11 @@ function emitDiagnostics(diagnostics = []) {
 
 function incompleteMessage(scan) {
     const reasons = scan.stats?.skipped || {};
+    // Each count is how many items were skipped, not the limit that fired:
+    // "(size-limit=1)" read as a one-byte budget. Name the noun so the number
+    // cannot be mistaken for the budget it tripped.
     const skipped = Object.entries(reasons)
-        .map(([reason, count]) => `${reason}=${count}`)
+        .map(([reason, count]) => `${reason}=${count} ${skipCountNoun(reason, count)}`)
         .join(', ');
     // Every other reason is a size or budget the caller can shrink. A pack that
     // will not compile is not, and the warning above already names the file and
@@ -229,7 +233,7 @@ function incompleteMessage(scan) {
         : budgeted
             ? 'reduce the target, or raise AIMHOOMAN_MAX_FILE_BYTES / AIMHOOMAN_MAX_TOTAL_BYTES, and retry'
             : 'reduce the target or limits and retry';
-    let message = `aimhooman: scan incomplete${skipped ? ` (${skipped})` : ''}; ${hint}\n`;
+    let message = `aimhooman: scan incomplete${skipped ? ` (skipped: ${skipped})` : ''}; ${hint}\n`;
     const skippedPaths = scan.stats?.skippedPaths || {};
     const pathLines = [];
     for (const [reason, entries] of Object.entries(skippedPaths)) {
@@ -240,6 +244,17 @@ function incompleteMessage(scan) {
         if (entries.length > 5) pathLines.push(`  ... and ${entries.length - 5} more\n`);
     }
     return message + pathLines.join('');
+}
+
+// Most skip reasons tally files; the three below tally something else, so the
+// noun travels with the reason instead of reading "local-pack-error=1 file".
+function skipCountNoun(reason, count) {
+    const noun = {
+        'finding-limit': 'finding',
+        'local-input-limit': 'input',
+        'local-pack-error': 'pack',
+    }[reason] || 'file';
+    return `${noun}${count === 1 ? '' : 's'}`;
 }
 
 function formatBytes(bytes) {
@@ -840,8 +855,9 @@ function cmdInit(args) {
             profile: { names: ['--profile'], type: 'string', choices: [...PROFILES] },
             global: { names: ['--global'], type: 'boolean' },
             yes: { names: ['--yes'], type: 'boolean' },
+            grandfatherSecrets: { names: ['--grandfather-secrets'], type: 'boolean' },
         },
-        conflicts: [['profile', 'global']],
+        conflicts: [['profile', 'global'], ['grandfatherSecrets', 'global']],
         maxPositionals: 0,
     });
     if (rejectUnsupportedGit()) return 20;
@@ -926,7 +942,7 @@ function cmdInit(args) {
         console.error('aimhooman: not a git repository');
         return 30;
     }
-    return withLock(join(repo.commonDir, 'aimhooman-lifecycle.lock'), () => {
+    const code = withLock(join(repo.commonDir, 'aimhooman-lifecycle.lock'), () => {
         let projectPolicy;
         try {
             projectPolicy = loadProjectPolicy(repo.root);
@@ -1014,11 +1030,66 @@ function cmdInit(args) {
         console.log(`aimhooman: initialised (profile: ${profile})`);
         console.log(`  state:    ${repo.stateDir}`);
         console.log(`  excludes: ${repo.excludeFile}`);
+        console.log(`  note:     known AI artifacts are now ignored locally; see them with 'git status --ignored'`);
         if (rep.installed.length) console.log(`  hooks:    ${rep.installed.join(', ')}`);
         if (rep.chained.length) console.log(`  chained:  ${rep.chained.join(', ')} (existing hooks preserved)`);
         for (const warning of rep.warnings) console.log(`  warning:  ${warning}`);
+        console.log('  undo:     aimhooman uninstall');
         return 0;
     }, LIFECYCLE_LOCK_OPTIONS);
+    if (code === 0 && options.grandfatherSecrets) grandfatherTrackedSecrets(repo);
+    return code;
+}
+
+// --grandfather-secrets: a repository that already tracks secret-looking
+// fixtures (test certs, sample keys) would see every commit touching one
+// blocked, and allowing each path by hand does not scale. After a successful
+// init, scan the tracked tree once and write a --scope secret-path allow for
+// every path with a secret finding. The posture for NEW files is unchanged —
+// only paths found in this scan get an allow, so a secret added after init is
+// still blocked. A failed or incomplete scan never fails the init itself: the
+// guard is already active by then, so the gap is reported as a warning.
+function grandfatherTrackedSecrets(repo) {
+    let scan;
+    try {
+        scan = scanGitTarget(repo, { kind: 'tracked', limits: scanLimits() });
+    } catch (error) {
+        console.error(`aimhooman: warning: grandfather scan failed (${error.message}); no pre-existing secret paths were allowed`);
+        return;
+    }
+    if (!scan.complete) {
+        console.error('aimhooman: warning: tracked scan was incomplete, so the grandfathered set may be partial; allow the remaining paths with --scope secret-path');
+    }
+    const paths = [...new Set(scan.findings
+        .filter((finding) => finding.category === 'secret' && finding.path)
+        .map((finding) => finding.path))].sort();
+    if (!paths.length) {
+        console.log('aimhooman: no tracked secret findings to grandfather');
+        return;
+    }
+    const { engine } = newEngineWithDiagnostics('clean', repo.stateDir);
+    const added = withLock(join(repo.stateDir, 'overrides.json.lock'), () => {
+        const ov = loadOverrides(repo.stateDir);
+        let count = 0;
+        for (const path of paths) {
+            const entry = {
+                target: path,
+                scope: 'secret-path',
+                reason: 'pre-existing tracked fixture (grandfathered at init)',
+                actor: gitConfig(repo.root, 'user.email'),
+                at: new Date().toISOString(),
+            };
+            const sameAllow = (candidate) => (
+                candidate.target === path && effectiveOverrideScope(candidate, engine) === 'secret-path'
+            );
+            if (ov.allow.some(sameAllow)) continue;
+            ov.allow = upsert(ov.allow, entry, sameAllow);
+            count += 1;
+        }
+        saveOverrides(repo.stateDir, ov);
+        return count;
+    });
+    console.log(`aimhooman: grandfathered ${added} tracked secret path(s) with --scope secret-path allows; new files with secrets are still blocked`);
 }
 
 function cmdStatus(args) {
@@ -1131,6 +1202,25 @@ function cmdExplain(args) {
     return 0;
 }
 
+// The content half of the secret-allow guard in cmdOverride: run the engine's
+// own secret-category content rules over the target's bytes. Files over the
+// scanner's per-file budget, unreadable paths, and non-regular files skip it —
+// this guard is a UX safety net against an allow that would report success yet
+// leave the block in place, and the commit-time scanner still fails closed on
+// whatever was not checked here.
+function fileContentMatchesSecret(engine, repo, target) {
+    let content;
+    try {
+        const file = join(repo.root, target);
+        const stat = lstatSync(file);
+        if (!stat.isFile() || stat.size > DEFAULT_SCAN_LIMITS.maxFileBytes) return false;
+        content = readFileSync(file, 'utf8');
+    } catch {
+        return false;
+    }
+    return engine.checkContent(target, content, { categories: ['secret'] }).length > 0;
+}
+
 function cmdOverride(args, allow) {
     const verb = allow ? 'allow' : 'deny';
     const { options, positionals } = parseArguments(args, {
@@ -1162,9 +1252,13 @@ function cmdOverride(args, allow) {
     // allow: only --scope secret-path suppresses secret findings, deliberately,
     // so a local override cannot hide a possible leaked key. Without this check
     // a bare `allow .env.minimal` would report success but leave the block in
-    // place, which reads as a broken allow.
+    // place, which reads as a broken allow. checkPaths only evaluates path
+    // rules, so a content-shaped secret (a private key inside an
+    // ordinary-looking filename) would slip past it; the content half of the
+    // guard closes that hole.
     if (allow && scope !== 'secret-path'
-        && engine.checkPaths([target]).some((finding) => finding.category === 'secret')) {
+        && (engine.checkPaths([target]).some((finding) => finding.category === 'secret')
+            || fileContentMatchesSecret(engine, repo, target))) {
         throw new ArgumentError(
             `"${target}" matches a secret rule, so a ${scope} allow cannot silence it `
             + '(a local override must not hide a possible leaked key); '
@@ -1874,7 +1968,7 @@ function usage() {
     process.stdout.write(`aimhooman ${VERSION} - AI works. Hoomans ship.
 
 Usage:
-  aimhooman init [--profile clean|strict|compliance]
+  aimhooman init [--profile clean|strict|compliance] [--grandfather-secrets]
   aimhooman init --global --yes
   aimhooman check [--staged] [-m <file>|--message <file>] [--profile ...] [--json]
   aimhooman check --commit <rev> | --range <base>...<head> | --tracked

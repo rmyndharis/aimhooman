@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+This batch works through the findings of the cross-ecosystem field test
+(8 upstream clones, 6 language loops, a local bare remote, and a private
+GitHub sandbox). The headline: `allow` no longer says yes when it means no —
+a path allow on a file whose content holds a secret is refused up front,
+with the working escape hatch named in the same breath.
+
+### Fixed
+
+- `aimhooman allow <path>` on a file whose content matches a secret rule
+  (e.g. a private key inside an ordinary-looking filename) no longer reports
+  `allowed` while the commit stays blocked. The guard now runs the engine's
+  secret content rules over the file's bytes, refuses the allow, and points
+  at `--scope secret-path`. Files over the scan budget or unreadable skip
+  the check; the commit-time scanner still fails closed on those.
+- The scan-incomplete summary now names what was skipped
+  (`skipped: size-limit=1 file`) instead of `(size-limit=1)`, which read as
+  a one-byte budget rather than a count of files.
+
+### Added
+
+- `aimhooman init --grandfather-secrets`: after a successful init, scan the
+  tracked tree once and write a `--scope secret-path` allow for every path
+  already tracking secret-looking material (test certs, sample keys). New
+  secrets stay blocked; only paths found in that scan are allowed. A failed
+  or incomplete scan warns without failing the init.
+- Provider-token findings name the provider in human output
+  (`A provider access token (GitHub) must not enter Git history.`), so the
+  developer knows which credential to revoke. The token itself stays
+  redacted; the JSON report is unchanged.
+- Secret content rules now carry a remediation line naming the fixture
+  escape hatch: `aimhooman allow <path> --scope secret-path --reason
+  "test fixture"`.
+
+### Changed
+
+- Repeated findings of the same rule print the remediation once, then
+  `fix: as above for <rule id>`, instead of reprinting an identical fix
+  block for every hit.
+- `init` output now prints `undo: aimhooman uninstall` and notes that known
+  AI artifacts are ignored locally (`git status --ignored` shows them).
+
+### Performance
+
+- Installed Git hook shims export `NODE_COMPILE_CACHE` pointing at a
+  per-install directory under the state dir (removed by
+  `uninstall --purge-state`), shaving the module parse/compile cost off
+  each hook spawn. An unwritable cache dir degrades to the old cold start,
+  never to a hook failure.
+
 ## [0.1.8] - 2026-07-18
 
 This release works through the findings of the real-world scenario report

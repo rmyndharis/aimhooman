@@ -515,6 +515,15 @@ test('generated dispatchers use builtin ref capture and accept safe Git updates'
             // committed/aborted short-circuit before the Node spawn, so an ordinary
             // commit does not pay a cold start for a phase refcheck only no-ops.
             assert.match(referenceHook, /case "\$1" in committed\|aborted\) exit 0 ;; esac/);
+            // The dispatcher exports a V8 compile cache rooted in per-install
+            // state, so repeated hook spawns skip module recompilation and
+            // --purge-state removes the cache along with the rest of the state.
+            const compileCache = join(openRepo(root).stateDir, 'compile-cache');
+            assert.ok(
+                referenceHook.includes(`AIMHOOMAN_COMPILE_CACHE='${compileCache}'`),
+                'reference-transaction dispatcher must point NODE_COMPILE_CACHE at the state directory',
+            );
+            assert.match(referenceHook, /NODE_COMPILE_CACHE=\$AIMHOOMAN_COMPILE_CACHE/);
 
             writeFileSync(join(root, 'safe.txt'), 'safe\n');
             git(root, ['add', 'safe.txt']);
@@ -524,6 +533,9 @@ test('generated dispatchers use builtin ref capture and accept safe Git updates'
             });
             assert.equal(commit.status, 0, commit.stderr);
             assert.doesNotMatch(commit.stderr, /command not found/);
+            // The hook spawns above prove the export works end to end: Node
+            // created the cache directory and filled it on a plain commit.
+            assert.ok(existsSync(compileCache), 'hook spawns must create the compile cache directory');
 
             const update = spawnSync('git', [
                 'update-ref', 'refs/tags/shell-path-smoke', 'HEAD',
