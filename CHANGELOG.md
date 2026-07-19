@@ -15,6 +15,19 @@ with the working escape hatch named in the same breath.
 
 ### Fixed
 
+- Tracked-tree scans (`audit`, `check --tracked`, `init --grandfather-secrets`)
+  no longer die with `spawnSync git EPIPE` on a partial clone of a repository
+  with submodule pins. A gitlink names a commit of another repository, so
+  asking `cat-file` about it triggered a promisor fetch that aborted the
+  whole metadata batch ("not our ref"). Gitlinks now skip the metadata read;
+  their type comes from the mode. Found by the OpenSSL field run, whose 11
+  submodule pins made the grandfather flag seed zero allows.
+- `init --grandfather-secrets` now runs its one-shot tracked scan with the
+  total-byte budget raised to the env cap and the finding budget raised to
+  100,000. The commit-time defaults (64 MiB, 1,000 findings) silently missed
+  fixtures beyond them in exactly the large, fixture-heavy repositories the
+  flag exists for; the per-file budget and an explicit env override still
+  apply.
 - `aimhooman allow <path>` on a file whose content matches a secret rule
   (e.g. a private key inside an ordinary-looking filename) no longer reports
   `allowed` while the commit stays blocked. The guard now runs the engine's

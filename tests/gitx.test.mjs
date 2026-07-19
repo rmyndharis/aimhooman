@@ -587,3 +587,52 @@ test('a branch update that is already visible cannot exclude itself from its own
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test('tracked entries leave gitlinks out of the cat-file metadata read', () => {
+    // A gitlink (mode 160000) pins a commit of another repository: the object
+    // is never present locally, and in a partial clone asking cat-file about
+    // it triggers a promisor fetch that aborts the whole batch ("not our
+    // ref"), which surfaced as an EPIPE and a failed scan. Found by the
+    // OpenSSL field run — its 11 submodule pins killed `audit` and
+    // `init --grandfather-secrets` on a blob:none clone.
+    const origin = mkdtempSync(join(tmpdir(), 'aim-gitx-origin-'));
+    const stage = mkdtempSync(join(tmpdir(), 'aim-gitx-stage-'));
+    const parent = mkdtempSync(join(tmpdir(), 'aim-gitx-partial-'));
+    try {
+        execFileSync('git', ['init', '-q', '-b', 'main', '--bare'], { cwd: origin });
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: stage });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: stage });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: stage });
+        writeFileSync(join(stage, 'README.md'), 'x');
+        execFileSync('git', ['add', 'README.md'], { cwd: stage });
+        execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: stage });
+        execFileSync('git', ['push', '-q', origin, 'HEAD:refs/heads/main'], { cwd: stage });
+
+        // file:// forces the pack protocol, so the promisor configuration
+        // sticks; a directory clone would hardlink every object instead.
+        execFileSync('git', ['clone', '-q', '--filter=blob:none', `file://${origin}`, 'work'], { cwd: parent });
+        const work = join(parent, 'work');
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: work });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: work });
+
+        // A gitlink whose OID exists nowhere. Before the fix, the metadata
+        // read asked cat-file about it, the promisor fetch failed, and git
+        // aborted mid-batch.
+        const pin = '1'.repeat(40);
+        execFileSync('git', ['update-index', '--add', '--cacheinfo', `160000,${pin},vendor/sub`], { cwd: work });
+
+        const entries = trackedEntries(openRepo(work));
+        const gitlink = entries.find((entry) => entry.path === 'vendor/sub');
+        assert.ok(gitlink, 'the gitlink entry is missing from the snapshot');
+        assert.equal(gitlink.type, 'commit');
+        assert.equal(gitlink.size, null);
+        assert.ok(
+            entries.some((entry) => entry.path === 'README.md' && entry.type === 'blob'),
+            'ordinary blobs still get their metadata',
+        );
+    } finally {
+        rmSync(origin, { recursive: true, force: true });
+        rmSync(stage, { recursive: true, force: true });
+        rmSync(parent, { recursive: true, force: true });
+    }
+});

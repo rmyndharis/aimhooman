@@ -267,6 +267,38 @@ test('init --grandfather-secrets outside a repository fails like a plain init', 
     }
 });
 
+test('init --grandfather-secrets seeds the allow in a repository with submodule pins', () => {
+    // Companion to the gitx regression test: the OpenSSL field run showed the
+    // grandfather scan dying on a promisor fetch for gitlink OIDs and seeding
+    // zero allows. Here the gitlink simply rides along while the fixture gets
+    // its allow; the crash itself is pinned in tests/gitx.test.mjs.
+    const repo = createRepo();
+    try {
+        writeFileSync(
+            join(repo.root, 'old-key.pem'),
+            '-----BEGIN ' + 'PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\n',
+        );
+        git(repo, ['add', 'old-key.pem']);
+        execFileSync('git', [
+            'update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},vendor/sub`,
+        ], { cwd: repo.root, env: repo.env });
+        git(repo, ['commit', '--no-verify', '-q', '-m', 'Import fixtures and a submodule pin']);
+
+        const initialized = run(repo, ['init', '--grandfather-secrets']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        assert.doesNotMatch(initialized.stderr, /grandfather scan failed/);
+        assert.match(initialized.stdout, /grandfathered 1 tracked secret path\(s\)/);
+
+        const overrides = JSON.parse(readFileSync(join(stateDir(repo), 'overrides.json'), 'utf8'));
+        assert.deepEqual(
+            overrides.allow.filter((entry) => entry.scope === 'secret-path').map((entry) => entry.target),
+            ['old-key.pem'],
+        );
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('a misspelled global uninstall flag leaves repository enforcement intact', () => {
     const repo = createRepo('strict');
     try {
