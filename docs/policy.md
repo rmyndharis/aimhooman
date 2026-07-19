@@ -20,9 +20,12 @@ An individual `check` may escalate to `--profile strict`, but cannot weaken or r
 the team profile. Malformed project policy fails closed with an actionable error;
 personal allow/deny exceptions and local rule packs remain in the common Git directory
 under `aimhooman/`.
-Under `strict`, policy files and agent instructions produce review-required findings.
-The product's `review` and `policy-review` commands record local, object-bound decisions;
-an ordinary path allow cannot satisfy either finding.
+Under `strict`, policy files and agent instructions are blocking findings (exit 10):
+both rules' strict action is `block`, not review. The product's `review` and
+`policy-review` commands record local, object-bound decisions. An ordinary path or
+rule allow does satisfy those engine findings; the one finding an allow cannot
+satisfy is the strict-policy downgrade-or-removal block, which is constructed
+outside the engine and clears only through a bound `policy-review` acknowledgment.
 
 ### Owner authorization in CI
 

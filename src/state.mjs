@@ -105,8 +105,20 @@ export function parseProjectPolicy(text, file = '.aimhooman.json') {
 
 export function loadConfig(stateDir, root) {
     const project = loadProjectPolicy(root);
-    if (project) return { profile: project.profile, source: 'project', file: project.file };
     const file = join(stateDir, 'config.json');
+    if (project) {
+        // The project policy owns the profile, but the --gitignore opt-in stays
+        // per-clone state in config.json; a two-arg caller still needs it. The
+        // profile no longer depends on that file here, so a missing or corrupt
+        // one just omits the record instead of failing the load.
+        const gitignore = readGitignoreRecord(file);
+        return {
+            profile: project.profile,
+            source: 'project',
+            file: project.file,
+            ...(gitignore ? { gitignore } : {}),
+        };
+    }
     let text;
     try {
         text = readFileSync(file, 'utf8');
@@ -127,6 +139,17 @@ export function loadConfig(stateDir, root) {
         file,
         ...(normalized.gitignore ? { gitignore: normalized.gitignore } : {}),
     };
+}
+
+// Best-effort read of the per-clone gitignore record for the project-policy
+// branch above: any failure (absent file, invalid JSON, invalid shape) means
+// no record, never a failed load.
+function readGitignoreRecord(file) {
+    try {
+        return normalizeLocalConfig(JSON.parse(stripBom(readFileSync(file, 'utf8'))), file).gitignore;
+    } catch {
+        return undefined;
+    }
 }
 
 export function saveConfig(stateDir, config) {
@@ -202,12 +225,16 @@ export function loadOverrides(stateDir) {
         // Persist the cleaned file so the migration warns once, not on every
         // command. Re-read under the lock so a concurrent allow/deny write is
         // never clobbered; a failed rewrite only means the warning returns
-        // next run, so this stays best effort.
+        // next run, so this stays best effort. One attempt, no queue wait:
+        // allow/deny/override/review/policy-review call loadOverrides while
+        // already holding this same lock, and the bakery queue would park the
+        // inner candidate behind the outer one for the full retry budget
+        // before the catch below swallowed the throw.
         try {
             withLock(`${file}.lock`, () => {
                 const fresh = parseOverrides(readFileSync(file, 'utf8'), file);
                 atomicWriteJson(file, { schema_version: 1, ...fresh });
-            });
+            }, { retries: 1 });
         } catch { /* best effort */ }
     }
     return overrides;

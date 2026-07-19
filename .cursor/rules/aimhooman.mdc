@@ -1,5 +1,5 @@
 ---
-description: aimhooman - keep AI session files, secrets, and unwanted AI attribution out of Git.
+description: aimhooman - keep AI session files and unwanted AI attribution out of Git.
 globs:
 alwaysApply: true
 ---

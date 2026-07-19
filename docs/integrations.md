@@ -25,7 +25,8 @@ deliberately.
 The hook checks the staged tree, so it passes no filenames. Any non-zero
 exit fails it: 10 for a policy violation, 11 for a review-required finding on
 a non-clean profile, 20 for a usage or configuration error, 30 for a Git or
-I/O error, 31 when a scan budget leaves the scan incomplete. On the default
+I/O error, 31 when a scan budget leaves the scan incomplete on `strict` or at
+the final ref guard (`clean`/`compliance` warn and continue). On the default
 `clean` profile a review-only finding exits 0, so reviews alone do not fail
 the hook. Blocks always do.
 
@@ -59,6 +60,11 @@ jobs:
 the merge base of the two commits, and a shallow checkout does not have that
 commit. The action installs aimhooman from npm and defaults to the `strict`
 profile; set `profile:` under `with:` to change that.
+
+Pinning the action tag (`@v0.3.0`) pins only the action's steps, not the CLI:
+the action npm-installs aimhooman at run time, and the `version` input
+defaults to `latest`. Set `version:` under `with:` (for example
+`version: 0.3.0`) to pin the CLI itself.
 
 For `push` events, use `base: ${{ github.event.before }}` and
 `head: ${{ github.event.after }}`. On the first push to a branch `before` is

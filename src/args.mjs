@@ -27,7 +27,7 @@ export function parseArguments(args, definition = {}) {
             const inlineValue = equal > 0 ? argument.slice(equal + 1) : undefined;
             const option = byName.get(name);
             if (!option) throw new ArgumentError(`unknown option "${name}"`);
-            if (seen.has(option.key) && !option.repeatable) {
+            if (seen.has(option.key)) {
                 throw new ArgumentError(`option "${name}" may only be used once`);
             }
             seen.add(option.key);
@@ -49,12 +49,7 @@ export function parseArguments(args, definition = {}) {
             if (option.choices && !option.choices.includes(value)) {
                 throw new ArgumentError(`invalid value for ${name}: "${value}"`);
             }
-            if (option.repeatable) {
-                if (!options[option.key]) options[option.key] = [];
-                options[option.key].push(value);
-            } else {
-                options[option.key] = value;
-            }
+            options[option.key] = value;
             continue;
         }
         positionals.push(argument);

@@ -86,12 +86,23 @@ export function hookSessionStart() {
         const policy = resolvePolicy(repo, { target: 'worktree' });
         const { engine: eng } = newEngineWithDiagnostics(policy.profile, repo.stateDir);
         const patterns = patternsForRules(eng.rules);
-        applyExclude(repo.excludeFile, patterns);
+        // Each refresh is housekeeping with its own silent failure, mirroring
+        // the pre-tool-use path: a read-only .git/info must not skip the
+        // worktree .gitignore refresh below, and neither may decide anything.
+        try {
+            applyExclude(repo.excludeFile, patterns);
+        } catch {
+            /* exclude refresh is best effort */
+        }
         // A clone that opted into the committed variant gets the same refresh in
         // its worktree .gitignore; every failure degrades silently, same as the
         // exclude write above.
-        if (loadConfig(repo.stateDir).gitignore?.enabled) {
-            applyExclude(join(repo.root, '.gitignore'), patterns);
+        try {
+            if (loadConfig(repo.stateDir).gitignore?.enabled) {
+                applyExclude(join(repo.root, '.gitignore'), patterns);
+            }
+        } catch {
+            /* gitignore refresh is best effort */
         }
     } catch {
         /* not a repo; nothing to exclude */

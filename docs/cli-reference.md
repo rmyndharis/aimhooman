@@ -31,6 +31,12 @@ so every clone shares it. `status` shows the recorded choice, and `uninstall`
 removes the block (and the file, if aimhooman created it and nothing else
 remains). The default stays local: `.git/info/exclude` only.
 
+Two honest edges. `uninstall` deletes the `.gitignore` itself only when
+aimhooman created it and the removed block leaves it empty — if you committed
+the file, that deletion is a tracked worktree deletion you then commit or
+restore. And the opt-in record lives in the common Git directory, so linked
+worktrees share the choice while each worktree keeps its own `.gitignore`.
+
 For commits you make at the terminal (outside your AI tool), one global setup guards
 eligible non-bare repositories that do not override `core.hooksPath` locally:
 

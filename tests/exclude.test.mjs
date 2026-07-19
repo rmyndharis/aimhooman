@@ -22,8 +22,9 @@ test('defaultPatterns is derived from unambiguous AI residue rules', () => {
     ]) {
         assert.ok(defaultPatterns().some((x) => x.startsWith(p)), `missing ${p}`);
     }
-    // Review-required files stay visible in git status, and .env was never
-    // auto-excluded (secret scanning was a job for dedicated tools, never ours).
+    // Review-required files stay visible in git status, and .env was never in
+    // the auto-exclude set: it was enforced by content and path scanning until
+    // that left the product in v0.3.0, and auto-exclude stays artifact-only.
     assert.equal(defaultPatterns().some((x) => x.includes('.env')), false);
 });
 

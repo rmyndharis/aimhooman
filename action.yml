@@ -11,16 +11,22 @@ inputs:
     description: policy profile to enforce (clean, strict, compliance)
     required: false
     default: strict
+  version:
+    description: aimhooman npm version to install (pin this; the action tag does not pin the CLI)
+    required: false
+    default: latest
 runs:
   using: composite
   steps:
     - name: Set up Node
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
         node-version: 24
     - name: Install aimhooman
-      run: npm install -g @rmyndharis/aimhooman
+      run: npm install -g @rmyndharis/aimhooman@"$AIMHOOMAN_VERSION"
       shell: bash
+      env:
+        AIMHOOMAN_VERSION: ${{ inputs.version }}
     - name: Check the introduced commits
       run: aimhooman check --range "$BASE...$HEAD" --profile "$PROFILE"
       shell: bash

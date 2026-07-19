@@ -15,8 +15,9 @@ and treats an incomplete scan as a stop.
 **Does it slow commits down?** The staged check runs locally with no network and reads
 Git objects in batches. Text-oriented rules skip binary files. Size and total budgets
 are visible in reports. Files over 2 MiB or a scan over 64 MiB make the scan
-incomplete: direct checks and the Git pre-commit guards warn on `clean`/`compliance`
-and stop on `strict`, and the final ref guard stops on every profile rather than
+incomplete (binary files skip complete; oversized text is what trips it): direct
+checks and the Git pre-commit guards warn on `clean`/`compliance` and stop on
+`strict`, and the final ref guard stops on every profile rather than
 claiming that content was checked.
 
 **Can the agent bypass it?** Any local tool can ultimately be bypassed by a user with

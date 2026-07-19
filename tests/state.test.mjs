@@ -96,6 +96,28 @@ test('the gitignore opt-in round-trips and validates its shape', () => {
     }
 });
 
+test('a project policy still surfaces the per-clone gitignore record', () => {
+    const root = mkdtempSync(join(tmpdir(), 'aim-gitignore-project-'));
+    const state = join(root, 'state');
+    try {
+        saveConfig(state, { profile: 'clean', gitignore: { enabled: true, created: false } });
+        writeFileSync(join(root, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'strict' }));
+        const config = loadConfig(state, root);
+        assert.equal(config.source, 'project');
+        assert.equal(config.profile, 'strict');
+        assert.deepEqual(config.gitignore, { enabled: true, created: false });
+
+        // The profile comes from the project policy, so a corrupt or absent
+        // config.json drops only the record, never the load.
+        writeFileSync(join(state, 'config.json'), '{bad');
+        assert.equal(loadConfig(state, root).gitignore, undefined);
+        rmSync(join(state, 'config.json'));
+        assert.equal(loadConfig(state, root).gitignore, undefined);
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('missing overrides are empty but corrupt or unreadable overrides are errors', () => {
     const root = mkdtempSync(join(tmpdir(), 'aim-overrides-'));
     const state = join(root, 'state');

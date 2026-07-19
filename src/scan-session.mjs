@@ -132,7 +132,7 @@ export function scanEntries(repo, engine, entries, options = {}) {
     }
 
     const incompleteReasons = new Set([
-        'metadata-unavailable', 'size-limit', 'total-byte-limit', 'object-read-failed',
+        'metadata-unavailable', 'size-limit', 'total-byte-limit',
         'missing-object', 'unexpected-object', 'finding-limit', 'local-input-limit',
     ]);
     const complete = !Object.keys(stats.skipped).some((reason) => incompleteReasons.has(reason));

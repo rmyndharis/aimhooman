@@ -40,14 +40,6 @@ export function selectPushBase({ before, head, refName, defaultBranch, cwd = ROO
     return zeroObjectId(resolvedHead);
 }
 
-export function selectReleaseBase({ head, cwd = ROOT }) {
-    const repo = { root: cwd };
-    const resolvedHead = resolveCommit(repo, head);
-    // A reachable v* tag can be created by any actor with tag permission. Until
-    // the workflow has durable, verified checkpoint evidence, scan every commit.
-    return zeroObjectId(resolvedHead);
-}
-
 function gitString(cwd, args) {
     return execFileSync('git', args, {
         cwd,
@@ -103,30 +95,6 @@ async function main() {
                 workflowPath: '.github/workflows/test.yml',
             });
         }
-    } else if (context === 'release') {
-        const tag = requiredEnvironment('CURRENT_TAG');
-        if (process.env.RELEASE_ENVIRONMENT_VERIFIED !== 'true') {
-            throw new Error('release history scan requires the owner-only release environment gate');
-        }
-        if (requiredEnvironment('GITHUB_REF_TYPE') !== 'tag'
-            || requiredEnvironment('GITHUB_REF') !== `refs/tags/${tag}`) {
-            throw new Error('release history scan requires the exact pushed tag ref');
-        }
-        const authority = await verifyOwnerWorkflowRun({
-            expectedEvent: 'push',
-            expectedHead: head,
-            expectedRef: tag,
-            expectedWorkflowPath: '.github/workflows/release.yml',
-            requireWorkflowAtHead: true,
-        });
-        base = selectReleaseBase({ head });
-        const plan = protectedPathAuthorizationPlan(base, head);
-        authorizeProtectedPathPlan(plan, authority, {
-            context: `release tag ${tag} at ${head}`,
-            event: 'push',
-            refName: tag,
-            workflowPath: '.github/workflows/release.yml',
-        });
     } else {
         throw new Error(`unsupported CI_HISTORY_CONTEXT "${context}"`);
     }

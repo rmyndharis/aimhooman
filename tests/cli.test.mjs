@@ -611,6 +611,32 @@ test('fix: strict fails closed (exit 31) when a local message rule cannot evalua
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('fix: strict preview exits 31, not 11, when a removable line hides an incomplete recheck', () => {
+    const dir = makeRepo('strict');
+    try {
+        mkdirSync(join(dir, '.git/aimhooman/rules'), { recursive: true });
+        writeFileSync(join(dir, '.git/aimhooman/rules/message.json'), JSON.stringify([{
+            id: 'local.message-marker', version: 1, provider: 'local', category: 'custom', kind: 'message',
+            match: { content: ['LOCAL-MARKER'] },
+            actions: { clean: 'block', strict: 'block', compliance: 'block' },
+            reason: 'local message marker',
+        }]));
+        const msg = join(dir, 'MSG');
+        // The exact attribution line gives the strict preview a line to remove,
+        // and the oversized line keeps even the cleaned message's recheck
+        // incomplete. The preview must fail closed (31) the way --apply does,
+        // not ask for a review (11) of a repair it could not fully verify.
+        writeFileSync(
+            msg,
+            `subject\n\nCo-authored-by: Claude <noreply@anthropic.com>\n${'x'.repeat(20000)} LOCAL-MARKER\n`,
+        );
+        const out = result('fix', ['--message', msg], dir);
+        assert.equal(out.status, 31, out.stderr);
+        assert.match(out.stderr, /scan incomplete/i);
+        assert.match(out.stderr, /would remove 1 exact attribution line/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('strict staged check catches rename destination', () => {
     const dir = makeRepo('strict');
     try {

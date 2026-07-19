@@ -611,7 +611,7 @@ function cmdCommitmsg(args) {
         const treeCode = exitCode(treeScan.findings, treeScan.profile, treeScan.complete);
         if (treeCode !== 0) {
             if (treeScan.findings.length) process.stderr.write(human(treeScan.findings, tone()));
-            if (!treeScan.complete) process.stderr.write(incompleteMessage(treeScan));
+            if (!treeScan.complete) process.stderr.write(incompleteMessage(treeScan, { blocking: treeScan.profile === 'strict' }));
             return treeCode;
         }
         // exitCode passes an incomplete tree scan on frictionless profiles; the
@@ -1645,9 +1645,13 @@ function cmdFix(args) {
                     ? `aimhooman: strict policy would remove ${repair.removed.length} exact attribution line(s); rerun with --apply to write the repair`
                     : 'aimhooman: strict policy found no automatically repairable attribution lines'
             );
+            // 11 asks a human to review the lines a repair would remove, which is
+            // only honest when the recheck saw the whole message. An incomplete
+            // recheck on strict fails closed (31) — the same verdict --apply
+            // reaches below for the same content.
             return remaining.some((finding) => finding.decision === 'block')
                 ? 10
-                : repair.removed.length ? 11 : exitCode(remaining, scan.profile, remainingComplete);
+                : repair.removed.length && remainingComplete ? 11 : exitCode(remaining, scan.profile, remainingComplete);
         }
     } else if (options.apply) {
         throw new ArgumentError('--apply is only needed when the active profile is strict');
@@ -1975,6 +1979,7 @@ function cmdUninstall(args) {
     for (const queue of [
         `${lifecycleLock}.queue`,
         `${repo.excludeFile}.aimhooman.lock.queue`,
+        `${join(repo.root, '.gitignore')}.aimhooman.lock.queue`,
         join(effectiveHooksDir(repo), '.aimhooman-hooks.lock.queue'),
     ]) {
         try { rmdirSync(queue); } catch { /* held by another aimhooman, or already gone */ }
@@ -2030,7 +2035,8 @@ Usage:
   aimhooman version
 
 Exit codes: 0 clean, 10 blocked, 11 review required, 20 invalid input or policy,
-30 Git or I/O failure, 31 incomplete scan.
+30 Git or I/O failure, 31 incomplete scan on strict or at the final ref guard
+(clean/compliance warn and continue).
 `);
 }
 

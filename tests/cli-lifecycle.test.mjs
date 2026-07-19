@@ -1388,18 +1388,25 @@ test('init requires Git 2.28 while accepting vendor suffixes, and doctor reports
 test('uninstall sweeps its lock queues, and only --purge-state takes the message backup', () => {
     const repo = createRepo('clean');
     try {
+        // Opting into the committed .gitignore block gives the worktree file its
+        // own lock queue; it must be swept like the ones under .git.
+        const gitignoreInit = run(repo, ['init', '--gitignore']);
+        assert.equal(gitignoreInit.status, 0, gitignoreInit.stderr);
         writeFileSync(join(repo.root, 'app.js'), 'export const value = 1;\n');
         git(repo, ['add', 'app.js']);
         git(repo, ['commit', '-m', ATTRIBUTION]);
 
         const common = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
         const bak = `${gitPath(repo, 'COMMIT_EDITMSG')}.aimhooman-bak`;
+        const gitignoreQueue = join(repo.root, '.gitignore.aimhooman.lock.queue');
         const queues = [
             join(common, 'aimhooman-lifecycle.lock.queue'),
             join(common, 'info', 'exclude.aimhooman.lock.queue'),
+            gitignoreQueue,
             join(gitPath(repo, 'hooks'), '.aimhooman-hooks.lock.queue'),
         ];
         assert.ok(existsSync(bak), 'the attribution strip should leave a backup to sweep');
+        assert.ok(existsSync(gitignoreQueue), 'init --gitignore should leave its lock queue to sweep');
 
         // A plain uninstall keeps policy state, so it keeps the backup too: that
         // file is the only copy of the lines stripped from the last message.

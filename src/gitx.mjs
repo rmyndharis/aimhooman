@@ -1,17 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import {
-    cpSync,
-    lstatSync,
-    mkdirSync,
-    mkdtempSync,
-    readFileSync,
-    realpathSync,
-    readdirSync,
-    readlinkSync,
-    renameSync,
-    rmSync,
-    symlinkSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 

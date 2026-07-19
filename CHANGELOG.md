@@ -5,6 +5,54 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `fix` on a strict policy no longer exits 11 (review required) when the
+  message holds a removable attribution line but the recheck of the cleaned
+  message stays incomplete; it exits 31, the same verdict `--apply` reaches
+  for the same content.
+- `commitmsg` printed the blocking "scan incomplete … and retry" framing for
+  a tree scan that stopped at exit 11 on the compliance profile; the framing
+  now follows the profile, matching `check` and `fix`.
+- `loadOverrides` burned the full lock retry budget (~50 × 10 ms) when a
+  caller already held `overrides.json.lock` (every `allow`/`deny`/`override`/
+  `review`/`policy-review` write); the warn-once migration persist now takes
+  one lock attempt and skips quietly when the lock is held.
+- Two-arg `loadConfig(stateDir, root)` dropped the per-clone `gitignore`
+  record whenever a project policy owned the profile; the record is now read
+  best effort from config.json.
+- Session-start hook: a failed `.git/info/exclude` refresh no longer skips
+  the worktree `.gitignore` refresh; each has its own silent failure, like
+  the pre-tool-use path.
+- `uninstall` now also sweeps the worktree `.gitignore` lock queue left by
+  `init --gitignore`; the sweep previously covered only the three `.git`-side
+  queues.
+- `action.yml` gained a `version` input (default `latest`) so the installed
+  CLI can be pinned (pinning the action tag never pinned the CLI), and its
+  `actions/setup-node` step is pinned to the same SHA the test workflow uses.
+- The tarball now ships `docs/secrets.md`, `docs/policy.md`,
+  `docs/cli-reference.md`, `docs/faq.md`, and `docs/integrations.md`; links
+  to them from the README and the catalog dangled inside node_modules.
+- Documentation and comment accuracy: the Cursor manifest description and the
+  usage and integrations exit-code lines no longer mention secret scanning
+  and now name the strict/final-guard scope of exit 31; the README flowchart
+  no longer implies an incomplete scan blocks pre-commit on every profile;
+  `docs/policy.md` states correctly that strict turns policy-file and
+  agent-instruction findings into blocks and that only the policy
+  downgrade/removal block is allow-proof; the 0.3.0 binary bullet, the FAQ
+  budget answer, and two stale comments now describe what the code does.
+
+### Removed
+
+- Dead code: the unreachable `release` branch of
+  `scripts/scan-ci-history.mjs` (no workflow sets that context) along with
+  `selectReleaseBase` and the `RELEASE_ENVIRONMENT_VERIFIED` contract; the
+  never-produced `object-read-failed` incomplete reason; the callerless
+  `repeatable` option in the argument parser; and eight unused `node:fs`
+  imports in `src/gitx.mjs`.
+
 ## [0.3.0] - 2026-07-19
 
 This release narrows aimhooman to the job it does better than anyone else:
@@ -30,8 +78,11 @@ reference-transaction guard keeps its veto on every profile.
   `overrides.json` are dropped on load with a warning naming the file.
   A secret already in history needs rotation and a gitleaks run, not
   aimhooman.
-- With no rule reading binary content, an oversized binary file no longer
-  makes a scan incomplete; oversized text still does.
+- In-budget binary blobs are no longer content-scanned: v0.2.0 read their
+  bytes for secrets, and with the scanner gone they now skip as binary. The
+  oversized-file probe is unchanged — binary up to 16 MiB still skips
+  complete, and binary over it is still a size-limit skip that leaves the
+  scan incomplete.
 
 ### Added
 

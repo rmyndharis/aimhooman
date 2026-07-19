@@ -34,10 +34,11 @@ export function human(findings, tone) {
             out += `       > ${isSensitive(f) ? '[redacted]' : visible(f.text.trim())}\n`;
         }
         // Render the whole remediation array, not just the first entry. Several
-        // rules carry a second line (e.g. "rotate the key if it was ever exposed")
-        // that the previous single-index render dropped silently. UT-08: print a
-        // rule's fix once — a repeated rule (20 hits of the same secret rule)
-        // used to reprint the identical fix block for every finding.
+        // rules carry a second line (e.g. "or unstage if it is personal" on
+        // generic.agent-instructions) that the previous single-index render
+        // dropped silently. UT-08: print a rule's fix once — a repeated rule
+        // (20 hits of the same path rule) used to reprint the identical fix
+        // block for every finding.
         const remedies = f.remediation || [];
         if (remedies.length && fixesPrinted.has(f.ruleId)) {
             out += `       fix: as above for ${f.ruleId}\n`;

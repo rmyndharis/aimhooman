@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { changedProtectedPaths } from '../scripts/authorize-owner-paths.mjs';
-import { selectPushBase, selectReleaseBase } from '../scripts/scan-ci-history.mjs';
+import { selectPushBase } from '../scripts/scan-ci-history.mjs';
 
 function repository() {
     const root = mkdtempSync(join(tmpdir(), 'aim-ci-history-'));
@@ -84,25 +84,6 @@ test('force push with an unreachable before object scans all reachable history',
         assert.equal(selectPushBase({
             before: unavailable, head, refName: 'main', defaultBranch: 'main', cwd: root,
         }), '0'.repeat(head.length));
-    } finally {
-        rmSync(root, { recursive: true, force: true });
-    }
-});
-
-test('untrusted reachable version tags never shorten the release scan', () => {
-    const root = repository();
-    try {
-        const first = git(root, ['rev-parse', 'HEAD']);
-        git(root, ['tag', 'v0.0.1', first]);
-        writeFileSync(join(root, 'next.txt'), 'next\n');
-        git(root, ['add', 'next.txt']);
-        git(root, ['commit', '-q', '-m', 'next']);
-        const head = git(root, ['rev-parse', 'HEAD']);
-        git(root, ['tag', 'v0.1.0', head]);
-
-        assert.equal(selectReleaseBase({ head, currentTag: 'v0.1.0', cwd: root }), '0'.repeat(40));
-        git(root, ['tag', '-d', 'v0.0.1']);
-        assert.equal(selectReleaseBase({ head, currentTag: 'v0.1.0', cwd: root }), '0'.repeat(40));
     } finally {
         rmSync(root, { recursive: true, force: true });
     }
