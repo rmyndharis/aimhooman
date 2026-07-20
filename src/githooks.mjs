@@ -682,7 +682,10 @@ function hookScript(name, cmd, cliPath, chainedPath) {
     //   their own message rules, so their presence disables the fast path.
     //   The tree snapshot stays at the top of the script on purpose: it must
     //   capture the would-be tree BEFORE a chained predecessor can stage a
-    //   policy change into the live index.
+    //   policy change into the live index. The fast path also yields when the
+    //   pre-commit dispatcher itself is gone: its "the tree was already
+    //   scanned" premise no longer holds, so commit-msg pays the spawn and
+    //   scans the captured tree itself.
     // - pre-commit: an empty index holds nothing to scan (`--allow-empty`,
     //   `commit -m` with no staged change). git diff exits 1 on staged changes
     //   and >1 on read errors; only a proven-empty index skips.
@@ -695,7 +698,9 @@ function hookScript(name, cmd, cliPath, chainedPath) {
     //   aborts the push rather than skipping the guard.
     const preAimFilter = name === 'commit-msg'
         ? `AIMHOOMAN_COMMON=$(PATH="$AIMHOOMAN_PATH" git rev-parse --git-common-dir 2>/dev/null) || AIMHOOMAN_COMMON=
-if [ -n "$AIMHOOMAN_COMMON" ] && PATH="$AIMHOOMAN_PATH" ls "$AIMHOOMAN_COMMON/aimhooman/rules/"*.json >/dev/null 2>&1; then
+if [ ! -x "$(PATH="$AIMHOOMAN_PATH" dirname "$0")/pre-commit" ]; then
+  :
+elif [ -n "$AIMHOOMAN_COMMON" ] && PATH="$AIMHOOMAN_PATH" ls "$AIMHOOMAN_COMMON/aimhooman/rules/"*.json >/dev/null 2>&1; then
   :
 else
   PATH="$AIMHOOMAN_PATH" grep -Eiq -- ${shq(MESSAGE_ANCHOR_ERE)} "$1" 2>/dev/null

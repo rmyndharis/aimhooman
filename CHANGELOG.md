@@ -27,9 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail-closed on all profiles.
 - Commit overhead: the `commit-msg` dispatcher greps the message for the
   attribution-rule anchors and skips its Node spawn when none is present (a
-  local rule pack re-enables the spawn, since it can declare its own message
-  rules), and `pre-commit` skips its spawn when the index is empty. A typical
-  commit goes from three Node spawns to two; an empty commit to one.
+  local rule pack or a missing `pre-commit` dispatcher re-enables the spawn,
+  since the "tree already scanned" premise needs both), and `pre-commit` skips
+  its spawn when the index is empty. A typical commit goes from three Node
+  spawns to two; an empty commit to one.
 - The `not very hooman.` banner now appears only when a finding actually stops
   or reshapes the operation (a block). A pure review advisory, where the
   commit proceeds untouched, prints without it so the banner keeps its meaning.

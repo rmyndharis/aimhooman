@@ -1709,7 +1709,7 @@ test('a moved Node pin allows the operation when no Node exists to run the remed
 // attribution anchors and skips the Node spawn when none is present. These
 // tests drive the dispatcher with a missing CLI: a skipped spawn stays silent,
 // a taken spawn hits the fail-open 'guard unavailable' path.
-test('commit-msg fast path skips the Node spawn only when the message has no anchor and no local pack', () => {
+test('commit-msg fast path skips the Node spawn only with a clean message, no local pack, and pre-commit intact', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-fastpath-'));
     try {
         isolatedGitConfig(base, () => {
@@ -1743,6 +1743,15 @@ test('commit-msg fast path skips the Node spawn only when the message has no anc
             const packed = drive();
             assert.equal(packed.status, 0, packed.stderr);
             assert.match(packed.stderr, /guard unavailable/);
+            rmSync(join(root, '.git', 'aimhooman', 'rules', 'local.json'));
+
+            // With the pre-commit dispatcher gone, its "tree already scanned"
+            // premise is void, so the fast path yields even for a clean message.
+            renameSync(join(hooks, 'pre-commit'), join(hooks, 'pre-commit.parked'));
+            const degraded = drive();
+            assert.equal(degraded.status, 0, degraded.stderr);
+            assert.match(degraded.stderr, /guard unavailable/);
+            renameSync(join(hooks, 'pre-commit.parked'), join(hooks, 'pre-commit'));
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
