@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
@@ -148,6 +148,19 @@ function diffEntries(repo, args, renameThreshold = null) {
     return enrichEntries(repo, entries);
 }
 
+// physicalDir is the spelling Git itself works in: it resolves symlinks and
+// lengthens Windows 8.3 names before printing --show-toplevel, so a relative
+// --git-common-dir has to be anchored on the physical directory rather than on
+// the caller's spelling of it. Falling back to resolve() keeps a directory we
+// cannot stat behaving exactly as it did before.
+function physicalDir(dir) {
+    try {
+        return realpathSync.native(dir);
+    } catch {
+        return resolve(dir);
+    }
+}
+
 // openRepo resolves the repository containing cwd. Throws if not a repo.
 export function openRepo(cwd = process.cwd()) {
     // One rev-parse invocation, not three: this runs inside every Git hook
@@ -187,7 +200,7 @@ export function openRepo(cwd = process.cwd()) {
     } else if (commonRaw === '.git') {
         commonDir = join(root, commonRaw);
     } else {
-        commonDir = resolve(cwd, commonRaw);
+        commonDir = resolve(physicalDir(cwd), commonRaw);
     }
     return {
         root,

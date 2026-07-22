@@ -149,6 +149,44 @@ test('linked worktree uses common hooks and preserves/restores an existing hook'
     }
 });
 
+// git prints --show-toplevel and --absolute-git-dir already resolved, but
+// --git-common-dir comes back relative from a subdirectory, and resolving it
+// against the caller's spelling put a symlinked spelling into stateDir. The
+// chained path baked into the dispatchers then stopped matching the one
+// recomputed for the diagnostic, and every hook read as belonging to another
+// repository. A hooksPath inside .git takes the insideGitDir shortcut and never
+// notices, so this needs one outside it.
+test('a symlinked cwd spelling keeps hooks under an excluded core.hooksPath owned', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-spelling-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            mkdirSync(join(root, '.hooks'));
+            mkdirSync(join(root, 'sub'));
+            writeFileSync(join(root, '.gitignore'), '.hooks/\n');
+            git(root, ['add', '.gitignore']);
+            git(root, ['commit', '-q', '-m', 'exclude hooks path']);
+            git(root, ['config', '--local', 'core.hooksPath', join(root, '.hooks')]);
+
+            // git's own spelling of the root, so the fixture's spelling of tmp
+            // (a firmlink on macOS) is not what is under test here.
+            const canonical = git(root, ['rev-parse', '--show-toplevel']);
+            installHooks(openRepo(canonical), CLI);
+            const owned = installedHooks(openRepo(canonical));
+            assert.ok(owned.includes('pre-commit'));
+
+            // Only --git-common-dir comes back relative, and only from below the
+            // root, so both probes have to run in a subdirectory.
+            const linked = join(base, 'linked');
+            symlinkSync(canonical, linked);
+            assert.deepEqual(installedHooks(openRepo(join(canonical, 'sub'))), owned);
+            assert.deepEqual(installedHooks(openRepo(join(linked, 'sub'))), owned);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('uninstall --purge-state keeps state when a chained predecessor backup is unrestored', () => {
     // Guards the data-loss path: a per-hook restore failure leaves the user's
     // original hook existing only in <stateDir>/chained, so --purge-state must
