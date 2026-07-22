@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-22
+
+### Fixed
+
+- Every commit and every push could be blocked on Windows after
+  `init --global`. Git canonicalises a path through the OS, lengthening 8.3
+  short names and correcting case, while Node's `realpathSync` only follows
+  symlinks and echoes back the spelling it was handed. The hooks directory Git
+  reported and the one built from the home directory were then two spellings of
+  one directory that failed to compare equal, every managed dispatcher read as
+  belonging to another repository, and the guard-integrity check stopped the
+  operation. The remedy it printed — rerun `init` — re-baked the same spelling
+  and could not help. Paths now canonicalise through the same OS call Git makes.
+- A repository entered through a symlinked path saw every managed hook as
+  foreign when `core.hooksPath` pointed outside `.git`. Only `--git-common-dir`
+  comes back relative, and only from a subdirectory, and it was resolved
+  against the caller's spelling of the working directory rather than the
+  physical one. A hooks path inside `.git` was never affected.
+- A dispatcher no longer fails to recognise itself when the repository path
+  contains a newline or carriage return. The ownership check read the baked
+  chained path back with a regex that stops at both characters, so `init`
+  reported the installation as incomplete and rolled back.
+- A failed `init --global` now rolls back every dispatcher it wrote. The
+  rollback snapshotted the four hooks the guard requires to be active instead
+  of the five an install writes, so a global init that landed the hooks and
+  then failed to write `core.hooksPath` left `pre-push` behind in a directory
+  `core.hooksPath` never came to point at.
+
 ## [0.4.0] - 2026-07-20
 
 ### Added
