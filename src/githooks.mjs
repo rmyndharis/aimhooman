@@ -149,12 +149,28 @@ function gitIgnored(repo, path) {
     }
 }
 
+// realpathSync.native, not realpathSync: Git canonicalises through the OS
+// (GetFinalPathNameByHandleW on Windows, realpath(3) elsewhere), so it lengthens
+// 8.3 names and corrects case, while the JS walker only follows symlinks and
+// echoes whatever spelling it was handed. Comparing a Git-supplied path against
+// a Node-supplied one then fails for two spellings of one directory, and every
+// global dispatcher is diagnosed as belonging to another repository. Fall back
+// to the JS walker when the native call cannot answer.
+function nativeRealpath(path) {
+    try {
+        return realpathSync.native(path);
+    } catch (error) {
+        if (error?.code === 'ENOENT') throw error;
+        return realpathSync(path);
+    }
+}
+
 function canonicalPath(path) {
     let current = resolve(path);
     const tail = [];
     for (; ;) {
         try {
-            return resolve(realpathSync(current), ...tail);
+            return resolve(nativeRealpath(current), ...tail);
         } catch (error) {
             if (error?.code !== 'ENOENT') throw error;
             const parent = dirname(current);

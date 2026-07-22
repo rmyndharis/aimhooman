@@ -1441,6 +1441,63 @@ test('global reference dispatcher stays transparent in unsupported bare reposito
     }
 });
 
+// Git canonicalises a path through the OS; Node's realpathSync only follows
+// symlinks and echoes the spelling it was handed. Where the two disagree, the
+// hooks directory Git reports and the one Node builds from homedir() are the
+// same directory under two names, and every managed dispatcher used to be
+// diagnosed as belonging to another repository — blocking every commit and
+// every push with no remedy, since `init` re-bakes the same spelling.
+test('a global install recognises its own dispatchers through an equivalent hooks-path spelling', (t) => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-spelling-'));
+    // Two spellings reach one directory only where the filesystem aliases names
+    // (Windows 8.3, case-insensitive APFS/NTFS). On a case-sensitive volume the
+    // variant is a different directory, so there is nothing to reconcile.
+    mkdirSync(join(base, 'CaseProbe'));
+    if (!existsSync(join(base, 'caseprobe'))) {
+        rmSync(base, { recursive: true, force: true });
+        return t.skip('filesystem is case-sensitive; no equivalent spelling exists');
+    }
+    const source = join(base, 'source');
+    const bare = join(base, 'bare');
+    const home = join(base, 'home');
+    mkdirSync(source);
+    mkdirSync(bare);
+    mkdirSync(home);
+    const env = globalFixtureEnv(home);
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: source, env });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: source, env });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: source, env });
+        writeFileSync(join(source, 'README.md'), 'safe spelling\n');
+        execFileSync('git', ['add', 'README.md'], { cwd: source, env });
+        execFileSync('git', ['commit', '-q', '-m', 'safe source'], { cwd: source, env });
+        execFileSync('git', ['init', '--bare', '-q'], { cwd: bare, env });
+        execFileSync('node', [CLI, 'init', '--global', '--yes'], { cwd: source, env });
+
+        // The dispatchers on disk stay untouched; only the spelling Git reports
+        // for them changes, which is what the platform does on its own.
+        execFileSync(
+            'git',
+            ['config', '--global', 'core.hooksPath', join(base, 'HOME', '.aimhooman', 'hooks')],
+            { cwd: source, env },
+        );
+
+        writeFileSync(join(source, 'README.md'), 'safe spelling\nmore\n');
+        execFileSync('git', ['add', 'README.md'], { cwd: source, env });
+        const committed = spawnSync('git', ['commit', '-m', 'second'], {
+            cwd: source, env, encoding: 'utf8',
+        });
+        assert.equal(committed.status, 0, committed.stderr);
+
+        const pushed = spawnSync('git', ['push', bare, 'HEAD:refs/heads/main'], {
+            cwd: source, env, encoding: 'utf8',
+        });
+        assert.equal(pushed.status, 0, pushed.stderr);
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('global reference dispatcher stays transparent while a repository is still being created', () => {
     // git writes the initial HEAD inside a reference transaction and fires this
     // hook at `prepared`, when GIT_DIR is exported but nothing can be queried
