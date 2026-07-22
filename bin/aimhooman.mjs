@@ -23,7 +23,7 @@ import {
 } from '../src/gitx.mjs';
 import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, saveConfig, saveOverrides } from '../src/state.mjs';
 import { applyExclude, inspectExclude, managedPatterns, patternsForRules, removeExclude } from '../src/exclude.mjs';
-import { effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
+import { MANAGED_HOOKS, effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
@@ -1091,7 +1091,7 @@ function cmdInit(args) {
             if (localHooksPath) {
                 console.error(`aimhooman: warning: this repository has local core.hooksPath="${localHooksPath}", which overrides the global guard here`);
             }
-            const hookSnapshots = REQUIRED_GIT_HOOKS
+            const hookSnapshots = MANAGED_HOOKS
                 .map((name) => snapshotFile(join(aimDir, name)));
             let rep;
             try {

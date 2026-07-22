@@ -1401,6 +1401,41 @@ test('init --global sets core.hooksPath and installs dispatchers', () => {
     }
 });
 
+// The rollback has to undo what was written, which is every managed dispatcher,
+// not the smaller set the guard requires to be active. Snapshotting the required
+// four left pre-push behind in a hooks directory core.hooksPath never came to
+// point at.
+test('a failed init --global rolls back every dispatcher it wrote', () => {
+    const home = mkdtempSync(join(tmpdir(), 'aim-rollback-home-'));
+    const dir = mkdtempSync(join(tmpdir(), 'aim-rollback-repo-'));
+    const env = globalFixtureEnv(home);
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: dir, env });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir, env });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: dir, env });
+        // A directory where Git expects the global config file: the dispatchers
+        // land, then writing core.hooksPath fails and rollback runs.
+        mkdirSync(env.GIT_CONFIG_GLOBAL);
+        const failed = spawnSync('node', [CLI, 'init', '--global', '--yes'], {
+            cwd: dir, env, encoding: 'utf8',
+        });
+        assert.notEqual(failed.status, 0, 'init --global should have failed');
+        const hooks = join(home, '.aimhooman', 'hooks');
+        for (const name of [
+            'pre-commit', 'pre-merge-commit', 'commit-msg', 'reference-transaction', 'pre-push',
+        ]) {
+            assert.equal(
+                existsSync(join(hooks, name)),
+                false,
+                `${name} survived the rollback`,
+            );
+        }
+    } finally {
+        rmSync(home, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('global reference dispatcher stays transparent in unsupported bare repositories', () => {
     const source = mkdtempSync(join(tmpdir(), 'aim-global-bare-source-'));
     const bare = mkdtempSync(join(tmpdir(), 'aim-global-bare-target-'));

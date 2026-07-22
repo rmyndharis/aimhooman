@@ -28,6 +28,10 @@ const MANAGED = {
     'reference-transaction': 'refcheck "$1"',
     'pre-push': 'pushcheck',
 };
+// Every dispatcher an install writes. Distinct from REQUIRED_GIT_HOOKS in
+// bin/aimhooman.mjs, which is the smaller set the guard requires to be active:
+// a rollback has to undo what was written, not what is required.
+export const MANAGED_HOOKS = Object.freeze(Object.keys(MANAGED));
 // Literal anchors shared by every built-in message-kind rule. The commit-msg
 // dispatcher greps the message for this ERE before paying a Node spawn: a
 // message with no anchor cannot match any attribution rule, so skipping the
