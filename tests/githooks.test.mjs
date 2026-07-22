@@ -187,6 +187,38 @@ test('a symlinked cwd spelling keeps hooks under an excluded core.hooksPath owne
     }
 });
 
+// The ownership check reads the chained path back out of the dispatcher, and
+// the ^CHAINED=(.*)$ it used stops at a newline or carriage return — JS excludes
+// both from `.`. A repository path containing one made a dispatcher written
+// seconds earlier read as belonging to another repository, so init refused. A
+// hooks path inside .git takes the insideGitDir shortcut, so this needs one
+// outside it. Windows forbids these characters in a path entirely.
+test('hooks stay owned when the repository path contains a newline', (t) => {
+    if (process.platform === 'win32') return t.skip('Windows paths cannot contain a newline');
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-newline-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = join(base, 're\npo');
+            mkdirSync(root);
+            git(root, ['init', '-q']);
+            git(root, ['config', 'user.email', 'test@example.com']);
+            git(root, ['config', 'user.name', 'Test']);
+            mkdirSync(join(root, '.hooks'));
+            writeFileSync(join(root, '.gitignore'), '.hooks/\n');
+            writeFileSync(join(root, 'README.md'), 'initial\n');
+            git(root, ['add', '.gitignore', 'README.md']);
+            git(root, ['commit', '-q', '-m', 'initial']);
+            git(root, ['config', '--local', 'core.hooksPath', join(root, '.hooks')]);
+
+            const repo = openRepo(git(root, ['rev-parse', '--show-toplevel']));
+            installHooks(repo, CLI);
+            assert.ok(installedHooks(repo).includes('pre-commit'));
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('uninstall --purge-state keeps state when a chained predecessor backup is unrestored', () => {
     // Guards the data-loss path: a per-hook restore failure leaves the user's
     // original hook existing only in <stateDir>/chained, so --purge-state must

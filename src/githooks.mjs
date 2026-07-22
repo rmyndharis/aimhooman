@@ -962,7 +962,16 @@ function ownedHook(content, name) {
 function ownedByRepo(repo, dir, content, name, chainedPath) {
     if (!ownedHook(content, name)) return false;
     if (insideGitDir(repo, dir)) return true;
-    return assignmentValue(content, 'CHAINED') === String(chainedPath);
+    // Match the encoded assignment rather than a decoded value: the ^CHAINED=(.*)$
+    // that assignmentValue uses stops at a newline or carriage return, and JS
+    // excludes both from `.`, so a repository path containing either made a
+    // dispatcher written seconds earlier fail to recognise itself. Anchoring on
+    // the first assignment keeps this the same byte-exact check it has always
+    // been — the fingerprint is a plain checksum anyone can recompute, so this
+    // comparison is what actually establishes who wrote the file.
+    const chained = `\nCHAINED=${shq(chainedPath)}\n`;
+    const first = content.indexOf('\nCHAINED=');
+    return first !== -1 && content.startsWith(chained, first);
 }
 
 function decodeMetadata(value) {
