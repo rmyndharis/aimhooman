@@ -2916,7 +2916,11 @@ test('clean warns (not denies) a hygiene block under git commit --no-verify', as
             tool_name: 'Bash',
             tool_input: { command: 'git commit --no-verify -m trace' },
         });
-        assert.equal(out.permissionDecision, 'allow');
+        // Advisory means advisory: no permission decision at all, so the host's
+        // own permission rules stay in charge. An 'allow' here would
+        // auto-approve the command precisely when findings exist.
+        assert.equal(out.permissionDecision, undefined);
+        assert.equal(out.hookSpecificOutput.permissionDecision, undefined);
         assert.match(out.hookSpecificOutput.additionalContext, /--no-verify or shell indirection bypasses the pre-commit guard/);
         assert.match(
             out.hookSpecificOutput.additionalContext,

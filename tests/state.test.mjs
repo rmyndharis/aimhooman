@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -479,8 +479,9 @@ test('withLock holds the critical section and fails closed on a legacy shared lo
     try {
         const nestedLock = join(dir, 'missing', 'overrides.json.lock');
         assert.equal(withLock(nestedLock, () => 'created'), 'created');
-        assert.deepEqual(readdirSync(join(dir, 'missing')), ['overrides.json.lock.queue']);
-        assert.deepEqual(readdirSync(`${nestedLock}.queue`), []);
+        // The parent is created on demand, and the release sweep removes the
+        // emptied queue, so a clean acquisition leaves nothing behind.
+        assert.deepEqual(readdirSync(join(dir, 'missing')), []);
 
         const lock = join(dir, 'overrides.json.lock');
         assert.equal(withLock(lock, () => {
@@ -554,8 +555,9 @@ test('a queue directory swept mid-acquisition is recreated, not failed onto the 
             'entered',
         );
         assert.equal(swept, true, 'the sweep never ran, so the race was not exercised');
-        // Released cleanly: the candidate is gone and the lock is immediately reusable.
-        assert.deepEqual(readdirSync(queue), []);
+        // Released cleanly: the candidate is gone, the release sweep took the
+        // emptied queue with it, and the lock is immediately reusable.
+        assert.equal(existsSync(queue), false);
         assert.equal(withLock(lock, () => 'again'), 'again');
     } finally {
         rmSync(dir, { recursive: true, force: true });

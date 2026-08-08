@@ -6,19 +6,34 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
 import { newEngineWithDiagnostics } from '../src/scan.mjs';
-import { exitCode, human, jsonReport, visible } from '../src/report.mjs';
+import {
+    emitDiagnostics,
+    exitCode,
+    expectedErrorCode,
+    human,
+    incompleteMessage,
+    jsonReport,
+    tone,
+    visible,
+} from '../src/report.mjs';
+import {
+    REQUIRED_GIT_HOOKS,
+    dispatchHooksChanged,
+    precommitCleanMatches,
+    recordPrecommitClean,
+    repairStagedBlocks,
+    resolveIntroduced,
+    scanProposedCommits,
+    warnIncompleteOnce,
+} from '../src/guard.mjs';
 import {
     GitRevisionError,
     gitConfig,
     ignoredByPatterns,
-    introducedCommits,
     openRepo,
     readCommitPath,
     readStagedPath,
-    stagedPaths,
-    stagedRenameSources,
     stagedTreeSha,
-    unstagePaths,
     withIndexFromTree,
 } from '../src/gitx.mjs';
 import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, saveConfig, saveOverrides } from '../src/state.mjs';
@@ -34,7 +49,6 @@ const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.u
 const CLI_PATH = fileURLToPath(import.meta.url);
 const PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const PROFILES = new Set(['clean', 'strict', 'compliance']);
-const REQUIRED_GIT_HOOKS = ['pre-commit', 'pre-merge-commit', 'commit-msg', 'reference-transaction'];
 const MINIMUM_GIT_VERSION = [2, 28, 0];
 const LIFECYCLE_LOCK_OPTIONS = { retries: 1000 };
 
@@ -56,10 +70,6 @@ function currentRepositoryIsBare() {
     } catch {
         return false;
     }
-}
-
-function tone() {
-    return process.env.AIMHOOMAN_TONE === 'professional' || process.env.CI ? 'professional' : 'playful';
 }
 
 // The per-scan budget sizes the `cat-file --batch` read buffer, so a value that
@@ -196,103 +206,6 @@ function parseNoArguments(args) {
     parseArguments(args, { maxPositionals: 0 });
 }
 
-function expectedErrorCode(error) {
-    if (error instanceof ArgumentError) return 20;
-    if (/^(?:ProjectPolicy|LocalConfig|LocalOverrides|PolicyProfile|PolicyTarget|PolicyRules|RulePack)/.test(error?.name || '')) {
-        return 20;
-    }
-    if (error?.name === 'GitRevisionError' || error instanceof TypeError) return 20;
-    return 30;
-}
-
-function emitDiagnostics(diagnostics = []) {
-    const seen = new Set();
-    for (const diagnostic of diagnostics) {
-        const message = diagnostic.message || String(diagnostic);
-        if (seen.has(message)) continue;
-        seen.add(message);
-        process.stderr.write(`aimhooman: warning: ${message}\n`);
-    }
-}
-
-function incompleteMessage(scan, { blocking = true } = {}) {
-    const reasons = scan.stats?.skipped || {};
-    // Each count is how many items were skipped, not the limit that fired:
-    // "(size-limit=1)" read as a one-byte budget. Name the noun so the number
-    // cannot be mistaken for the budget it tripped.
-    const skipped = Object.entries(reasons)
-        .map(([reason, count]) => `${reason}=${count} ${skipCountNoun(reason, count)}`)
-        .join(', ');
-    // Every other reason is a size or budget the caller can shrink. A pack that
-    // will not compile is not, and the warning above already names the file and
-    // the error, so point at that instead of misdirecting to the limits. When a
-    // byte budget is what stopped the scan, name the budget: the caller whose own
-    // tree outgrew it needs to raise one, and "reduce the limits" sends them the
-    // wrong way down a road they cannot leave. A blocking stop says "and retry";
-    // a warning names what to change so the next run covers what this one
-    // skipped — this run is already through.
-    const tail = blocking ? 'and retry' : 'so the next scan covers it';
-    const budgeted = reasons['size-limit'] || reasons['total-byte-limit'];
-    const hint = reasons['local-pack-error']
-        ? `fix the reported rule pack ${tail}`
-        : budgeted
-            ? `reduce the target, or raise AIMHOOMAN_MAX_FILE_BYTES / AIMHOOMAN_MAX_TOTAL_BYTES, ${tail}`
-            : `reduce the target or limits ${tail}`;
-    let message = `aimhooman: ${blocking ? '' : 'warning: '}scan incomplete${skipped ? ` (skipped: ${skipped})` : ''}; ${hint}\n`;
-    const skippedPaths = scan.stats?.skippedPaths || {};
-    const pathLines = [];
-    for (const [reason, entries] of Object.entries(skippedPaths)) {
-        for (const entry of entries.slice(0, 5)) {
-            const sizeStr = formatBytes(entry.size);
-            pathLines.push(`  skipped: ${entry.path} (${reason}, ${sizeStr})\n`);
-        }
-        if (entries.length > 5) pathLines.push(`  ... and ${entries.length - 5} more\n`);
-    }
-    return message + pathLines.join('');
-}
-
-// One oversized file trips the same non-blocking "scan incomplete" warning in
-// up to three hooks of a single commit (pre-commit, commit-msg, the final ref
-// guard) and again in pre-push. Print it once per tree and gap: the first
-// guard to warn records the tree plus the skip signature, later guards stay
-// silent for the identical gap. State failures degrade to printing — a
-// duplicate warning is noise, a swallowed one is a miss.
-const INCOMPLETE_NOTICE_VERSION = 1;
-function warnIncompleteOnce(repo, treeSha, scan) {
-    const signature = createHash('sha256')
-        .update(JSON.stringify([scan.stats?.skipped || {}, scan.stats?.skippedPaths || {}]))
-        .digest('hex');
-    if (treeSha) {
-        try {
-            const statePath = join(repo.stateDir, 'incomplete-notice.json');
-            let previous = null;
-            try { previous = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* first run or corrupt state */ }
-            if (previous?.version === INCOMPLETE_NOTICE_VERSION
-                && previous.tree === treeSha
-                && previous.signature === signature) return;
-            writeFileSync(statePath, JSON.stringify({ version: INCOMPLETE_NOTICE_VERSION, tree: treeSha, signature }));
-        } catch { /* fall through to printing */ }
-    }
-    process.stderr.write(incompleteMessage(scan, { blocking: false }));
-}
-
-// Most skip reasons tally files; the three below tally something else, so the
-// noun travels with the reason instead of reading "local-pack-error=1 file".
-function skipCountNoun(reason, count) {
-    const noun = {
-        'finding-limit': 'finding',
-        'local-input-limit': 'input',
-        'local-pack-error': 'pack',
-    }[reason] || 'file';
-    return `${noun}${count === 1 ? '' : 's'}`;
-}
-
-function formatBytes(bytes) {
-    if (bytes == null || bytes < 0) return '?';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function snapshotFile(path) {
     try {
@@ -352,68 +265,6 @@ function rejectUnsupportedGit() {
         `aimhooman: Git 2.28.0 or newer is required for the reference-transaction guard; found ${current.display}`
     );
     return true;
-}
-
-function dispatchHooksChanged(repo, profile) {
-    if (!process.env.AIMHOOMAN_ACTIVE_HOOK) return false;
-    const finalBoundary = process.env.AIMHOOMAN_ACTIVE_HOOK === 'reference-transaction';
-    const activeHooks = installedHooks(repo);
-    const missingHooks = REQUIRED_GIT_HOOKS.filter((name) => !activeHooks.includes(name));
-    if (!missingHooks.length) return false;
-    // A predecessor can remove a later dispatcher before it has a chance to
-    // run. Every profile must stop at the first hook that notices; otherwise a
-    // clean/compliance pre-commit predecessor could delete the final ref guard
-    // and leave no downstream boundary at all.
-    const boundary = finalBoundary ? 'final' : profile === 'strict' ? 'strict' : 'required';
-    process.stderr.write(
-        `aimhooman: ${boundary} Git guards changed while ${process.env.AIMHOOMAN_ACTIVE_HOOK} was running; ` +
-        `${missingHooks.join(', ')} ${missingHooks.length === 1 ? 'is' : 'are'} unavailable. ` +
-        "The commit was stopped; run 'aimhooman init' and retry.\n"
-    );
-    return true;
-}
-
-// W5 pre-commit/commit-msg marker dedup. pre-commit writes a marker after a
-// clean, complete scan of the staged tree; commit-msg reads it and skips its
-// duplicate ~170ms tree scan when the staged tree sha, profile, and
-// completeness all match. The marker lives in stateDir (gitignored plumbing).
-// It is self-invalidating: any index mutation between the two hooks changes the
-// tree sha, so a stale marker never matches. A missing/corrupt/mismatched
-// marker makes commit-msg fall back to the full scan, so this is purely an
-// optimization and never weakens the guard.
-const PRECOMMIT_CLEAN_VERSION = 1;
-function precommitCleanPath(repo) {
-    return join(repo.stateDir, 'precommit-clean.json');
-}
-function recordPrecommitClean(repo, profile) {
-    let treeSha;
-    try {
-        treeSha = stagedTreeSha(repo);
-    } catch {
-        return; // cannot compute the sha → do not record; commit-msg will scan
-    }
-    try {
-        writeFileSync(precommitCleanPath(repo), JSON.stringify({
-            version: PRECOMMIT_CLEAN_VERSION,
-            tree: treeSha,
-            profile,
-            complete: true,
-        }));
-    } catch {
-        // best effort; a missing marker just means commit-msg scans normally
-    }
-}
-function precommitCleanMatches(repo, treeSha, profile) {
-    let marker;
-    try {
-        marker = JSON.parse(readFileSync(precommitCleanPath(repo), 'utf8'));
-    } catch {
-        return false; // missing/corrupt → fall back to full scan
-    }
-    return marker?.version === PRECOMMIT_CLEAN_VERSION
-        && marker.complete === true
-        && marker.tree === treeSha
-        && marker.profile === profile;
 }
 
 // F-E1: the prevention layer keeps AI artifacts out of `git status`, which
@@ -478,7 +329,13 @@ function cmdPrecommit(args) {
                 process.stderr.write(incompleteMessage(scan));
                 return 31;
             }
-            warnIncompleteOnce(repo, stagedTreeSha(repo), scan);
+            // This branch's contract is "warn and continue", so the dedup key is
+            // best-effort: a write-tree that cannot answer (unwritable odb, a
+            // corrupt index) must degrade to an undeduplicated warning, never
+            // convert the warning into a stopped commit.
+            let warnTreeSha = null;
+            try { warnTreeSha = stagedTreeSha(repo); } catch { /* warn without dedup */ }
+            warnIncompleteOnce(repo, warnTreeSha, scan);
             return 0;
         }
         // W5 marker dedup: record that this staged tree scanned clean so the
@@ -499,48 +356,7 @@ function cmdPrecommit(args) {
     const paths = [...new Set(blocks.map((f) => f.path).filter(Boolean))];
     let emptied = false;
     try {
-        const unstageTargets = new Set(paths);
-        for (const finding of blocks) {
-            if (finding.status === 'R' && finding.sourcePath && unstageTargets.has(finding.path)) {
-                unstageTargets.add(finding.sourcePath);
-            }
-        }
-        for (const source of stagedRenameSources(repo, paths)) unstageTargets.add(source);
-        // Whether the repair empties the index is derived from the staged paths
-        // captured before repair, not from a second git read after
-        // `git restore --staged`. That post-repair read followed an index write
-        // and could transiently report the wrong state under heavy CI load,
-        // flaking the repair tests. unstagePaths is atomic (it throws on
-        // failure), so when every staged path is a repair target the index
-        // matches HEAD afterward. The capture is best-effort and runs before the
-        // repair: if this read fails the unstage still runs and the commit is
-        // left to proceed rather than blocked on a state we could not read.
-        let stagedBefore;
-        try {
-            stagedBefore = stagedPaths(repo);
-        } catch {
-            stagedBefore = null;
-        }
-        unstagePaths(repo, [...unstageTargets]);
-        // Under heavy CI load a `git restore --staged` or the rename-source
-        // detection above can transiently leave a target staged, which flakes
-        // the repair tests and would let an artifact ride through. Re-detect
-        // rename sources and re-unstage any still-staged target until every
-        // target is gone or the budget is reached.
-        for (let attempt = 0; attempt < 4; attempt += 1) {
-            let stillStaged;
-            try {
-                for (const source of stagedRenameSources(repo, paths)) unstageTargets.add(source);
-                stillStaged = new Set(stagedPaths(repo));
-            } catch {
-                break;
-            }
-            const pending = [...unstageTargets].filter((path) => stillStaged.has(path));
-            if (!pending.length) break;
-            unstagePaths(repo, pending);
-        }
-        emptied = stagedBefore !== null
-            && stagedBefore.every((path) => unstageTargets.has(path));
+        emptied = repairStagedBlocks(repo, blocks, paths);
         process.stderr.write(
             `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (index only; nothing on disk was deleted)${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
         );
@@ -691,116 +507,6 @@ function cmdCommitmsg(args) {
     return remaining.some((finding) => finding.decision === 'block') ? 10 : 0;
 }
 
-// resolveIntroduced maps each proposed update to the commits it introduces,
-// with the review contexts and local-authorship flags the scan needs. Shared
-// by refcheck (local ref updates) and pushcheck (about-to-be-pushed refs).
-// includeStagedContexts carries a staged review into the direct tip's scan;
-// pushcheck leaves it off because a pushed commit is judged as an object, not
-// against the live index it may never have passed through.
-function resolveIntroduced(repo, updates, { includeStagedContexts = true } = {}) {
-    const contextsByCommit = new Map();
-    // A commit's message belongs to whoever wrote it. Attribution and marker
-    // rules police the text a local developer can edit, so they are scoped
-    // to commits authored here: an update that introduces exactly one new
-    // commit on top of a non-zero old tip (a plain commit, an --amend, or a
-    // local --no-ff merge of an already-gated branch). Anything else — a new
-    // branch pulled in by `gh pr checkout` or `git fetch`, a merge of fetched
-    // history — imports other people's commit text the developer cannot
-    // change, and scanning it only blocks the review.
-    const localAuthorTips = new Set();
-    for (const update of updates) {
-        const introduced = introducedCommits(repo, [update]);
-        if (!/^0+$/.test(update.oldObjectId)
-            && introduced.length === 1
-            && introduced[0] === update.newObjectId) {
-            localAuthorTips.add(update.newObjectId);
-        }
-        for (const revision of introduced) {
-            const contexts = contextsByCommit.get(revision) || [];
-            contexts.push({
-                head: update.newObjectId,
-                storedTransition: revision,
-                scanTransition: revision,
-            });
-            // A staged review is bound to the exact old tip. It can be
-            // carried into the final full-snapshot scan only for the direct
-            // proposed tip whose parent is that old tip, never for an
-            // intermediate commit or a newly created branch ancestry.
-            if (includeStagedContexts && revision === update.newObjectId && !/^0+$/.test(update.oldObjectId)) {
-                const { parents } = commitParents(repo, revision);
-                if (parents.includes(update.oldObjectId)) {
-                    contexts.push({
-                        head: update.oldObjectId,
-                        storedTransition: 'staged',
-                        scanTransition: revision,
-                    });
-                }
-            }
-            contextsByCommit.set(revision, contexts);
-        }
-    }
-    return [...contextsByCommit].map(([revision, reviewContexts]) => [
-        revision,
-        reviewContexts,
-        localAuthorTips.has(revision),
-    ]);
-}
-
-// scanProposedCommits scans each introduced commit and returns the first
-// non-zero verdict. rejectNote(revision) supplies the caller-specific veto
-// line(s) printed after the findings; callers without a note pass null.
-function scanProposedCommits(repo, commits, { rejectNote }) {
-    const limits = scanLimits();
-    for (const [revision, reviewContexts, authoredLocally] of commits) {
-        let scan;
-        try {
-            scan = scanGitTarget(repo, {
-                kind: 'commit',
-                revision,
-                reviewContexts,
-                policyMigrationContexts: reviewContexts,
-                limits,
-                messageScope: authoredLocally ? 'commit' : 'changes-only',
-            });
-        }
-        catch (error) {
-            console.error(`aimhooman: cannot scan proposed commit ${revision}: ${error.message}`);
-            return expectedErrorCode(error);
-        }
-        emitDiagnostics(scan.diagnostics);
-        // The reference transaction is the final boundary --no-verify cannot
-        // skip, so an incomplete scan vetoes the update on every profile, even
-        // though earlier guards let frictionless profiles through with a
-        // warning. The single carve-out (a size-limit-only gap, see exitCode)
-        // warns here instead of vetoing.
-        const code = exitCode(scan.findings, scan.profile, scan.complete, {
-            failClosedIncomplete: true,
-            incompleteReasons: scan.incomplete_reasons,
-        });
-        if (code !== 0) {
-            process.stderr.write(human(scan.findings, tone()));
-            if (!scan.complete) process.stderr.write(incompleteMessage(scan));
-            if (rejectNote) process.stderr.write(rejectNote(revision));
-            return code;
-        }
-        if (!scan.complete) {
-            // The commit's tree is the staged tree pre-commit already warned
-            // about, so this is usually the duplicate the once-guard swallows.
-            // rev-parse runs only on this rare path.
-            let treeSha = null;
-            try {
-                treeSha = execFileSync('git', ['rev-parse', `${revision}^{tree}`], {
-                    cwd: repo.root,
-                    encoding: 'utf8',
-                    timeout: GIT_TIMEOUT_MS,
-                }).trim();
-            } catch { /* warn without dedup */ }
-            warnIncompleteOnce(repo, treeSha, scan);
-        }
-    }
-    return 0;
-}
-
 function cmdPushcheck(args) {
     parseNoArguments(args);
     let input;
@@ -855,6 +561,7 @@ function cmdPushcheck(args) {
         return 30;
     }
     const code = scanProposedCommits(repo, commits, {
+        limits: scanLimits(),
         rejectNote: (revision) =>
             `aimhooman: push of commit ${revision} was rejected before any objects were sent\n`,
     });
@@ -910,6 +617,16 @@ function cmdRefcheck(args) {
             return 30;
         }
         if (/^0+$/.test(newObjectId)) continue;
+        // Detaching HEAD writes it as a direct ref for the first time, so the
+        // old value arrives as zeros. That transition only navigates to a
+        // commit that already exists (fetched history, a tag, FETCH_HEAD); it
+        // introduces nothing to any branch, and a commit made while detached
+        // still arrives with the previous position as its old value. Scanning
+        // the detach as a branch creation vetoed plain `git checkout <sha>`
+        // over fetched history and prescribed index repairs that do not apply.
+        // A commit minted by plumbing can hide here only until it touches a
+        // branch or a push, where the other guards still scan it.
+        if (ref === 'HEAD' && /^0+$/.test(oldObjectId)) continue;
         updates.push({ oldObjectId, newObjectId, ref });
     }
 
@@ -947,6 +664,7 @@ function cmdRefcheck(args) {
         return 30;
     }
     const code = scanProposedCommits(repo, commits, {
+        limits: scanLimits(),
         rejectNote: (revision) =>
             `aimhooman: proposed commit ${revision} was rejected before refs changed\n`
             // The vetoed commit stays in the object store: the ref never
@@ -1192,9 +910,12 @@ function cmdInit(args) {
                 // installHooks declines rather than throws when the hooks directory is
                 // not ours, and its warnings are the only record of why. They are
                 // printed on the success path only, so carry them into the failure or
-                // the user is told nothing but "incomplete". The prefix is load-bearing:
+                // the user is told nothing but "incomplete". That holds for every
+                // refusal — a shared hooks path, but equally a symlinked or foreign
+                // hook that installHooksLocked declines with shared:false — so the
+                // cause is never gated on rep.shared. The prefix is load-bearing:
                 // the exit-code branch below matches on it.
-                const cause = rep.shared && rep.warnings.length ? `${rep.warnings.join('; ')}; ` : '';
+                const cause = rep.warnings.length ? `${rep.warnings.join('; ')}; ` : '';
                 // When the decline is because the hooks path is shared/tracked (or,
                 // after B2, worktree content the next add would commit), name the two
                 // ways out so the user is not stuck: let aimhooman use the default
@@ -1396,7 +1117,6 @@ function cmdExplain(args) {
 }
 
 function cmdOverride(args, allow) {
-    const verb = allow ? 'allow' : 'deny';
     const { options, positionals } = parseArguments(args, {
         options: {
             reason: { names: ['--reason'], type: 'string', nonEmpty: false },

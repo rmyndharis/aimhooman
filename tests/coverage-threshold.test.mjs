@@ -23,9 +23,9 @@ test('coverage command limits aggregate metrics to production and attaches the p
         '--test-coverage-include="src/**"',
         '--test-coverage-include="bin/**"',
         '--test-coverage-exclude="tests/**"',
-        '--test-coverage-lines=75',
-        '--test-coverage-branches=60',
-        '--test-coverage-functions=85',
+        '--test-coverage-lines=85',
+        '--test-coverage-branches=75',
+        '--test-coverage-functions=90',
         '--test-reporter=./scripts/coverage-threshold.mjs',
     ]) {
         assert.ok(command.includes(fragment), `missing coverage option: ${fragment}`);

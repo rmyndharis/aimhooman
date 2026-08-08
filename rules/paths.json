@@ -366,5 +366,31 @@
         "remediation": [
             "git restore --staged <path>"
         ]
+    },
+    {
+        "id": "aimhooman.lock-residue",
+        "version": 1,
+        "provider": "aimhooman",
+        "category": "ephemeral-state",
+        "confidence": "high",
+        "kind": "path",
+        "match": {
+            "path_case": "insensitive",
+            "paths": [
+                "*.aimhooman.lock",
+                "**/*.aimhooman.lock",
+                "*.aimhooman.lock.queue/**",
+                "**/*.aimhooman.lock.queue/**"
+            ]
+        },
+        "actions": {
+            "clean": "block",
+            "strict": "block",
+            "compliance": "block"
+        },
+        "reason": "aimhooman state-lock files and queue candidates are local tooling residue, not repository content.",
+        "remediation": [
+            "git restore --staged <path>"
+        ]
     }
 ]

@@ -92,6 +92,10 @@ const contracts = {
         positive: { path: '.agent/state.json' },
         nearMiss: { path: '.agents/rules/aimhooman.md' },
     },
+    'aimhooman.lock-residue': {
+        positive: { path: '.gitignore.aimhooman.lock.queue/2f1f9d24-6f0a-4b1c-8d2e-3a4b5c6d7e8f.json' },
+        nearMiss: { path: 'docs/aimhooman.lock.md' },
+    },
 };
 
 function findingsFor(engine, rule, input) {

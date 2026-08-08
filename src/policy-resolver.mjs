@@ -27,36 +27,43 @@ export class PolicyProfileError extends Error {
     }
 }
 
+// resolvePolicy takes exactly one canonical option shape:
+//   { target: 'worktree' | 'staged' | 'commit', revision?, profile?, strictFloor? }
+// with `revision` required for (and only for) a commit target, `profile` an
+// explicit profile that may only match or escalate to strict, and `strictFloor`
+// the floor's source string when a floor applies. Every internal caller spells
+// the call this way; alternate spellings once accepted here were dead
+// flexibility that added branches to test without adding capability.
 export function resolvePolicy(repo, options = {}) {
     if (!repo?.root || !repo?.stateDir) {
         throw new TypeError('repo must be an open repository');
     }
-    const target = normalizeTarget(
-        targetOption(options),
-        optionValue(options, 'revision') ?? optionValue(options, 'commit'),
-    );
+    const { target = 'worktree', revision, profile, strictFloor } = options;
     let resolved;
-    if (target.kind === 'worktree') {
+    if (target === 'worktree') {
         resolved = resolveWorktreePolicy(repo);
-    } else if (target.kind === 'staged') {
+    } else if (target === 'staged') {
         resolved = resolveGitPolicy(repo, readStagedPath(repo, POLICY_PATH), 'staged-policy');
-    } else {
+    } else if (target === 'commit') {
+        if (typeof revision !== 'string' || !revision) {
+            throw new PolicyTargetError('commit target needs a revision');
+        }
         resolved = resolveGitPolicy(
             repo,
-            readCommitPath(repo, target.revision, POLICY_PATH),
+            readCommitPath(repo, revision, POLICY_PATH),
             'commit-policy',
         );
+    } else {
+        throw new PolicyTargetError('must be worktree, staged, or commit');
     }
 
-    const strictFloor = strictFloorOption(options);
     if (strictFloor) {
-        const floorSource = strictFloor.source;
-        resolved = applyStrictFloor(resolved, floorSource);
+        if (typeof strictFloor !== 'string') {
+            throw new TypeError('strictFloor must be the floor source string');
+        }
+        resolved = applyStrictFloor(resolved, strictFloor);
     }
-    return applyExplicitProfile(
-        resolved,
-        optionValue(options, 'explicitProfile') ?? optionValue(options, 'profile'),
-    );
+    return applyExplicitProfile(resolved, profile);
 }
 
 export function applyExplicitProfile(resolved, explicitProfile) {
@@ -145,56 +152,3 @@ function localFallback(repo, target) {
     };
 }
 
-function targetOption(options) {
-    if (typeof options === 'string') return options;
-    if (!options || typeof options !== 'object') return 'worktree';
-    if (options.target !== undefined) return options.target;
-    if (options.kind !== undefined || options.type !== undefined) return options;
-    if (options.commit !== undefined || options.revision !== undefined) return 'commit';
-    return 'worktree';
-}
-
-function optionValue(options, key) {
-    return options && typeof options === 'object' ? options[key] : undefined;
-}
-
-function strictFloorOption(options) {
-    const value = optionValue(options, 'strictFloor');
-    if (!value) return null;
-    if (typeof value === 'object' && value.enabled === false) return null;
-    if (typeof value === 'object' && value.profile && value.profile !== 'strict') {
-        throw new TypeError('strict floor profile must be strict');
-    }
-    const source = typeof value === 'string'
-        ? value
-        : (typeof value === 'object' ? value.source : optionValue(options, 'strictFloorSource'));
-    return { source: source ?? 'strict-floor' };
-}
-
-function normalizeTarget(target, revisionOption) {
-    if (target === undefined || target === 'worktree') return { kind: 'worktree' };
-    if (target === 'staged') return { kind: 'staged' };
-    if (target === 'commit') {
-        if (typeof revisionOption !== 'string' || !revisionOption) {
-            throw new PolicyTargetError('commit target needs a revision');
-        }
-        return { kind: 'commit', revision: revisionOption };
-    }
-    if (typeof target === 'string' && target.startsWith('commit:')) {
-        const revision = target.slice('commit:'.length);
-        if (!revision) throw new PolicyTargetError('commit target needs a revision');
-        return { kind: 'commit', revision };
-    }
-    if (target && typeof target === 'object') {
-        const kind = target.kind ?? target.type;
-        if (kind === 'worktree' || kind === 'staged') return { kind };
-        if (kind === 'commit') {
-            const revision = target.revision ?? target.commit ?? target.ref ?? revisionOption;
-            if (typeof revision !== 'string' || !revision) {
-                throw new PolicyTargetError('commit target needs a revision');
-            }
-            return { kind, revision };
-        }
-    }
-    throw new PolicyTargetError('must be worktree, staged, or a commit revision');
-}

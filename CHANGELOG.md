@@ -5,6 +5,73 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `pre-push` no longer stops a legitimate push with exit 30 when the remote
+  object ID in the hook input does not exist locally — the force-push-over-a-
+  moved-remote case githooks(5) documents. Git cannot subtract an absent
+  commit, so the scan now measures the pushed history against the gated branch
+  tips instead, a superset that never skips a commit; any other resolution
+  failure still stops the push.
+- The final ref guard no longer vetoes read-only navigation. Detaching HEAD
+  writes it as a direct ref for the first time, so the old value arrives as
+  zeros; that transition only points at a commit that already exists, and
+  scanning it as a branch creation blocked `git fetch && git checkout
+  FETCH_HEAD` whenever the fetched history carried residue — with remediation
+  advice that did not apply. A commit made while detached still arrives with
+  the previous position as its old value and is still scanned.
+- The PreToolUse advisory path no longer emits a permission decision. An
+  `allow` auto-approves the command and skips the host's own permission rules
+  — precisely when findings exist. Advisories now ride along as context only,
+  mirroring the deliberate silence of the no-findings path.
+- `aimhooman init` now names the cause when it declines over a symlinked or
+  foreign hook. The warning was only carried into the failure message for a
+  shared hooks path, so every other refusal read as a bare "hook installation
+  incomplete".
+- State-lock queues no longer outlive their lock. Every release now sweeps its
+  emptied queue directory — for a clone that opted into `--gitignore`, that
+  directory sat permanently in the worktree of the very tool that removes
+  residue — and a new `aimhooman.lock-residue` catalog rule keeps a crashed
+  contender's leftovers out of commits. An uninstall on a hooks directory that
+  refuses the lock's first write now reports the dispatchers as still in place
+  instead of dying on a bare `mkdir` error.
+- The reference-transaction fast path pins `PATH` before calling `dirname`,
+  matching the commit-msg filter: on a GUI client with a minimal `PATH`, a
+  tag, fetch, or stash could fail with a misleading "guards changed" message.
+- The lock queue's tiebreak compares tokens by code unit instead of
+  `localeCompare`, so two contenders running under different locales can no
+  longer order the same pair of tokens differently.
+- The incomplete-scan warning path in `precommit` tolerates a `write-tree`
+  that cannot answer; the dedup key degrades to an undeduplicated warning
+  instead of converting a warn-and-continue into a stopped commit.
+
+### Changed
+
+- The shell static-analysis layer moved out of `src/hook.mjs` (3,257 lines)
+  into `src/shell-parse.mjs`; the hook adapter keeps only the decision
+  cascade. The guard-command engine (repair loop, marker dedup, introduced-
+  commit resolution) moved from `bin/aimhooman.mjs` into `src/guard.mjs`, and
+  the report renderers it shares moved into `src/report.mjs`. `git diff --raw`
+  parsing, the plumbing spawn wrapper, and `typeForMode` are now shared
+  between `gitx` and `history-scan` instead of duplicated.
+- `resolvePolicy` accepts exactly one canonical option shape
+  (`{ target, revision?, profile?, strictFloor? }`); the alternate spellings
+  were dead flexibility.
+- Coverage gates ratcheted from lines 75 / branches 60 / functions 85 to
+  85 / 75 / 90, a few points under the measured tree so a large regression can
+  no longer ride under thresholds set for an older, smaller suite.
+- `npm run check:static` skips the actionlint workflow lint with a loud
+  warning when no Go toolchain is on `PATH` outside CI, so `npm run verify`
+  stays runnable for contributors without Go; CI still enforces it.
+- `scripts/validate.mjs` now fails when the pre-commit.com example in
+  `docs/integrations.md` pins a tag other than the released version — the
+  example had drifted two minors behind, installing a guard without the
+  raw-object-ID push closure.
+- `docs/faq.md` now quantifies the commit overhead the field tests measured
+  (median ~0.7–0.9 s per ordinary commit) instead of answering qualitatively.
+
 ## [0.4.1] - 2026-07-22
 
 ### Fixed

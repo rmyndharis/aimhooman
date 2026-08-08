@@ -12,6 +12,8 @@
 # `npm run check` fails when this file is stale.
 
 # >>> aimhooman:catalog-start
+**/*.aimhooman.lock
+**/*.aimhooman.lock.queue/**
 **/.agent/**
 **/.aider.*
 **/.claude.json
@@ -36,6 +38,8 @@
 **/.remember/**
 **/.specstory/**
 **/.superpowers/**
+*.aimhooman.lock
+*.aimhooman.lock.queue/**
 .agent/**
 .aider.*
 .claude.json

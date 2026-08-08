@@ -38,4 +38,5 @@ recommend instead.
 | `remember.state` | remember | ephemeral-state | path | block | block | block | Remember second-brain data is local, not repository content. |
 | `superpowers.state` | superpowers | ephemeral-state | path | block | block | block | Superpowers plugin state is local, not repository content. |
 | `agent.state` | generic | ephemeral-state | path | block | block | block | Generic agent state is local, not repository content. |
+| `aimhooman.lock-residue` | aimhooman | ephemeral-state | path | block | block | block | aimhooman state-lock files and queue candidates are local tooling residue, not repository content. |
 <!-- aimhooman:catalog-end -->

@@ -595,6 +595,10 @@ test('generated dispatchers use builtin ref capture and accept safe Git updates'
             assert.match(referenceHook, /case "\$AIMHOOMAN_REF_UPDATES" in/);
             assert.match(referenceHook, /\*refs\/heads\/\*\|\*" HEAD"\*\) ;;/);
             assert.match(referenceHook, /for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction/);
+            // The presence loop's dirname must run under the pinned PATH like
+            // the commit-msg filter does: a GUI client's minimal PATH would
+            // otherwise fail the substitution and read as wiped guards.
+            assert.match(referenceHook, /\[ -x "\$\(PATH="\$AIMHOOMAN_PATH" dirname "\$0"\)\/\$AIMHOOMAN_GUARD" \]/);
             // The dispatcher exports a V8 compile cache rooted in per-install
             // state, so repeated hook spawns skip module recompilation and
             // --purge-state removes the cache along with the rest of the state.
@@ -1202,6 +1206,99 @@ test('pushcheck scans pushed commits, vetoes residue, and stops on input it cann
             const badObject = pushcheckDirect(root, `${clean} zzz refs/heads/main ${parent}\n`);
             assert.equal(badObject.status, 30, badObject.stderr);
             assert.match(badObject.stderr, /malformed object ID in pre-push input/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// githooks(5): the remote oid in pre-push input may not resolve locally — a
+// force-push over a remote that moved and was never fetched. That used to stop
+// the push with a resolution error (exit 30); the scan now measures against the
+// gated tips instead, a superset that never skips a commit.
+test('pushcheck falls back to the gated tips when the remote oid is not locally known', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-pushcheck-unknown-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const unknown = 'f'.repeat(40);
+            // The dangling artifact commit predates init, like history imported
+            // from a hookless clone.
+            mkdirSync(join(root, '.claude'), { recursive: true });
+            writeFileSync(join(root, '.claude', 'session.json'), '{"session":"local"}\n');
+            git(root, ['add', '-f', '.claude/session.json']);
+            git(root, ['commit', '--no-verify', '-q', '-m', 'session state']);
+            const artifact = git(root, ['rev-parse', 'HEAD']);
+            git(root, ['reset', '--hard', '-q', 'HEAD~1']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+
+            writeFileSync(join(root, 'clean.txt'), 'clean\n');
+            git(root, ['add', 'clean.txt']);
+            git(root, ['commit', '-q', '-m', 'clean work']);
+            const clean = git(root, ['rev-parse', 'HEAD']);
+            const push = pushcheckDirect(root, `${clean} ${clean} refs/heads/main ${unknown}\n`);
+            assert.equal(push.status, 0, push.stderr);
+
+            // The fallback widens the scan, it never narrows it: the dangling
+            // artifact commit is still vetoed against the unknown remote tip.
+            const vetoed = pushcheckDirect(root, `${artifact} ${artifact} refs/heads/main ${unknown}\n`);
+            assert.equal(vetoed.status, 10, vetoed.stderr);
+            assert.match(vetoed.stderr, /claude\.session-state/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// A detach writes HEAD as a direct ref for the first time, so its old value
+// arrives as zeros. That transition is navigation to history that already
+// exists, not new content: vetoing it bricked `git fetch && git checkout
+// FETCH_HEAD` whenever the fetched history carried residue.
+test('refcheck passes a detached checkout over residue-bearing history and still scans detached commits', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-refcheck-detach-'));
+    const zero = '0'.repeat(40);
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            mkdirSync(join(root, '.claude'), { recursive: true });
+            writeFileSync(join(root, '.claude', 'session.json'), '{"session":"local"}\n');
+            git(root, ['add', '-f', '.claude/session.json']);
+            git(root, ['commit', '--no-verify', '-q', '-m', 'session state']);
+            const artifact = git(root, ['rev-parse', 'HEAD']);
+            git(root, ['reset', '--hard', '-q', 'HEAD~1']);
+            const tip = git(root, ['rev-parse', 'HEAD']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+
+            const detach = refcheckPrepared(root, `${zero} ${artifact} HEAD\n`);
+            assert.equal(detach.status, 0, detach.stderr);
+
+            // Moving HEAD while already detached carries the previous position
+            // as its old value and is still scanned as old..new.
+            const move = refcheckPrepared(root, `${tip} ${artifact} HEAD\n`);
+            assert.equal(move.status, 10, move.stderr);
+            assert.match(move.stderr, /claude\.session-state/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// installHooks declines a symlinked hook with shared:false plus a warning; the
+// init failure message used to carry the warning only for shared refusals, so
+// the user saw "incomplete" with no cause.
+test('init names the symlinked hook that blocked it instead of a bare incomplete', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-init-symlink-cause-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const hooks = join(root, '.git', 'hooks');
+            mkdirSync(hooks, { recursive: true });
+            writeFileSync(join(root, 'foreign-hook'), '#!/bin/sh\nexit 0\n');
+            symlinkSync(join(root, 'foreign-hook'), join(hooks, 'pre-commit'));
+            const init = spawnSync(process.execPath, [CLI, 'init'], { cwd: root, encoding: 'utf8' });
+            assert.equal(init.status, 20, init.stderr);
+            assert.match(init.stderr, /hook installation incomplete/);
+            assert.match(init.stderr, /pre-commit is a symlink; refusing to follow or overwrite it/);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

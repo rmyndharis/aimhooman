@@ -330,10 +330,9 @@ test('first candidate publication cleans up after post-rename directory fsync fa
             }),
             /durability is uncertain/,
         );
-        assert.deepEqual(
-            readdirSync(`${lock}.queue`).filter((name) => name.endsWith('.json')),
-            [],
-        );
+        // The failed contender removes its candidate on the way out, and the
+        // release sweep takes the emptied queue directory with it.
+        assert.equal(existsSync(`${lock}.queue`), false);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
