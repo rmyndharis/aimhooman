@@ -1820,3 +1820,42 @@ test('an unreadable .git/worktrees does not disable the CLI or trap the reposito
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test('a write-tree that cannot answer keeps the incomplete-scan warning a warning', {
+    skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, () => {
+    // The clean-profile warn path reads the staged tree only to deduplicate the
+    // notice across a commit's hooks. That key is a convenience, so a git that
+    // cannot write the tree object (an unwritable object store, a corrupt
+    // index) must degrade to an undeduplicated warning. Letting the throw
+    // escape turned "warn and continue" into exit 30, stopping a commit the
+    // profile had already decided to allow.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-warn-write-tree-'));
+    const objects = join(dir, '.git', 'objects');
+    try {
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+        writeFileSync(join(dir, 'app.js'), 'export const x = 1;\n');
+        execFileSync('git', ['add', 'app.js'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: dir });
+        execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: dir });
+
+        // An oversized staged file leaves the scan incomplete, which on clean
+        // is the warn-and-continue branch this guards.
+        writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 1;\n'.repeat(140000));
+        execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
+        // Read-only object store: cat-file still reads the staged blobs, but
+        // `git write-tree` cannot create the tree object it needs.
+        chmodSync(objects, 0o500);
+        const wrote = spawnSync('git', ['write-tree'], { cwd: dir, encoding: 'utf8' });
+        assert.notEqual(wrote.status, 0, 'the fixture must actually break write-tree');
+
+        const warned = spawnSync(process.execPath, [CLI, 'precommit'], { cwd: dir, encoding: 'utf8' });
+        assert.equal(warned.status, 0, warned.stdout + warned.stderr);
+        assert.match(warned.stderr, /warning: scan incomplete/);
+    } finally {
+        try { chmodSync(objects, 0o700); } catch { /* fixture cleanup */ }
+        rmSync(dir, { recursive: true, force: true });
+    }
+});

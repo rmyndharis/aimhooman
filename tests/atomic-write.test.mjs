@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { atomicWrite, withLock } from '../src/atomic-write.mjs';
+import { atomicWrite, precedes, withLock } from '../src/atomic-write.mjs';
 
 test('atomicWrite preserves the original and removes its temp after ENOSPC', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-atomic-enospc-'));
@@ -330,10 +330,9 @@ test('first candidate publication cleans up after post-rename directory fsync fa
             }),
             /durability is uncertain/,
         );
-        assert.deepEqual(
-            readdirSync(`${lock}.queue`).filter((name) => name.endsWith('.json')),
-            [],
-        );
+        // The failed contender removes its candidate on the way out, and the
+        // release sweep takes the emptied queue directory with it.
+        assert.equal(existsSync(`${lock}.queue`), false);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -416,4 +415,35 @@ withLock(lock, () => {
         if (child.exitCode === null) child.kill('SIGKILL');
         rmSync(dir, { recursive: true, force: true });
     }
+});
+
+test('the bakery tiebreak orders equal tickets by code unit, not locale collation', () => {
+    // Two contenders that draw the same ticket are separated by their tokens,
+    // and both must reach the same verdict or each believes it holds the lock.
+    // localeCompare cannot: it follows the process locale, and an ICU-collated
+    // CLI orders 'a' before 'B' while a code-unit comparison puts 'B' first.
+    // Real tokens are lowercase-hex UUIDs that both schemes order alike, so
+    // only a direct check can hold this contract.
+    const lower = { ticket: 4, token: 'a0000000-0000-4000-8000-000000000000' };
+    const upper = { ticket: 4, token: 'B0000000-0000-4000-8000-000000000000' };
+    assert.equal(precedes(upper, lower), true, "'B' sorts before 'a' by code unit");
+    assert.equal(precedes(lower, upper), false);
+    assert.equal(
+        'a'.localeCompare('B') < 0,
+        true,
+        'the locale comparison this must not use still disagrees, so the check is live',
+    );
+
+    // Antisymmetry is what mutual exclusion rests on: for any pair exactly one
+    // side precedes, whatever the ambient locale.
+    for (const [left, right] of [
+        [{ ticket: 1, token: 'f' }, { ticket: 2, token: 'a' }],
+        [{ ticket: 2, token: 'a' }, { ticket: 2, token: 'b' }],
+    ]) {
+        assert.equal(precedes(left, right), !precedes(right, left), `${left.token}/${right.token}`);
+    }
+    // A candidate never precedes itself, so a contender cannot block on its own
+    // entry in the queue.
+    const self = { ticket: 3, token: 'c0ffee00-0000-4000-8000-000000000000' };
+    assert.equal(precedes(self, { ...self }), false);
 });

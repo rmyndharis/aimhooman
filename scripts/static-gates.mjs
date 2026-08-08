@@ -46,8 +46,17 @@ run(process.execPath, [
     '--include',
     'files,exports,dependencies,unlisted,unresolved',
 ], 'dead-code check');
-run('go', [
-    'run',
-    'github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca',
-], 'workflow lint');
-console.log(`compiled ${schemas} schemas; workflow and dead-code checks passed`);
+// actionlint needs a Go toolchain — a heavy prerequisite for a contributor
+// fixing a typo in a zero-dependency package. CI always has one and always
+// enforces the lint; locally a missing `go` downgrades to a loud skip so
+// `npm run verify` stays runnable, and the CI gate still catches any drift.
+const goAvailable = !spawnSync('go', ['version'], { stdio: 'ignore' }).error;
+if (!goAvailable && !process.env.CI) {
+    console.warn('workflow lint SKIPPED: no Go toolchain on PATH (CI still enforces it)');
+} else {
+    run('go', [
+        'run',
+        'github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca',
+    ], 'workflow lint');
+}
+console.log(`compiled ${schemas} schemas; ${goAvailable || process.env.CI ? 'workflow and dead-code checks' : 'dead-code check'} passed`);

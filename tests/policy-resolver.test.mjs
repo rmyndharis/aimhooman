@@ -43,10 +43,8 @@ test('commit policy resolution does not depend on either worktree checkout', () 
         writeFileSync(join(dir, '.aimhooman.json'), policy('clean'));
         writeFileSync(join(linked, '.aimhooman.json'), policy('compliance'));
 
-        const fromMain = resolvePolicy(openRepo(dir), {
-            target: { kind: 'commit', revision },
-        });
-        const fromLinked = resolvePolicy(openRepo(linked), { target: `commit:${revision}` });
+        const fromMain = resolvePolicy(openRepo(dir), { target: 'commit', revision });
+        const fromLinked = resolvePolicy(openRepo(linked), { target: 'commit', revision });
         assert.deepEqual(fromLinked, fromMain);
         assert.equal(fromMain.profile, 'strict');
         assert.equal(fromMain.source, 'commit-policy');
@@ -84,7 +82,7 @@ test('missing target policy falls back locally and explicit profiles cannot lowe
     try {
         const repo = openRepo(dir);
         saveConfig(repo.stateDir, { profile: 'compliance' });
-        const resolved = resolvePolicy(repo, { target: { kind: 'commit', revision: 'HEAD' } });
+        const resolved = resolvePolicy(repo, { target: 'commit', revision: 'HEAD' });
         assert.equal(resolved.profile, 'compliance');
         assert.equal(resolved.source, 'local');
         assert.match(resolved.target, /^commit:[0-9a-f]{40,64}$/);
@@ -98,14 +96,14 @@ test('missing target policy falls back locally and explicit profiles cannot lowe
         assert.equal(floored.source, 'range-base-strict');
         const viaResolver = resolvePolicy(repo, {
             target: 'staged',
-            strictFloor: true,
-            strictFloorSource: 'head-policy-strict',
+            strictFloor: 'head-policy-strict',
         });
         assert.equal(viaResolver.profile, 'strict');
         assert.equal(viaResolver.source, 'head-policy-strict');
-        const defaultFloor = resolvePolicy(repo, { target: 'staged', strictFloor: true });
-        assert.equal(defaultFloor.profile, 'strict');
-        assert.equal(defaultFloor.source, 'strict-floor');
+        assert.throws(
+            () => resolvePolicy(repo, { target: 'staged', strictFloor: true }),
+            /floor source string/,
+        );
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -122,7 +120,7 @@ test('a staged policy deletion remains distinct from the strict HEAD policy', ()
         execFileSync('git', ['rm', '--cached', '-q', '.aimhooman.json'], { cwd: dir });
 
         const staged = resolvePolicy(repo, { target: 'staged' });
-        const head = resolvePolicy(repo, { target: { kind: 'commit', revision: 'HEAD' } });
+        const head = resolvePolicy(repo, { target: 'commit', revision: 'HEAD' });
         assert.equal(staged.profile, 'clean');
         assert.equal(staged.policy_object_id, null);
         assert.equal(head.profile, 'strict');
@@ -140,9 +138,13 @@ test('invalid target policy and invalid revisions fail instead of falling back',
         execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
         assert.throws(() => resolvePolicy(repo, { target: 'staged' }), ProjectPolicyError);
         assert.throws(
-            () => resolvePolicy(repo, { target: { kind: 'commit', revision: 'missing' } }),
+            () => resolvePolicy(repo, { target: 'commit', revision: 'missing' }),
             GitRevisionError,
         );
+        // The option surface is canonical on purpose: one spelling per idea.
+        assert.throws(() => resolvePolicy(repo, { target: 'commit:HEAD' }), /policy target/);
+        assert.throws(() => resolvePolicy(repo, { target: { kind: 'commit', revision: 'HEAD' } }), /policy target/);
+        assert.throws(() => resolvePolicy(repo, { target: 'commit' }), /needs a revision/);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

@@ -453,9 +453,27 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
 export function uninstallHooks(repo) {
     const { dir, shared, warnings } = hooksDir(repo);
     if (shared) return { removed: [], restored: [], warnings, failures: [] };
-    return withLock(join(dir, '.aimhooman-hooks.lock'), () => (
-        uninstallHooksLocked(repo, dir, warnings)
-    ));
+    let entered = false;
+    try {
+        return withLock(join(dir, '.aimhooman-hooks.lock'), () => {
+            entered = true;
+            return uninstallHooksLocked(repo, dir, warnings);
+        });
+    } catch (error) {
+        if (entered) throw error;
+        // The lock's queue mkdir is the first write into the hooks directory,
+        // so a directory that refuses it (read-only, say) would refuse every
+        // removal too. Report that the same way a failed removal is reported —
+        // the dispatchers are still in place and still guard — instead of
+        // letting a bare mkdir error swallow the report. Only dispatchers that
+        // actually exist become failures; with none present there is nothing
+        // to leave in place and the acquisition error stands on its own.
+        const failures = Object.keys(MANAGED)
+            .filter((name) => { try { return Boolean(entry(join(dir, name))); } catch { return true; } })
+            .map((name) => `${name}: cannot lock the hooks directory: ${error.message}`);
+        if (!failures.length) throw error;
+        return { removed: [], restored: [], warnings, failures };
+    }
 }
 
 function uninstallHooksLocked(repo, dir, warnings) {
@@ -792,7 +810,7 @@ case "$1" in prepared)
     *refs/heads/*|*" HEAD"*) ;;
     *)
       for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction pre-push; do
-        [ -x "$(dirname "$0")/$AIMHOOMAN_GUARD" ] || {
+        [ -x "$(PATH="$AIMHOOMAN_PATH" dirname "$0")/$AIMHOOMAN_GUARD" ] || {
           echo "aimhooman: required Git guards changed while reference-transaction was running; $AIMHOOMAN_GUARD is unavailable. The operation was stopped; run 'aimhooman init' and retry." >&2
           exit 20
         }

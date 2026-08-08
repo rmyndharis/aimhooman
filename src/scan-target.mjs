@@ -43,8 +43,7 @@ export function scanGitTarget(repo, options = {}) {
 }
 
 export function scanMessage(repo, text, options = {}) {
-    const protectHead = (options.target === 'staged' || options.target?.kind === 'staged')
-        && options.protectHead !== false;
+    const protectHead = options.target === 'staged' && options.protectHead !== false;
     const resolved = protectHead
         ? resolveStagedPolicy(repo, options.explicitProfile)
         : {

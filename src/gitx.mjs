@@ -22,16 +22,22 @@ export class GitTargetReadError extends Error {
     }
 }
 
-function gitBuf(args, cwd, input) {
+// gitBuf is the shared plumbing spawn; history-scan and scan-session build
+// their wrappers on it. maxBuffer is a parameter because history scans
+// legitimately stream larger outputs than the 64 MiB staged-view default.
+export function gitBuf(args, cwd, input, maxBuffer = 64 * 1024 * 1024) {
     return execFileSync('git', args, {
         cwd,
         env: gitEnvironment(),
         encoding: 'buffer',
-        maxBuffer: 64 * 1024 * 1024,
+        maxBuffer,
         timeout: GIT_TIMEOUT_MS,
         // Capture stderr into the thrown error (pipe) instead of letting git's
         // raw stderr leak to the user's terminal alongside aimhooman's own
-        // diagnostics; stdin is ignored unless input is supplied.
+        // diagnostics — without an explicit stdio, execFileSync echoes the
+        // child's stderr before it checks the exit status, so git's raw output
+        // reaches the terminal even on success. stdin is ignored unless input
+        // is supplied.
         stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         ...(input === undefined ? {} : { input }),
     });
@@ -114,24 +120,24 @@ function enrichEntries(repo, entries) {
     });
 }
 
-function diffEntries(repo, args, renameThreshold = null) {
-    const fields = nulStrings(gitBuf([
-        'diff', '--raw', '--no-abbrev',
-        renameThreshold === null ? '--find-renames' : `--find-renames=${renameThreshold}`,
-        '-z', '--diff-filter=ACMRTD', ...args, '--',
-    ], repo.root));
+// parseRawDiff decodes the NUL-delimited records of `git diff --raw -z`.
+// diff-tree emits the same grammar, so history-scan shares this parser;
+// `source` names the producing subcommand so each error message keeps
+// identifying the git invocation that actually ran.
+export function parseRawDiff(buffer, source) {
+    const fields = nulStrings(buffer);
     const entries = [];
 
     for (let i = 0; i < fields.length;) {
         const header = fields[i++];
         const match = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) ([ACMRTD])(\d*)$/.exec(header);
         if (!match || i >= fields.length) {
-            throw new Error('unexpected output from git diff --raw');
+            throw new Error(`unexpected output from git ${source}`);
         }
         const sourcePath = fields[i++];
         let path = sourcePath;
         if (match[5] === 'R' || match[5] === 'C') {
-            if (i >= fields.length) throw new Error('unexpected rename output from git diff --raw');
+            if (i >= fields.length) throw new Error(`unexpected rename output from git ${source}`);
             path = fields[i++];
         }
         const deleted = match[5] === 'D';
@@ -145,6 +151,15 @@ function diffEntries(repo, args, renameThreshold = null) {
         });
     }
 
+    return entries;
+}
+
+function diffEntries(repo, args, renameThreshold = null) {
+    const entries = parseRawDiff(gitBuf([
+        'diff', '--raw', '--no-abbrev',
+        renameThreshold === null ? '--find-renames' : `--find-renames=${renameThreshold}`,
+        '-z', '--diff-filter=ACMRTD', ...args, '--',
+    ], repo.root), 'diff --raw');
     return enrichEntries(repo, entries);
 }
 
@@ -496,10 +511,23 @@ export function introducedCommits(repo, updates) {
         const newObjectId = update?.newObjectId;
         assertOid(oldObjectId);
         assertOid(newObjectId);
-        const revisions = /^0+$/.test(oldObjectId)
-            ? [newObjectId, ...(gated.length ? ['--not', ...gated] : [])]
-            : [newObjectId, `^${oldObjectId}`];
-        const resolved = gitBuf(['rev-list', '--reverse', ...revisions], repo.root)
+        const creation = [newObjectId, ...(gated.length ? ['--not', ...gated] : [])];
+        let raw;
+        try {
+            raw = gitBuf(['rev-list', '--reverse', ...(/^0+$/.test(oldObjectId)
+                ? creation
+                : [newObjectId, `^${oldObjectId}`])], repo.root);
+        } catch (error) {
+            // pre-push hands over the remote's view of the ref, and githooks(5)
+            // warns that remote object may not exist locally — a force-push over
+            // a remote that moved and was never fetched. Git cannot subtract an
+            // absent commit, so measure like a creation against the gated tips:
+            // a superset scan, never a skipped one. Any failure while the old
+            // object is present locally keeps failing closed.
+            if (/^0+$/.test(oldObjectId) || objectExists(repo, oldObjectId)) throw error;
+            raw = gitBuf(['rev-list', '--reverse', ...creation], repo.root);
+        }
+        const resolved = raw
             .toString('utf8')
             .trim()
             .split('\n')
@@ -512,6 +540,18 @@ export function introducedCommits(repo, updates) {
         }
     }
     return commits;
+}
+
+// objectExists reports whether the object store holds the given oid. Only a
+// clean "no" from git counts as absent; any other failure reads as present so
+// callers keep failing closed.
+function objectExists(repo, oid) {
+    try {
+        gitBuf(['cat-file', '-e', oid], repo.root);
+        return true;
+    } catch (error) {
+        return typeof error?.status !== 'number';
+    }
 }
 
 // gitConfig returns a git config value, or '' if unset.

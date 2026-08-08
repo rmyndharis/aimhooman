@@ -1,4 +1,5 @@
 // Human-facing and JSON reporting for aimhooman findings.
+import { ArgumentError } from './args.mjs';
 
 // HUMAN_FINDING_CAP bounds the per-invocation stderr output. A scan that fires
 // many findings of the same rule (a vendored OpenSSL corpus can produce 99) used
@@ -117,4 +118,85 @@ export function exitCode(findings, profile, complete = true, { failClosedIncompl
     }
     if (review && findings.some((finding) => (finding.scanProfile || profile) !== 'clean')) return 11;
     return 0;
+}
+
+// tone selects the human() voice: playful for a developer terminal,
+// professional under CI or by request.
+export function tone() {
+    return process.env.AIMHOOMAN_TONE === 'professional' || process.env.CI ? 'professional' : 'playful';
+}
+
+export function emitDiagnostics(diagnostics = []) {
+    const seen = new Set();
+    for (const diagnostic of diagnostics) {
+        const message = diagnostic.message || String(diagnostic);
+        if (seen.has(message)) continue;
+        seen.add(message);
+        process.stderr.write(`aimhooman: warning: ${message}\n`);
+    }
+}
+
+// expectedErrorCode maps a thrown error to the CLI exit-code contract: 20 for
+// usage/configuration mistakes the caller can correct, 30 for everything else.
+export function expectedErrorCode(error) {
+    if (error instanceof ArgumentError) return 20;
+    if (/^(?:ProjectPolicy|LocalConfig|LocalOverrides|PolicyProfile|PolicyTarget|PolicyRules|RulePack)/.test(error?.name || '')) {
+        return 20;
+    }
+    if (error?.name === 'GitRevisionError' || error instanceof TypeError) return 20;
+    return 30;
+}
+
+export function incompleteMessage(scan, { blocking = true } = {}) {
+    const reasons = scan.stats?.skipped || {};
+    // Each count is how many items were skipped, not the limit that fired:
+    // "(size-limit=1)" read as a one-byte budget. Name the noun so the number
+    // cannot be mistaken for the budget it tripped.
+    const skipped = Object.entries(reasons)
+        .map(([reason, count]) => `${reason}=${count} ${skipCountNoun(reason, count)}`)
+        .join(', ');
+    // Every other reason is a size or budget the caller can shrink. A pack that
+    // will not compile is not, and the warning above already names the file and
+    // the error, so point at that instead of misdirecting to the limits. When a
+    // byte budget is what stopped the scan, name the budget: the caller whose own
+    // tree outgrew it needs to raise one, and "reduce the limits" sends them the
+    // wrong way down a road they cannot leave. A blocking stop says "and retry";
+    // a warning names what to change so the next run covers what this one
+    // skipped — this run is already through.
+    const tail = blocking ? 'and retry' : 'so the next scan covers it';
+    const budgeted = reasons['size-limit'] || reasons['total-byte-limit'];
+    const hint = reasons['local-pack-error']
+        ? `fix the reported rule pack ${tail}`
+        : budgeted
+            ? `reduce the target, or raise AIMHOOMAN_MAX_FILE_BYTES / AIMHOOMAN_MAX_TOTAL_BYTES, ${tail}`
+            : `reduce the target or limits ${tail}`;
+    let message = `aimhooman: ${blocking ? '' : 'warning: '}scan incomplete${skipped ? ` (skipped: ${skipped})` : ''}; ${hint}\n`;
+    const skippedPaths = scan.stats?.skippedPaths || {};
+    const pathLines = [];
+    for (const [reason, entries] of Object.entries(skippedPaths)) {
+        for (const entry of entries.slice(0, 5)) {
+            const sizeStr = formatBytes(entry.size);
+            pathLines.push(`  skipped: ${entry.path} (${reason}, ${sizeStr})\n`);
+        }
+        if (entries.length > 5) pathLines.push(`  ... and ${entries.length - 5} more\n`);
+    }
+    return message + pathLines.join('');
+}
+
+// Most skip reasons tally files; the three below tally something else, so the
+// noun travels with the reason instead of reading "local-pack-error=1 file".
+function skipCountNoun(reason, count) {
+    const noun = {
+        'finding-limit': 'finding',
+        'local-input-limit': 'input',
+        'local-pack-error': 'pack',
+    }[reason] || 'file';
+    return `${noun}${count === 1 ? '' : 's'}`;
+}
+
+function formatBytes(bytes) {
+    if (bytes == null || bytes < 0) return '?';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

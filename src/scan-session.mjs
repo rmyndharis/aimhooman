@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { gitBuf } from './gitx.mjs';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
 export const DEFAULT_SCAN_LIMITS = Object.freeze({
@@ -147,21 +148,23 @@ export function scanEntries(repo, engine, entries, options = {}) {
     return { findings, complete, incompleteReasons, stats };
 }
 
+// catFileBatch spawns one `git cat-file --batch` over the given oids.
+// --batch always streams every requested blob in full, so maxBuffer must
+// accommodate the summed blob sizes (expectedBytes) even when the caller
+// only inspects the leading bytes of each object.
+function catFileBatch(repo, oids, expectedBytes) {
+    return gitBuf(
+        ['cat-file', '--batch'],
+        repo.root,
+        Buffer.from(oids.join('\n') + '\n'),
+        Math.max(2 * 1024 * 1024, expectedBytes + oids.length * 256 + 1024),
+    );
+}
+
 function readObjects(repo, objectIds, expectedBytes = 0) {
     const unique = [...new Set(objectIds.filter(Boolean))];
     if (!unique.length) return { objects: new Map(), failures: [] };
-    const output = execFileSync('git', ['cat-file', '--batch'], {
-        cwd: repo.root,
-        env: gitEnvironment(),
-        input: Buffer.from(unique.join('\n') + '\n'),
-        encoding: 'buffer',
-        maxBuffer: Math.max(2 * 1024 * 1024, expectedBytes + unique.length * 256 + 1024),
-        timeout: GIT_TIMEOUT_MS,
-        // Same reason as gitBuf in gitx.mjs: without an explicit stdio,
-        // execFileSync echoes the child's stderr before it checks the exit
-        // status, so git's raw output reaches the terminal even on success.
-        stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const output = catFileBatch(repo, unique, expectedBytes);
     const objects = new Map();
     const failures = [];
     let offset = 0;
@@ -191,8 +194,8 @@ function readObjects(repo, objectIds, expectedBytes = 0) {
 }
 
 // probeObjects reads the first 8000 bytes of each blob to decide whether it is
-// binary (contains a NUL). cat-file --batch outputs full blobs, so the buffer
-// must accommodate total blob sizes, but we only inspect the leading bytes.
+// binary (contains a NUL); only the leading bytes are inspected, though the
+// batch itself still carries the full blobs (see catFileBatch).
 function probeObjects(repo, objectIds, entries) {
     const unique = [...new Set(objectIds.filter(Boolean))];
     if (!unique.length) return new Map();
@@ -203,15 +206,7 @@ function probeObjects(repo, objectIds, entries) {
         if (entry.oid && entry.size > 0) sizeByOid.set(entry.oid, Math.max(sizeByOid.get(entry.oid) || 0, entry.size));
     }
     const totalExpected = unique.reduce((sum, oid) => sum + (sizeByOid.get(oid) || 0), 0);
-    const output = execFileSync('git', ['cat-file', '--batch'], {
-        cwd: repo.root,
-        env: gitEnvironment(),
-        input: Buffer.from(unique.join('\n') + '\n'),
-        encoding: 'buffer',
-        maxBuffer: Math.max(2 * 1024 * 1024, totalExpected + unique.length * 256 + 1024),
-        timeout: GIT_TIMEOUT_MS,
-        stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const output = catFileBatch(repo, unique, totalExpected);
     const probes = new Map();
     let offset = 0;
     for (const requested of unique) {

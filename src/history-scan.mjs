@@ -1,41 +1,39 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GitRevisionError } from './gitx.mjs';
+import { GitRevisionError, gitBuf, parseRawDiff } from './gitx.mjs';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
 export const EMPTY_HISTORY_OID = '0'.repeat(40);
 
+// History scans stream whole-commit diffs and trees, which can outgrow gitx's
+// 64 MiB staged-view default, so every wrapper here widens maxBuffer.
+const HISTORY_MAX_BUFFER = 128 * 1024 * 1024;
+
 function gitBuffer(repo, args, input) {
-    return execFileSync('git', args, {
-        cwd: repo.root,
-        env: gitEnvironment(),
-        encoding: 'buffer',
-        maxBuffer: 128 * 1024 * 1024,
-        timeout: GIT_TIMEOUT_MS,
-        // Same reason as gitBuf in gitx.mjs: without an explicit stdio,
-        // execFileSync echoes the child's stderr before it checks the exit
-        // status, so git's raw output reaches the terminal even on success.
-        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-        ...(input === undefined ? {} : { input }),
-    });
+    return gitBuf(args, repo.root, input, HISTORY_MAX_BUFFER);
 }
 
 function gitString(repo, args) {
     return gitBuffer(repo, args).toString('utf8').trim();
 }
 
+// Not folded into gitString: encoding 'utf8' makes a failed spawn throw with
+// string (not Buffer) stdout/stderr, and collapsing the two would change that
+// error shape for callers that wrap and rethrow it.
 function gitStringQuiet(repo, args) {
     return execFileSync('git', args, {
         cwd: repo.root,
         env: gitEnvironment(),
         encoding: 'utf8',
-        maxBuffer: 128 * 1024 * 1024,
+        maxBuffer: HISTORY_MAX_BUFFER,
         timeout: GIT_TIMEOUT_MS,
         stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
 }
 
+// Deliberately stricter than gitx's assertRevision: history revisions arrive
+// from the command line, so control characters are rejected as well.
 function assertRevision(value, label) {
     if (typeof value !== 'string' || !value || value.startsWith('-') || /[\u0000-\u001f\u007f]/.test(value)) {
         throw new TypeError(`${label} must be a non-empty Git revision`);
@@ -108,7 +106,7 @@ export function commitChanges(repo, revision, resolvedCommit, resolvedParents) {
         if (!parent) args.push('--root', commit);
         else args.push(parent, commit);
         args.push('--');
-        for (const entry of parseRawDiff(gitBuffer(repo, args))) {
+        for (const entry of parseCommitDiff(gitBuffer(repo, args))) {
             const key = [entry.path, entry.sourcePath || '', entry.oid || '', entry.mode || '', entry.status].join('\0');
             const current = grouped.get(key);
             if (current) {
@@ -242,31 +240,11 @@ function isZeroObjectId(value) {
     return /^(?:0{40}|0{64})$/.test(value);
 }
 
-function parseRawDiff(buffer) {
-    const fields = buffer.toString('utf8').split('\0').filter(Boolean);
-    const entries = [];
-    for (let index = 0; index < fields.length;) {
-        const header = fields[index++];
-        const match = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) ([ACMRTD])(\d*)$/.exec(header);
-        if (!match || index >= fields.length) throw new Error('unexpected output from git diff-tree');
-        const sourcePath = fields[index++];
-        let path = sourcePath;
-        if (match[5] === 'R' || match[5] === 'C') {
-            if (index >= fields.length) throw new Error('unexpected rename output from git diff-tree');
-            path = fields[index++];
-        }
-        const deleted = match[5] === 'D';
-        entries.push({
-            path,
-            ...(path === sourcePath ? {} : { sourcePath }),
-            oid: deleted ? null : match[4],
-            mode: deleted ? null : match[2],
-            type: deleted ? 'deleted' : typeForMode(match[2]),
-            status: match[5],
-            size: null,
-        });
-    }
-    return entries;
+// The raw-diff grammar parser is shared with gitx. Entries here additionally
+// start with size: null, which commitChanges backfills with real blob sizes
+// from one batched cat-file per commit.
+function parseCommitDiff(buffer) {
+    return parseRawDiff(buffer, 'diff-tree').map((entry) => ({ ...entry, size: null }));
 }
 
 function objectSizes(repo, objectIds) {
@@ -283,12 +261,6 @@ function objectSizes(repo, objectIds) {
         if (fields[1] === 'blob' && /^\d+$/.test(fields[2])) sizes.set(unique[index], Number(fields[2]));
     }
     return sizes;
-}
-
-function typeForMode(mode) {
-    if (mode === '160000') return 'commit';
-    if (mode === '040000') return 'tree';
-    return 'blob';
 }
 
 function compareEntries(left, right) {

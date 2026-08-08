@@ -88,6 +88,14 @@ if (!readme.includes(`version-v${pkg.version.replace(/-/g, '--')}`) || !readme.i
 if (!changelog.includes(`## [${pkg.version}]`)) {
     throw new Error(`CHANGELOG has no heading for ${pkg.version}`);
 }
+// The pre-commit.com example installs whatever tag it pins. A stale pin ships
+// an old guard from a page that looks current, so it ratchets with the release
+// exactly like the README badge above.
+const integrations = readFileSync(join(ROOT, 'docs/integrations.md'), 'utf8');
+const pinned = integrations.match(/^\s*rev: (\S+)$/m)?.[1];
+if (pinned !== `v${pkg.version}`) {
+    throw new Error(`docs/integrations.md pre-commit example pins ${pinned ?? 'no tag'}, expected v${pkg.version}`);
+}
 
 const rules = loadRules();
 const ids = new Set(rules.map((rule) => rule.id));

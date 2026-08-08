@@ -10,6 +10,7 @@ import {
     readdirSync,
     renameSync,
     rmSync,
+    rmdirSync,
     statSync,
     unlinkSync,
     writeFileSync,
@@ -227,9 +228,16 @@ function queueCandidates(queueDir, staleMs) {
     return candidates;
 }
 
-function precedes(left, right) {
+// precedes orders two queue candidates. Exported so the ordering contract can
+// be pinned directly: the locale-dependence it rules out is invisible from the
+// outside, because real tokens are lowercase-hex UUIDs that both comparisons
+// happen to order alike.
+export function precedes(left, right) {
+    // Code-unit comparison, never localeCompare: two contenders running under
+    // different locales (LC_ALL=C hook vs ICU-collated CLI) must order the
+    // same pair of tokens the same way, or mutual exclusion leaks.
     return left.ticket < right.ticket
-        || (left.ticket === right.ticket && left.token.localeCompare(right.token) < 0);
+        || (left.ticket === right.ticket && left.token < right.token);
 }
 
 function publishCandidate(path, candidate, operations) {
@@ -261,18 +269,21 @@ export function withLock(lockPath, fn, options = {}) {
     let primaryError = null;
     // Between the mkdir above and the first publication below this contender owns
     // no file in the queue, so a concurrent cleanup that removes empty queue
-    // directories — `aimhooman uninstall` sweeps them — can delete it out from
-    // under us. The gap is wide enough to lose: building the candidate probes the
-    // process identity, which spawns `ps` on macOS and BSD. Recreate and retry
-    // once rather than failing the caller with a bare ENOENT. Once a candidate is
-    // published the directory is no longer empty, so no cleanup can remove it.
+    // directories — every release sweeps its own, and `aimhooman uninstall`
+    // sweeps the rest — can delete it out from under us. The gap is wide enough
+    // to lose: building the candidate probes the process identity, which spawns
+    // `ps` on macOS and BSD. Recreate and retry a few times rather than failing
+    // the caller with a bare ENOENT. Once a candidate is published the directory
+    // is no longer empty, so no cleanup can remove it.
     const publish = () => {
-        try {
-            publishCandidate(candidatePath, candidate, options.candidateOperations);
-        } catch (error) {
-            if (error?.code !== 'ENOENT') throw error;
-            mkdirSync(queueDir, { recursive: true });
-            publishCandidate(candidatePath, candidate, options.candidateOperations);
+        for (let attempt = 0; ; attempt += 1) {
+            try {
+                publishCandidate(candidatePath, candidate, options.candidateOperations);
+                return;
+            } catch (error) {
+                if (error?.code !== 'ENOENT' || attempt >= 4) throw error;
+                mkdirSync(queueDir, { recursive: true });
+            }
         }
     };
     try {
@@ -337,6 +348,12 @@ export function withLock(lockPath, fn, options = {}) {
                     throw error;
                 }
             }
+            // Sweep the queue directory when this contender leaves it empty:
+            // for a lock beside a worktree .gitignore the directory is tooling
+            // residue in the very worktree this tool keeps clean. rmdir refuses
+            // a non-empty directory, and a peer publishing into the gap simply
+            // recreates it (see publish above).
+            try { rmdirSync(queueDir); } catch { /* occupied or already gone */ }
         }
     }
 }

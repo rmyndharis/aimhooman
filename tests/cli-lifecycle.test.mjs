@@ -1406,7 +1406,11 @@ test('uninstall sweeps its lock queues, and only --purge-state takes the message
             join(gitPath(repo, 'hooks'), '.aimhooman-hooks.lock.queue'),
         ];
         assert.ok(existsSync(bak), 'the attribution strip should leave a backup to sweep');
-        assert.ok(existsSync(gitignoreQueue), 'init --gitignore should leave its lock queue to sweep');
+        // Every release now sweeps its own emptied queue, so a normal run leaves
+        // none behind. A crashed contender still can; plant the directories a
+        // crash would leave so the uninstall sweep below has real work.
+        assert.equal(existsSync(gitignoreQueue), false, 'a clean release must not leave a lock queue behind');
+        for (const queue of queues) mkdirSync(queue, { recursive: true });
 
         // A plain uninstall keeps policy state, so it keeps the backup too: that
         // file is the only copy of the lines stripped from the last message.
@@ -1419,6 +1423,7 @@ test('uninstall sweeps its lock queues, and only --purge-state takes the message
 
         const reinstalled = run(repo, ['init']);
         assert.equal(reinstalled.status, 0, reinstalled.stderr);
+        for (const queue of queues) mkdirSync(queue, { recursive: true });
         const purged = run(repo, ['uninstall', '--purge-state']);
         assert.equal(purged.status, 0, purged.stderr);
         assert.equal(existsSync(bak), false, '--purge-state must remove the message backup');
