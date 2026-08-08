@@ -114,6 +114,12 @@ test('push workflow scans history; release workflow cuts a tag into a direct npm
     assert.match(releaseWorkflow, /registry-url:\s*https:\/\/registry\.npmjs\.org/);
     assert.match(releaseWorkflow, /npm ci --ignore-scripts/);
     assert.match(releaseWorkflow, /run:\s*npm run verify/);
-    assert.match(releaseWorkflow, /npm publish --access public --provenance/);
-    assert.match(releaseWorkflow, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.NPM_TOKEN \}\}/);
+    assert.match(releaseWorkflow, /npm publish --provenance/);
+    // Trusted publishing, so no npm credential may reappear in the workflow:
+    // the OIDC exchange is what authenticates, and a token added back beside it
+    // would be a long-lived secret doing nothing but waiting to leak. This
+    // matches the usage forms, not the words — the step comment explains the
+    // scheme and naming it there is not a credential.
+    assert.doesNotMatch(releaseWorkflow, /NODE_AUTH_TOKEN\s*:/);
+    assert.doesNotMatch(releaseWorkflow, /\$\{\{\s*secrets\./);
 });

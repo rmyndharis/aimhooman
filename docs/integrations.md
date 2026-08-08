@@ -13,7 +13,7 @@ aimhooman straight from Git. Add this to `.pre-commit-config.yaml` and run
 ```yaml
 repos:
   - repo: https://github.com/rmyndharis/aimhooman
-    rev: v0.5.0
+    rev: v0.5.1
     hooks:
       - id: aimhooman
 ```
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: rmyndharis/aimhooman@v0.3.0
+      - uses: rmyndharis/aimhooman@v0.5.1
         with:
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
@@ -61,10 +61,10 @@ the merge base of the two commits, and a shallow checkout does not have that
 commit. The action installs aimhooman from npm and defaults to the `strict`
 profile; set `profile:` under `with:` to change that.
 
-Pinning the action tag (`@v0.3.0`) pins only the action's steps, not the CLI:
+Pinning the action tag (`@v0.5.1`) pins only the action's steps, not the CLI:
 the action npm-installs aimhooman at run time, and the `version` input
 defaults to `latest`. Set `version:` under `with:` (for example
-`version: 0.3.0`) to pin the CLI itself.
+`version: 0.5.1`) to pin the CLI itself.
 
 For `push` events, use `base: ${{ github.event.before }}` and
 `head: ${{ github.event.after }}`. On the first push to a branch `before` is

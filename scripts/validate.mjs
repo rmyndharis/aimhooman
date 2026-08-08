@@ -88,13 +88,24 @@ if (!readme.includes(`version-v${pkg.version.replace(/-/g, '--')}`) || !readme.i
 if (!changelog.includes(`## [${pkg.version}]`)) {
     throw new Error(`CHANGELOG has no heading for ${pkg.version}`);
 }
-// The pre-commit.com example installs whatever tag it pins. A stale pin ships
-// an old guard from a page that looks current, so it ratchets with the release
-// exactly like the README badge above.
+// The integration examples install whatever they pin. A stale pin ships an old
+// guard from a page that looks current, so every pin ratchets with the release
+// exactly like the README badge above. Both spellings are checked: the
+// pre-commit `rev:` and the action's `owner/repo@tag`, plus the prose that
+// quotes them — guarding one and not the other is how the action example drifted
+// three minors behind while the page still read as maintained.
 const integrations = readFileSync(join(ROOT, 'docs/integrations.md'), 'utf8');
-const pinned = integrations.match(/^\s*rev: (\S+)$/m)?.[1];
-if (pinned !== `v${pkg.version}`) {
-    throw new Error(`docs/integrations.md pre-commit example pins ${pinned ?? 'no tag'}, expected v${pkg.version}`);
+const stalePins = [
+    ...[...integrations.matchAll(/^\s*rev: (\S+)$/gm)].map((m) => ['pre-commit rev', m[1]]),
+    ...[...integrations.matchAll(/aimhooman@(v\S+)/g)].map((m) => ['action tag', m[1]]),
+    ...[...integrations.matchAll(/`@(v[\d.]+)`/g)].map((m) => ['action tag in prose', m[1]]),
+    ...[...integrations.matchAll(/`version: ([\d.]+)`/g)].map((m) => ['CLI version in prose', `v${m[1]}`]),
+].filter(([, pin]) => pin !== `v${pkg.version}`);
+if (stalePins.length) {
+    throw new Error(
+        `docs/integrations.md pins are stale (expected v${pkg.version}): `
+        + stalePins.map(([what, pin]) => `${what}=${pin}`).join(', '),
+    );
 }
 
 const rules = loadRules();

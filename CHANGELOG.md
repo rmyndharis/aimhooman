@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-08-08
+
+### Changed
+
+- Releases now authenticate through npm trusted publishing. The job exchanges
+  its GitHub OIDC identity for a short-lived credential at publish time, so the
+  repository no longer holds an npm token: nothing to leak, expire, or rotate.
+  npm revoked classic tokens in December 2025 and puts a 90-day clock on the
+  granular tokens that replaced them, so a credential-free path is the only one
+  that does not need renewing on a timer.
+- `CONTRIBUTING.md` documents that path in place of the token setup it used to
+  describe, and records that the registered publisher pins the `release.yml`
+  filename — renaming that file stops releases until the publisher is updated.
+
+### Fixed
+
+- The GitHub Action example in `docs/integrations.md` pinned `@v0.3.0`, three
+  minors behind, so a reader copying it wired up an old action from a page that
+  read as current. The release gate added in 0.5.0 only guarded the
+  pre-commit.com `rev:`, which is how this one drifted unnoticed; it now checks
+  every pin on the page, including the versions quoted in the prose around them.
+
+Nothing else changed: this release carries no code, rule, or behaviour change,
+and its packaged contents differ from 0.5.0 only in that documentation. It
+exists to exercise the new publishing path while the previous token is still
+valid as a fallback.
+
 ## [0.5.0] - 2026-08-08
 
 ### Added

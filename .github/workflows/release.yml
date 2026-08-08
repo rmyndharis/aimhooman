@@ -37,7 +37,7 @@ jobs:
       - name: Verify
         run: npm run verify
       # Trusted publishing: npm exchanges the job's OIDC identity for a
-      # short-lived credential, so there is no NPM_TOKEN to leak or renew. The
+      # short-lived credential, so no npm secret is stored anywhere. The
       # publisher registered on npmjs.com pins this repository and this exact
       # workflow filename, which is why renaming this file breaks publishing.
       # --access is unnecessary (publishConfig.access already says public).
