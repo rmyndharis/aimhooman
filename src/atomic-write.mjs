@@ -228,7 +228,11 @@ function queueCandidates(queueDir, staleMs) {
     return candidates;
 }
 
-function precedes(left, right) {
+// precedes orders two queue candidates. Exported so the ordering contract can
+// be pinned directly: the locale-dependence it rules out is invisible from the
+// outside, because real tokens are lowercase-hex UUIDs that both comparisons
+// happen to order alike.
+export function precedes(left, right) {
     // Code-unit comparison, never localeCompare: two contenders running under
     // different locales (LC_ALL=C hook vs ICU-collated CLI) must order the
     // same pair of tokens the same way, or mutual exclusion leaks.
