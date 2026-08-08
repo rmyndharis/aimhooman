@@ -5,7 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-08-08
+
+### Added
+
+- New catalog rule `aimhooman.lock-residue` blocks aimhooman's own state-lock
+  files and queue candidates (`*.aimhooman.lock`, `*.aimhooman.lock.queue/**`).
+  A contender killed mid-write leaves a candidate JSON behind, and beside a
+  worktree `.gitignore` that file sat where the next `git add .` would take it.
 
 ### Fixed
 
@@ -33,10 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - State-lock queues no longer outlive their lock. Every release now sweeps its
   emptied queue directory — for a clone that opted into `--gitignore`, that
   directory sat permanently in the worktree of the very tool that removes
-  residue — and a new `aimhooman.lock-residue` catalog rule keeps a crashed
-  contender's leftovers out of commits. An uninstall on a hooks directory that
-  refuses the lock's first write now reports the dispatchers as still in place
-  instead of dying on a bare `mkdir` error.
+  residue. An uninstall on a hooks directory that refuses the lock's first
+  write now reports the dispatchers as still in place instead of dying on a
+  bare `mkdir` error.
 - The reference-transaction fast path pins `PATH` before calling `dirname`,
   matching the commit-msg filter: on a GUI client with a minimal `PATH`, a
   tag, fetch, or stash could fail with a misleading "guards changed" message.

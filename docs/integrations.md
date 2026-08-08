@@ -13,7 +13,7 @@ aimhooman straight from Git. Add this to `.pre-commit-config.yaml` and run
 ```yaml
 repos:
   - repo: https://github.com/rmyndharis/aimhooman
-    rev: v0.4.1
+    rev: v0.5.0
     hooks:
       - id: aimhooman
 ```
