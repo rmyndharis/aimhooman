@@ -66,9 +66,12 @@ only the latest minor release will receive security fixes.
   cannot defend against a compromised owner credential.
 - The release pipeline pins actions to immutable commit SHAs and publishes with npm
   build provenance. Pushing a `v*` tag runs the workflow: it installs dependencies,
-  runs the test suite, then publishes to npm authenticated by the `NPM_TOKEN` secret
-  (use a granular, publish-only, package-scoped npm token with 2FA enabled; rotate it
-  regularly). Protect `v*` tags so only the owner can create them and tag update or
-  deletion is blocked. Do not publish or move dist-tags manually while a release job
-  is pending or running. The npm package is not claimed as available until the release
-  workflow completes.
+  runs the test suite, then publishes through npm trusted publishing. The job
+  exchanges its GitHub OIDC identity for a credential that lives only for that
+  publish, so the repository stores no npm token: there is no long-lived secret to
+  leak, expire, or rotate. npm verifies the exchange against a publisher registered
+  for this repository and the `release.yml` filename, which is why renaming that
+  workflow stops releases until the publisher is updated. Protect `v*` tags so only
+  the owner can create them and tag update or deletion is blocked. Do not publish or
+  move dist-tags manually while a release job is pending or running. The npm package
+  is not claimed as available until the release workflow completes.
