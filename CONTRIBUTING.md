@@ -152,5 +152,9 @@ git tag -a v0.1.0 -m v0.1.0
 git push origin v0.1.0
 ```
 
-Use a granular, publish-only npm token with 2FA enabled, and avoid publishing or
-moving dist-tags manually while a release job is running.
+Publishing authenticates through npm trusted publishing: the job exchanges its
+GitHub OIDC identity for a short-lived credential, so the repository holds no
+npm token. The publisher registered on npmjs.com pins this repository and the
+`release.yml` filename — renaming that file stops releases until the publisher
+is updated. Avoid publishing or moving dist-tags manually while a release job
+is running.

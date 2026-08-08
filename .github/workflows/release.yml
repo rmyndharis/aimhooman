@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: write # gh release create
-  id-token: write # npm publish --provenance
+  id-token: write # trusted-publishing OIDC exchange + provenance
 
 jobs:
   publish:
@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -36,10 +36,13 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Verify
         run: npm run verify
+      # Trusted publishing: npm exchanges the job's OIDC identity for a
+      # short-lived credential, so there is no NPM_TOKEN to leak or renew. The
+      # publisher registered on npmjs.com pins this repository and this exact
+      # workflow filename, which is why renaming this file breaks publishing.
+      # --access is unnecessary (publishConfig.access already says public).
       - name: Publish to npm
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
