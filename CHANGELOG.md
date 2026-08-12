@@ -5,6 +5,83 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-12
+
+### Security
+
+- A source line beginning `++ ` forged a diff header. A unified diff renders an
+  added line as `+` plus its content, so that line arrived at the hunk parser as
+  `+++ ...`, the shape of a new-file header. Every later hunk of that file was
+  filed under a path nothing scans, the rest of the file was never handed to the
+  content rules, and the scan still reported complete coverage — so no
+  incomplete reason was recorded and the fail-closed paths never engaged. It
+  needed no `--no-verify`: a cherry-pick or a fetched commit reaches the same
+  blind path, which is the layer `--no-verify` cannot skip. Hunk bodies now run
+  against the line budget each `@@` header declares.
+- The inline `--config-env=core.hooksPath=...` spelling set the bypass flag but
+  never the hooks-path override flag, unlike the three sibling branches beside
+  it, so a commit carrying it passed the agent guard and was handed an advisory
+  naming `--no-verify`, which was not present. The class test claimed to assert
+  the whole set and listed six forms; it lists ten now.
+- `rm -rf .git/h*` read as an ordinary prefix, because the hooks-directory test
+  matched the literal `.git/hooks`. It now matches the path segment, and covers
+  `--git-path hooks`, while `cat .git/HEAD && git commit` stays allowed.
+- Root instruction files matched case-sensitively while every sibling path rule
+  folds case. On APFS and NTFS `claude.md` is the same file as `CLAUDE.md`, so
+  the guarded spelling was one keystroke from being skipped. Paths deeper in the
+  tree stay case-sensitive, where these names are ordinary documentation.
+- UTF-16 text was classified as binary on its NUL padding and skipped whole. A
+  byte-order mark says the bytes are text, so a marked blob is now decoded and
+  scanned; PowerShell 5.1 writes exactly that from `>`, `Out-File` and
+  `Tee-Object`. Unmarked NUL data still skips as binary.
+
+### Fixed
+
+- `init` chained anything it did not recognise, including one of its own
+  dispatchers left damaged by a partial write. That backup then named itself as
+  its own predecessor, so the hook would exec itself without bound. `init` also
+  copied over an existing chained backup, so any tool that installed over the
+  dispatcher destroyed the user's original hook on the next run. The stored
+  backup is kept now, and a file already pointing at the backup slot is replaced
+  rather than chained.
+- `uninstall` restored a self-referencing backup as if it were the user's hook,
+  and skipped `.git/hooks` entirely once `core.hooksPath` moved elsewhere. Those
+  dispatchers were dormant, not gone: unset the setting and they guard again,
+  while `uninstall` had already reported success. It clears the repository hooks
+  directory as well as the configured one now.
+- Automatic repair restores staged deletions it cannot rule out as the source of
+  an undetectable rename. That sweep stays, but it never said so: a developer who
+  staged `git rm --cached legacy.txt` alongside a blocked artifact got a clean
+  `git status`, the file still tracked, and a commit message describing an
+  untracking the commit did not carry. The repair names what it took and how to
+  stage the removal again.
+- The agent guard refused every Git command that followed another on one shell
+  line. `git commit && git push`, `git fetch && git rebase`,
+  `git remote -v && git push` and `git stash list && git commit` all denied, and
+  lines with no commit in them were still told to run the commit separately.
+  What decides it now is whether the earlier command moved something a later
+  policy resolution reads. `symbolic-ref`, `update-ref`, `rm --cached` and
+  `stash pop` still raise it; they move HEAD or the index unwatched.
+- A `.aimhooman.json` this version cannot parse, anywhere in fetched history,
+  made the final ref guard refuse every update that would introduce it — pull,
+  merge, reset, and `--no-verify` alike, with no message pointing at a way out.
+  Pulling the fix did not help either, because the revert's own scan threw on
+  its parent's policy. History is not the receiving developer's to fix: the
+  guard now scans under a profile local config can reach and reports which
+  commit it could not read. The worktree, the index, and direct questions like
+  `check --commit` keep the hard error.
+- The refusal for a worktree hooks path promised Git would track a directory
+  whose contents it already ignores, and the husky notes named `.husky` where
+  husky 9 sets `.husky/_`. Both corrected, with the exclude route that lets
+  `init` manage that directory added.
+
+### Changed
+
+- `unstagePaths` hands git the pathspec list in a file rather than down its
+  stdin. Past the pipe buffer — 64 KiB, and 16 KiB to start with on macOS — the
+  synchronous write has to interleave with git's reads, and a stall there is not
+  a slow call: it runs the full 120-second timeout and then fails the repair.
+
 ## [0.5.1] - 2026-08-08
 
 ### Changed
