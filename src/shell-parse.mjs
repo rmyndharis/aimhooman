@@ -419,7 +419,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 targetUncertain: commandTargetUncertain,
                 pathDialectUncertain: commandPathDialectUncertain,
             });
-            policyTransitionRisk = true;
+            policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         }
         else if (verb === 'add') {
             const paths = toks.slice(i + 1).filter((t) => !t.startsWith('-'));
@@ -464,7 +464,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 pathDialectUncertain: commandPathDialectUncertain,
                 classification: 'unknown',
             });
-            policyTransitionRisk ||= GIT_POLICY_TRANSITION_COMMANDS.has(verb);
+            policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         } else if (GIT_POLICY_TRANSITION_COMMANDS.has(verb)
             || GIT_REF_MUTATION_COMMANDS.has(verb)) {
             commands.push({
@@ -481,7 +481,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 pathDialectUncertain: commandPathDialectUncertain,
                 classification: 'mutation',
             });
-            policyTransitionRisk = true;
+            policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         }
     }
     const indirectCommits = [
@@ -666,6 +666,26 @@ export const GIT_POLICY_TRANSITION_COMMANDS = new Set([
     'update-ref',
 ]);
 
+// Verbs whose effect a later command's policy resolution reads: they move HEAD,
+// the index, or the worktree that `.aimhooman.json` is resolved from. Only these
+// raise the transition flag that refuses a later Git command on the same line.
+//
+// Deliberately a third set rather than a narrowing of the two around it. Those
+// two also decide whether a verb becomes a modelled candidate at all, so
+// dropping `push` from ref mutation would take the installed-guard check for
+// `git push` with it. `commit` is absent on purpose: the state it moves is state
+// this tool just supervised through pre-commit, commit-msg and the ref guard,
+// unlike `symbolic-ref` or `stash pop`, which move it unwatched.
+export const GIT_POLICY_INPUT_COMMANDS = new Set([
+    'am', 'branch', 'checkout', 'cherry-pick', 'merge', 'pull', 'read-tree', 'rebase',
+    'replace', 'reset', 'restore', 'revert', 'rm', 'stash', 'switch', 'symbolic-ref',
+    'update-index', 'update-ref',
+]);
+
+function raisesPolicyTransitionRisk(verb, args = []) {
+    return GIT_POLICY_INPUT_COMMANDS.has(verb) && !gitReadOnlyRefCommand(verb, args);
+}
+
 // These verbs can create a commit or move a branch/reference. Their final
 // safety boundary is the managed reference-transaction hook, so PreToolUse
 // must not let config/environment/prefix indirection disable that boundary.
@@ -755,7 +775,7 @@ const GIT_TAG_MUTATING_FLAGS = new Set([
 
 const GIT_BRANCH_READONLY_FLAGS = new Set([
     '-a', '--all', '-r', '--remotes', '-l', '--list', '-v', '--verbose', '-vv',
-    '-q', '--quiet', '--no-color', '--color',
+    '-q', '--quiet', '--no-color', '--color', '--show-current',
     '--sort', '--format', '--contains', '--no-contains', '--merged', '--no-merged',
     '--points-at',
 ]);

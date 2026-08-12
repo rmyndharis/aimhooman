@@ -3144,3 +3144,75 @@ test('an unwritable .git/info produces the same verdict as a writable one', asyn
         }
     }
 });
+
+// One running flag was raised after every commit and every ref-affecting verb,
+// then stamped onto every later command on the same line. So the second Git
+// command was refused whatever it was, and told to "run the Git commit
+// separately" even on lines with no commit in them. What actually matters is
+// whether the earlier command moved something a later policy resolution reads:
+// HEAD, the index, or the worktree.
+test('a second Git command is allowed when the first moved no policy input', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-second-command-');
+    try {
+        for (const command of [
+            'git commit -m x && git push',
+            'git fetch && git rebase origin/main',
+            'git remote -v && git push',
+            'git tag -l && git push --tags',
+            'git stash list && git commit -m x',
+            'git branch --show-current && git commit -m x',
+        ]) {
+            assert.equal(
+                await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                null,
+                command,
+            );
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The other half of the same decision. These four move HEAD or the index
+// outside any guarded path, so a commit after them is resolved against state
+// the tool never saw. They stay denied.
+test('a second Git command is denied when the first moved a policy input', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-policy-input-');
+    try {
+        for (const command of [
+            'git symbolic-ref HEAD refs/heads/other && git commit -m x',
+            'git update-ref refs/heads/main HEAD && git commit -m x',
+            'git rm --cached .aimhooman.json && git commit -m x',
+            'git stash pop && git commit -m x',
+            'git checkout other-branch && git commit -m x',
+        ]) {
+            const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(out?.permissionDecision, 'deny', command);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The listing carve-out was only ever exercised on clean, which is why a change
+// that turned it off under strict could ship green.
+test('read-only Git ref-command listings are allowed under strict too', async () => {
+    const dir = makeHookRepo('strict', 'aim-hook-readonly-strict-');
+    try {
+        for (const command of [
+            'git branch | grep feat',
+            'git branch -a | head',
+            'git remote -v | grep origin',
+            'git stash list | head',
+            'git notes list | head',
+        ]) {
+            assert.equal(
+                await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                null,
+                command,
+            );
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});

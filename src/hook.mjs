@@ -14,6 +14,7 @@ import { resolvePolicy } from './policy-resolver.mjs';
 import { engineForPolicy, resolveStagedPolicy } from './scan-target.mjs';
 import { scanEntries } from './scan-session.mjs';
 import {
+    GIT_POLICY_INPUT_COMMANDS,
     GIT_POLICY_TRANSITION_COMMANDS,
     GIT_REF_MUTATION_COMMANDS,
     SAFE_NON_COMMIT_GIT,
@@ -271,6 +272,17 @@ function hookPreToolUse(input) {
                     'aimhooman cannot determine the policy that will apply after dynamic execution; run the Git commit separately.'
                 );
             }
+            // Some ref-mutation verbs have read-only listing forms that move no
+            // ref and so cannot bypass the reference-transaction guard. Reading
+            // a repository (`git branch | grep`, `git remote -v | grep origin`,
+            // `git stash list | head`) is everyday work; refusing it behind a
+            // pipeline forced developers out of their normal workflow. A real
+            // mutation still carries a mutating flag or positional and stays
+            // subject to every check below. This sits above the transition veto
+            // because a command that reads cannot be made unsafe by whatever ran
+            // before it; it stays below the checks above, which are about not
+            // being able to see the repository at all.
+            if (gitReadOnlyRefCommand(gitCommand.verb, gitCommand.args || [])) continue;
             if (gitCommand.policyTransitionRisk) {
                 return emitDecision(
                     'deny',
@@ -279,14 +291,6 @@ function hookPreToolUse(input) {
             }
             targetRepo = openRepo(gitCommand.cwd);
             const targetProfile = enforcementPolicy(targetRepo).profile;
-            // Some ref-mutation verbs have read-only listing forms that move no
-            // ref and so cannot bypass the reference-transaction guard. Reading
-            // a repository (`git branch | grep`, `git remote -v | grep origin`,
-            // `git stash list | head`) is everyday work; refusing it behind a
-            // pipeline forced developers out of their normal workflow. A real
-            // mutation still carries a mutating flag or positional and stays
-            // subject to every check below.
-            if (gitReadOnlyRefCommand(gitCommand.verb, gitCommand.args || [])) continue;
             // An unresolved subcommand/alias may itself move a ref. When its
             // hook path or execution context is altered, there is no safe
             // content snapshot to fall back to, so treat it like a direct ref
@@ -791,9 +795,12 @@ function resolveGitAliases(parsed) {
         } : resolved;
         commands.push(effective);
         if (effective.verb === 'add') aliasAddPaths.push(...effective.addPaths);
+        // The same narrowing the parser applies. Without it every commit-like
+        // candidate is re-stamped here after parseGit has run, and the veto
+        // below fires again on lines where nothing moved a policy input.
         aliasPolicyTransitionRisk ||= effective.verb === 'unknown'
-            || GIT_POLICY_TRANSITION_COMMANDS.has(effective.verb)
-            || GIT_REF_MUTATION_COMMANDS.has(effective.verb);
+            || (GIT_POLICY_INPUT_COMMANDS.has(effective.verb)
+                && !gitReadOnlyRefCommand(effective.verb, effective.args || []));
         aliasIndexMutationRisk ||= effective.verb === 'unknown'
             || effective.indexMutationRisk
             || gitIndexMutationRisk(effective.verb, effective.args);
