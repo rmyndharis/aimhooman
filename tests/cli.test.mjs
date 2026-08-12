@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1875,14 +1876,28 @@ test('a write-tree that cannot answer keeps the incomplete-scan warning a warnin
         execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: dir });
 
         // An oversized staged file leaves the scan incomplete, which on clean
-        // is the warn-and-continue branch this guards.
-        writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 1;\n'.repeat(140000));
+        // is the warn-and-continue branch this guards. The unique first line
+        // keeps the staged tree out of the object store: git returns an object
+        // it already has without writing it, so a tree that had been written
+        // before the chmod would let write-tree succeed and the fixture would
+        // prove nothing.
+        writeFileSync(
+            join(dir, 'vendor.js'),
+            `// ${randomUUID()}\n` + 'export const chunk = 1;\n'.repeat(140000),
+        );
         execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
         // Read-only object store: cat-file still reads the staged blobs, but
         // `git write-tree` cannot create the tree object it needs.
         chmodSync(objects, 0o500);
         const wrote = spawnSync('git', ['write-tree'], { cwd: dir, encoding: 'utf8' });
         assert.notEqual(wrote.status, 0, 'the fixture must actually break write-tree');
+        // And broke it for the reason this test is about. Any other failure
+        // would still satisfy the check above while testing something else.
+        assert.match(
+            wrote.stderr,
+            /insufficient permission|[Pp]ermission denied|unable to (create|write)/,
+            `write-tree must fail on the read-only object store: ${wrote.stderr}`,
+        );
 
         const warned = spawnSync(process.execPath, [CLI, 'precommit'], { cwd: dir, encoding: 'utf8' });
         assert.equal(warned.status, 0, warned.stdout + warned.stderr);
