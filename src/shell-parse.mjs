@@ -316,6 +316,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 i += 2;
             } else if (option.startsWith('--config-env=')) {
                 if (hookAffectingConfig(option.slice('--config-env='.length))) commandBypass = true;
+                if (hooksPathOverrideConfig(option.slice('--config-env='.length))) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(option.slice('--config-env='.length))) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
@@ -650,7 +651,11 @@ function commandMayReplaceIndex(tokens, source) {
 // bypass disagree.
 export function commandMayTouchHooks(tokens, source) {
     const text = `${tokens.join(' ')} ${source}`.replace(/\\/g, '/');
-    return /(?:^|[\s"'=/])\.git\/hooks(?:$|[\s"'/])/i.test(text)
+    // The directory need not be spelled in full to be removed: `.git/h*` takes
+    // it just as well as `.git/hooks`. Match the segment and step around HEAD,
+    // the only other `.git/h` an ordinary command reads.
+    return /(?:^|[\s"'=/])\.git\/h(?!ead\b)/i.test(text)
+        || /--git-path\s+hooks\b/i.test(text)
         || /\bhookspath\b/i.test(text)
         || /\binclude(?:if\.[^\s"'=]*)?\.path\b/i.test(text);
 }
