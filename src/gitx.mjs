@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
@@ -568,13 +569,11 @@ export function gitConfig(root, key) {
 // (no HEAD yet) it falls back to `git rm --cached`.
 export function unstagePaths(repo, paths) {
     if (!paths.length) return [];
-    const pathspecs = Buffer.from(paths.join('\0') + '\0');
     const opts = {
         cwd: repo.root,
         env: gitEnvironment(),
-        input: pathspecs,
         timeout: GIT_TIMEOUT_MS,
-        stdio: ['pipe', 'ignore', 'pipe'],
+        stdio: ['ignore', 'ignore', 'pipe'],
     };
     let hasHead = true;
     try {
@@ -597,21 +596,35 @@ export function unstagePaths(repo, paths) {
         if (typeof error?.status !== 'number') throw error;
         hasHead = false;
     }
-    if (hasHead) {
-        execFileSync('git', [
-            '--literal-pathspecs', 'restore', '--staged',
-            '--pathspec-from-file=-', '--pathspec-file-nul',
-        ], opts);
-    } else {
-        // -f waives only the check that the staged blob still matches the file
-        // on disk. With no HEAD that check has nothing else to pass against, so
-        // an artifact appended to between `git add` and `git commit` could never
-        // be unstaged. --cached leaves the worktree alone either way, and the
-        // sibling `restore --staged` branch enforces no equivalent check.
-        execFileSync('git', [
-            '--literal-pathspecs', 'rm', '--cached', '-f', '--quiet', '--ignore-unmatch',
-            '--pathspec-from-file=-', '--pathspec-file-nul',
-        ], opts);
+    // The pathspec list goes to git in a file, not down its stdin. A repair that
+    // unstages a few hundred paths outgrows the pipe buffer (64 KiB, and 16 KiB
+    // to start with on macOS), and past that point the synchronous write has to
+    // interleave with git's reads. That interleave can stall, and a stall inside
+    // execFileSync is not a slow call: it runs to GIT_TIMEOUT_MS and then fails
+    // the repair outright. A file has no buffer to fill, and it keeps the whole
+    // unstage in one git invocation, which is what makes it atomic.
+    const listDir = mkdtempSync(join(tmpdir(), 'aimhooman-pathspec-'));
+    const listFile = join(listDir, 'paths');
+    writeFileSync(listFile, Buffer.from(paths.join('\0') + '\0'));
+    try {
+        if (hasHead) {
+            execFileSync('git', [
+                '--literal-pathspecs', 'restore', '--staged',
+                `--pathspec-from-file=${listFile}`, '--pathspec-file-nul',
+            ], opts);
+        } else {
+            // -f waives only the check that the staged blob still matches the file
+            // on disk. With no HEAD that check has nothing else to pass against, so
+            // an artifact appended to between `git add` and `git commit` could never
+            // be unstaged. --cached leaves the worktree alone either way, and the
+            // sibling `restore --staged` branch enforces no equivalent check.
+            execFileSync('git', [
+                '--literal-pathspecs', 'rm', '--cached', '-f', '--quiet', '--ignore-unmatch',
+                `--pathspec-from-file=${listFile}`, '--pathspec-file-nul',
+            ], opts);
+        }
+    } finally {
+        rmSync(listDir, { recursive: true, force: true });
     }
     return paths;
 }
