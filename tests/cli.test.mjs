@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1856,7 +1857,7 @@ test('an unreadable .git/worktrees does not disable the CLI or trap the reposito
 
 test('a write-tree that cannot answer keeps the incomplete-scan warning a warning', {
     skip: process.platform === 'win32' || process.getuid?.() === 0,
-}, () => {
+}, (t) => {
     // The clean-profile warn path reads the staged tree only to deduplicate the
     // notice across a commit's hooks. That key is a convenience, so a git that
     // cannot write the tree object (an unwritable object store, a corrupt
@@ -1875,14 +1876,48 @@ test('a write-tree that cannot answer keeps the incomplete-scan warning a warnin
         execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: dir });
 
         // An oversized staged file leaves the scan incomplete, which on clean
-        // is the warn-and-continue branch this guards.
-        writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 1;\n'.repeat(140000));
+        // is the warn-and-continue branch this guards. The unique first line
+        // keeps the staged tree out of the object store: git returns an object
+        // it already has without writing it, so a tree that had been written
+        // before the chmod would let write-tree succeed and the fixture would
+        // prove nothing.
+        writeFileSync(
+            join(dir, 'vendor.js'),
+            `// ${randomUUID()}\n` + 'export const chunk = 1;\n'.repeat(140000),
+        );
         execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
         // Read-only object store: cat-file still reads the staged blobs, but
         // `git write-tree` cannot create the tree object it needs.
         chmodSync(objects, 0o500);
+        // Mode bits are not the whole permission story. macOS keeps inherited
+        // ACLs across chmod, so a directory can read 0500 and still accept a new
+        // file; write-tree then succeeds and the fixture proves nothing. Ask the
+        // filesystem instead of trusting the mode, and say so rather than
+        // reporting it as a failure of the code under test.
+        const probe = join(objects, 'aimhooman-write-probe');
+        let enforced = false;
+        try {
+            writeFileSync(probe, 'x');
+            rmSync(probe, { force: true });
+        } catch {
+            enforced = true;
+        }
+        if (!enforced) {
+            t.skip('the filesystem does not enforce the read-only object store this fixture needs');
+            return;
+        }
         const wrote = spawnSync('git', ['write-tree'], { cwd: dir, encoding: 'utf8' });
-        assert.notEqual(wrote.status, 0, 'the fixture must actually break write-tree');
+        assert.notEqual(
+            wrote.status, 0,
+            `the fixture must actually break write-tree: status ${wrote.status} ${wrote.stdout}${wrote.stderr}`,
+        );
+        // And broke it for the reason this test is about. Any other failure
+        // would still satisfy the check above while testing something else.
+        assert.match(
+            wrote.stderr,
+            /insufficient permission|[Pp]ermission denied|unable to (create|write)/,
+            `write-tree must fail on the read-only object store: ${wrote.stderr}`,
+        );
 
         const warned = spawnSync(process.execPath, [CLI, 'precommit'], { cwd: dir, encoding: 'utf8' });
         assert.equal(warned.status, 0, warned.stdout + warned.stderr);
