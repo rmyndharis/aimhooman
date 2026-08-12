@@ -633,3 +633,19 @@ test('tracked entries leave gitlinks out of the cat-file metadata read', () => {
         rmSync(parent, { recursive: true, force: true });
     }
 });
+
+// The pathspec list is handed to git as a file rather than through its stdin,
+// so the temporary directory holding it has to go even when git rejects the
+// pathspec. A leak here would accumulate one directory per failed repair.
+test('unstagePaths removes its pathspec file when git rejects the pathspec', () => {
+    const dir = freshRepo();
+    const leaked = () => readdirSync(tmpdir()).filter((name) => name.startsWith('aimhooman-pathspec-'));
+    try {
+        const repo = openRepo(dir);
+        const before = leaked().length;
+        assert.throws(() => unstagePaths(repo, ['no-such-path-in-this-repo']));
+        assert.equal(leaked().length, before, 'the pathspec directory must not survive a failed unstage');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
