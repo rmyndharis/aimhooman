@@ -161,8 +161,15 @@ export function repairStagedBlocks(repo, blocks, paths) {
         if (!pending.length) break;
         unstagePaths(repo, pending);
     }
-    return stagedBefore !== null
-        && stagedBefore.every((path) => unstageTargets.has(path));
+    // collateral is what the repair took beyond the blocked paths themselves:
+    // staged deletions kept as possible rename sources. The caller has to name
+    // them, or the developer commits a message describing a removal the commit
+    // no longer carries.
+    const blocked = new Set(paths);
+    return {
+        emptied: stagedBefore !== null && stagedBefore.every((path) => unstageTargets.has(path)),
+        collateral: [...unstageTargets].filter((path) => !blocked.has(path)),
+    };
 }
 
 // resolveIntroduced maps each proposed update to the commits it introduces,

@@ -141,14 +141,15 @@ test('repairStagedBlocks unstages the blocked paths and reports an emptied index
         writeFileSync(join(dir, 'keep.txt'), 'keep\n');
         git(dir, ['add', '-f', '.claude.json', 'keep.txt']);
         const partial = repairStagedBlocks(repo, [{ path: '.claude.json' }], ['.claude.json']);
-        assert.equal(partial, false, 'other work stays staged, so the commit may proceed');
+        assert.equal(partial.emptied, false, 'other work stays staged, so the commit may proceed');
+        assert.deepEqual(partial.collateral, [], 'nothing beyond the blocked path was taken');
         assert.deepEqual(stagedPaths(repo), ['keep.txt']);
         assert.ok(existsSync(join(dir, '.claude.json')), 'the worktree file survives');
 
         git(dir, ['restore', '--staged', 'keep.txt']);
         git(dir, ['add', '-f', '.claude.json']);
         const emptied = repairStagedBlocks(repo, [{ path: '.claude.json' }], ['.claude.json']);
-        assert.equal(emptied, true, 'the repair removed everything that was staged');
+        assert.equal(emptied.emptied, true, 'the repair removed everything that was staged');
         assert.deepEqual(stagedPaths(repo), []);
     } finally {
         rmSync(dir, { recursive: true, force: true });
