@@ -221,7 +221,7 @@ test('corner-cut labels match case-insensitively without broadening near misses'
     }
 });
 
-test('session and policy paths match case-insensitively; instruction paths do not', () => {
+test('session and policy paths match case-insensitively; instruction paths fold case at the root only', () => {
     const engine = newEngine('strict');
     // On APFS and NTFS these are the same file as their lowercase spellings, and
     // Git records the case the caller typed rather than the case on disk.
@@ -231,16 +231,21 @@ test('session and policy paths match case-insensitively; instruction paths do no
         ['.Codex/sessions/rollout.jsonl', 'codex.session-state'],
         ['.Cursor/chats/feature.json', 'cursor.session-state'],
         ['.Aimhooman.json', 'generic.project-policy'],
+        // Same argument, same filesystems: a root instruction file is the
+        // guarded one whatever case the caller typed.
+        ['agents.md', 'generic.agent-instructions'],
+        ['claude.md', 'generic.agent-instructions'],
+        ['Gemini.md', 'generic.agent-instructions'],
+        ['AGENTS.MD', 'generic.agent-instructions'],
+        ['.github/Copilot-Instructions.md', 'generic.agent-instructions'],
     ];
     for (const [path, ruleId] of cases) {
         assert.ok(matchFor(engine.checkPaths([path]), ruleId), path);
     }
 
-    // The negative control for the opt-in: generic.agent-instructions stays
-    // case-sensitive, so folding case is still a per-rule decision rather than a
-    // global one. Its names lowercase to ordinary documentation filenames, which
-    // must keep committing freely.
-    for (const path of ['docs/claude.md', 'docs/gemini.md', 'website/content/blog/agents.md']) {
+    // The near-miss control: only the root names fold. Deeper in the tree these
+    // are ordinary documentation filenames and must keep committing freely.
+    for (const path of ['docs/claude.md', 'docs/gemini.md', 'website/content/blog/agents.md', 'agentsxmd']) {
         assert.equal(engine.checkPaths([path]).length, 0, path);
     }
 });

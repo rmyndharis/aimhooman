@@ -356,10 +356,23 @@ function cmdPrecommit(args) {
     const paths = [...new Set(blocks.map((f) => f.path).filter(Boolean))];
     let emptied = false;
     try {
-        emptied = repairStagedBlocks(repo, blocks, paths);
+        const repair = repairStagedBlocks(repo, blocks, paths);
+        emptied = repair.emptied;
+        const stopped = emptied
+            ? (repair.collateral.length
+                ? ' — the index is empty now, so the commit is stopped rather than left empty'
+                : ' — nothing else was staged, so the commit is stopped rather than left empty')
+            : '';
         process.stderr.write(
-            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (index only; nothing on disk was deleted)${emptied ? ' — nothing else was staged, so the commit is stopped rather than left empty' : ''}\n`
+            `aimhooman: unstaged ${paths.length} file(s) from this commit: ${paths.map(visible).join(', ')} (index only; nothing on disk was deleted)${stopped}\n`
         );
+        if (repair.collateral.length) {
+            process.stderr.write(
+                `aimhooman: also restored ${repair.collateral.length} staged deletion(s) that could be the source of a rename Git cannot detect: ` +
+                `${repair.collateral.map(visible).join(', ')} — stage the removal again with 'git rm --cached <path>', ` +
+                "or 'git rm <path>' if you deleted it on disk too\n"
+            );
+        }
     } catch (e) {
         process.stderr.write(
             `aimhooman: could not unstage protected files: ${e.message} ` +

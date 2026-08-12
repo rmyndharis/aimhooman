@@ -239,10 +239,13 @@ test('precommit: a zero-similarity blocked rename restores the possible source d
         execFileSync('git', ['add', '-f', '.playwright-mcp/trace.json'], { cwd: dir });
 
         const out = result('precommit', [], dir);
-        // Repairing the index leaves nothing staged, so the commit stops
-        // rather than land empty.
+        // Repairing the index leaves nothing staged, so the commit stops rather
+        // than land empty. The deletion it restored was staged work, so the
+        // report names it instead of claiming nothing else was there.
         assert.equal(out.status, 10, out.stderr);
-        assert.match(out.stderr, /nothing else was staged/);
+        assert.match(out.stderr, /the index is empty now/);
+        assert.match(out.stderr, /also restored 1 staged deletion\(s\)/);
+        assert.match(out.stderr, /old\.txt/);
         const staged = execFileSync('git', ['diff', '--cached', '--name-status'], {
             cwd: dir,
             encoding: 'utf8',
@@ -735,7 +738,37 @@ test('clean precommit fully unstages a blocked rename', () => {
             encoding: 'utf8',
         }).trim();
         assert.equal(staged, '');
-        assert.match(out.stderr, /nothing else was staged/);
+        // `git mv` stages a deletion of the source, which the repair restores,
+        // so the report has to account for it rather than say nothing else was
+        // staged.
+        assert.match(out.stderr, /the index is empty now/);
+        assert.match(out.stderr, /README\.md/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The sweep that restores possible rename sources is deliberate, but it takes
+// paths the developer staged on purpose. Saying nothing leaves them committing a
+// message that describes an untracking the commit does not contain.
+test('clean precommit names the staged deletion its repair restored', () => {
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(join(dir, 'legacy.txt'), 'tracked\n');
+        execFileSync('git', ['add', 'legacy.txt'], { cwd: dir });
+        execFileSync('git', ['commit', '--no-verify', '-q', '-m', 'add legacy'], { cwd: dir });
+        execFileSync('git', ['rm', '--cached', '-q', 'legacy.txt'], { cwd: dir });
+        mkdirSync(join(dir, '.claude'), { recursive: true });
+        writeFileSync(join(dir, '.claude/session.json'), '{}');
+        execFileSync('git', ['add', '-f', '.claude/session.json'], { cwd: dir });
+
+        const out = result('precommit', [], dir);
+        assert.equal(out.status, 10, out.stderr);
+        assert.match(out.stderr, /legacy\.txt/, 'the repair must name the deletion it restored');
+        assert.match(out.stderr, /git rm/, 'and say how to stage the removal again');
+        assert.doesNotMatch(
+            out.stderr,
+            /nothing else was staged/,
+            'something else was staged, and the repair took it',
+        );
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

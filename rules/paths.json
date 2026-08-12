@@ -218,20 +218,20 @@
     },
     {
         "id": "generic.agent-instructions",
-        "version": 2,
+        "version": 3,
         "provider": "generic",
         "category": "ambiguous-instructions",
         "confidence": "medium",
         "kind": "path",
         "match": {
             "paths": [
-                "AGENTS.md",
+                "[Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd]",
                 "**/AGENTS.md",
-                "CLAUDE.md",
+                "[Cc][Ll][Aa][Uu][Dd][Ee].[Mm][Dd]",
                 "**/CLAUDE.md",
-                "GEMINI.md",
+                "[Gg][Ee][Mm][Ii][Nn][Ii].[Mm][Dd]",
                 "**/GEMINI.md",
-                ".github/copilot-instructions.md",
+                ".github/[Cc][Oo][Pp][Ii][Ll][Oo][Tt]-[Ii][Nn][Ss][Tt][Rr][Uu][Cc][Tt][Ii][Oo][Nn][Ss].[Mm][Dd]",
                 "**/.github/copilot-instructions.md"
             ]
         },
