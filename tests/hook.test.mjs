@@ -1637,6 +1637,10 @@ test('an ordinary command before a commit is not treated as a hook bypass', asyn
             'cargo build && git commit -m x',
             './scripts/check.sh && git commit -m x',
             'ls && git commit -m x',
+            // Reading HEAD is not touching the hooks directory. The hooks test
+            // matches a `.git/h` segment, so it has to step around this one.
+            'cat .git/HEAD && git commit -m x',
+            'git rev-parse HEAD~1 && git commit -m x',
         ]) {
             assert.equal(
                 await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
@@ -1659,6 +1663,9 @@ test('a prefix that names the hooks path still stops the commit', async () => {
         for (const command of [
             'cat script.sh | bash',
             'rm -rf .git/hooks && git commit -m x',
+            // The directory does not have to be spelled out in full to be gone.
+            'rm -rf .git/h* && git commit -m x',
+            'rm -rf $(git rev-parse --git-path hooks) && git commit -m x',
             'rm .git/hooks/pre-commit && git commit -m x',
             'cp /tmp/payload .git/hooks/pre-commit && git commit -m x',
             'sort -o .git/hooks/pre-commit /tmp/payload && git commit -m x',
@@ -3031,6 +3038,10 @@ test('clean denies a commit that removes the managed guards, in every override f
             'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x',
             "GIT_CONFIG_PARAMETERS='core.hooksPath=/dev/null' git commit -m x",
             'GIT_CONFIG_GLOBAL=/tmp/evil.cfg git commit -m x',
+            'git --config-env core.hooksPath=EVIL commit -m x',
+            'git --config-env=core.hooksPath=EVIL commit -m x',
+            'git --config-env include.path=EVIL commit -m x',
+            'git --config-env=include.path=EVIL commit -m x',
         ];
         for (const command of commands) {
             const out = await invokePreToolUse(dir, {
