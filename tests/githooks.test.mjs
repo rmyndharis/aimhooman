@@ -27,6 +27,7 @@ import {
     installedHooks,
     MESSAGE_ANCHOR_ERE,
     pathCommandReachable,
+    remainingDispatchers,
     uninstallGlobalHooks,
     uninstallHooks,
 } from '../src/githooks.mjs';
@@ -2518,6 +2519,118 @@ test('install and uninstall refuse to follow hook symlinks', () => {
             assert.match(uninstalled.warnings.join('\n'), /pre-commit is a symlink/);
             assert.equal(readFileSync(target, 'utf8'), original);
             assert.ok(existsSync(join(hooks, 'pre-commit')));
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// A hook file that already points at the backup slot is our own damaged output.
+// Chaining it makes the backup its own predecessor, so the dispatcher execs
+// itself without bound; and copying it over the slot destroys whatever original
+// hook was preserved there.
+function damagedDispatcher(hooksPath) {
+    const dispatcher = readFileSync(hooksPath, 'utf8');
+    return dispatcher.replace(/^# aimhooman-hook-fingerprint: .*$/m, '# aimhooman-hook-fingerprint: ' + '0'.repeat(64));
+}
+
+test('a damaged dispatcher is replaced rather than chained onto its own backup', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-selfchain-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            const original = '#!/bin/sh\necho original\n';
+            writeFileSync(join(hooks, 'pre-commit'), original, { mode: 0o755 });
+            installHooks(repo, CLI);
+
+            const backup = join(repo.stateDir, 'chained', 'pre-commit');
+            assert.equal(readFileSync(backup, 'utf8'), original);
+
+            writeFileSync(join(hooks, 'pre-commit'), damagedDispatcher(join(hooks, 'pre-commit')), { mode: 0o755 });
+            const report = installHooks(repo, CLI);
+
+            assert.equal(report.chained.includes('pre-commit'), false, 'our own damaged output must not be chained');
+            assert.equal(readFileSync(backup, 'utf8'), original, "the user's original hook must survive");
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('a foreign hook that replaced the dispatcher does not overwrite the stored backup', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-backup-keep-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            const original = '#!/bin/sh\necho original\n';
+            writeFileSync(join(hooks, 'pre-commit'), original, { mode: 0o755 });
+            installHooks(repo, CLI);
+
+            // Another tool installs over the dispatcher. The next init must not
+            // treat that as the hook worth preserving.
+            writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\necho intruder\n', { mode: 0o755 });
+            const report = installHooks(repo, CLI);
+
+            const backup = join(repo.stateDir, 'chained', 'pre-commit');
+            assert.equal(readFileSync(backup, 'utf8'), original, 'the first backup is the genuine original');
+            assert.ok(
+                report.warnings.some((w) => w.includes('pre-commit')),
+                'skipping a backup has to be reported, not silent',
+            );
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('uninstall does not restore a backup that points at itself', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-selfbackup-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            installHooks(repo, CLI);
+
+            // Seed the poisoned state: the backup slot holds a dispatcher whose
+            // CHAINED= names the slot itself.
+            const backup = join(repo.stateDir, 'chained', 'pre-commit');
+            mkdirSync(dirname(backup), { recursive: true });
+            writeFileSync(backup, damagedDispatcher(join(hooks, 'pre-commit')), { mode: 0o755 });
+
+            uninstallHooks(repo);
+
+            assert.equal(existsSync(join(hooks, 'pre-commit')), false, 'the dispatcher must go');
+            assert.equal(existsSync(backup), false, 'and the self-referencing backup with it');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// Moving core.hooksPath after install leaves the dispatchers in .git/hooks.
+// They are dormant only while the setting points elsewhere: unset it and they
+// guard again, which is why uninstall has to clear that directory too rather
+// than report success over the top of it.
+test('uninstall clears dispatchers left behind when the hooks path moved', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-moved-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            installHooks(repo, CLI);
+            const local = join(repo.commonDir, 'hooks');
+            assert.ok(existsSync(join(local, 'pre-commit')), 'installed into .git/hooks');
+
+            git(root, ['config', 'core.hooksPath', '.husky/_']);
+            uninstallHooks(repo);
+
+            assert.equal(existsSync(join(local, 'pre-commit')), false, 'the leftover dispatcher must be removed');
+            assert.deepEqual(remainingDispatchers(repo), [], 'and nothing may still be reported as remaining');
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

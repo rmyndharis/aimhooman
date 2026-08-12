@@ -73,7 +73,7 @@ function hooksDir(repo) {
         const where = scope ? `${scope} scope` : 'a non-local scope';
         let reason = where;
         if (trackedByGit) reason = `${where}, tracked by this repository`;
-        else if (worktreeContent) reason = `${where}, inside the worktree so Git will track it on the next add (add it to .gitignore or .git/info/exclude to manage it locally)`;
+        else if (worktreeContent) reason = `${where}, inside the worktree where Git can track it (add it to .gitignore or .git/info/exclude to manage it locally)`;
         else if (localScope && !inside) reason = `${where}, outside this repository`;
         return {
             dir,
@@ -427,13 +427,28 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
             const current = entry(dest);
             if (current) {
                 const cur = readFileSync(dest);
-                if (!ownedHook(cur, name)) {
-                    mkdirSync(chainedDir, { recursive: true });
-                    const chainedPath = join(chainedDir, name);
-                    const predecessorMode = current.mode & 0o777;
-                    writeHook(chainedPath, cur, { mode: predecessorMode });
-                    chmodSync(chainedPath, predecessorMode);
-                    chained.push(name);
+                const chainedPath = join(chainedDir, name);
+                // A file already naming the backup slot as its predecessor is
+                // our own damaged output. Chaining it would point the backup at
+                // itself and the dispatcher would exec itself without bound.
+                const selfChained = cur.includes(`\nCHAINED=${shq(chainedPath)}\n`);
+                if (!ownedHook(cur, name) && !selfChained) {
+                    const stored = entry(chainedPath);
+                    if (stored && !readFileSync(chainedPath).equals(cur)) {
+                        // Something replaced the dispatcher after a chained
+                        // install. The stored backup was here first, so it is
+                        // the original worth keeping; the newer file is
+                        // replaced without one, which has to be said out loud.
+                        warnings.push(
+                            `${name} already has a chained backup at ${chainedPath}; kept it and replaced ${dest} without preserving it`
+                        );
+                    } else {
+                        mkdirSync(chainedDir, { recursive: true });
+                        const predecessorMode = current.mode & 0o777;
+                        writeHook(chainedPath, cur, { mode: predecessorMode });
+                        chmodSync(chainedPath, predecessorMode);
+                        chained.push(name);
+                    }
                 }
             }
             writeHook(dest, hookScript(name, cmd, cliPath, join(chainedDir, name)), { mode: 0o755 });
@@ -451,8 +466,41 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
 // is recorded as a failure and the remaining hooks are still processed, so a
 // re-run self-heals (already-processed hooks are skipped via ownedHook).
 export function uninstallHooks(repo) {
-    const { dir, shared, warnings } = hooksDir(repo);
-    if (shared) return { removed: [], restored: [], warnings, failures: [] };
+    const { warnings } = hooksDir(repo);
+    const results = uninstallHookDirs(repo).map((target) => uninstallOneHookDir(repo, target, []));
+    return {
+        removed: results.flatMap((r) => r.removed).sort(),
+        restored: results.flatMap((r) => r.restored).sort(),
+        warnings: [...warnings, ...results.flatMap((r) => r.warnings)],
+        failures: results.flatMap((r) => r.failures),
+    };
+}
+
+// The directories a local uninstall must clear. A moved core.hooksPath leaves
+// dispatchers behind in .git/hooks, dormant only until the setting is unset, so
+// that directory is cleared whatever the hooks path currently says. The global
+// directory belongs to `uninstall --global` and is never touched here.
+function uninstallHookDirs(repo) {
+    const { dir, shared } = hooksDir(repo);
+    const globalCanonical = canonicalPath(globalHooksDir());
+    const targets = [];
+    const seen = new Set();
+    for (const candidate of [shared ? null : dir, join(repo.commonDir, 'hooks')]) {
+        if (!candidate) continue;
+        let key;
+        try {
+            key = canonicalPath(candidate);
+        } catch {
+            key = candidate;
+        }
+        if (key === globalCanonical || seen.has(key)) continue;
+        seen.add(key);
+        targets.push(candidate);
+    }
+    return targets;
+}
+
+function uninstallOneHookDir(repo, dir, warnings) {
     let entered = false;
     try {
         return withLock(join(dir, '.aimhooman-hooks.lock'), () => {
@@ -513,7 +561,14 @@ function uninstallHooksLocked(repo, dir, warnings) {
                 removed.push(name);
                 continue;
             }
-            if (predecessor) {
+            if (predecessor && readFileSync(chained).includes(`\nCHAINED=${shq(chained)}\n`)) {
+                // The backup names itself as its own predecessor, so installing
+                // it would leave a hook that execs itself. It is not the user's
+                // original either way: drop both and say so.
+                warnings.push(`${name} chained backup pointed at itself; removed ${chained} instead of restoring it`);
+                unlinkSync(chained);
+                unlinkSync(dest);
+            } else if (predecessor) {
                 const predecessorMode = predecessor.mode & 0o777;
                 atomicWrite(dest, readFileSync(chained), { mode: predecessorMode });
                 chmodSync(dest, predecessorMode);
@@ -542,8 +597,10 @@ function uninstallHooksLocked(repo, dir, warnings) {
 // comparing paths: two spellings of one directory differ on Windows, and
 // deciding ownership by string is the bug this change exists to remove.
 export function remainingDispatchers(repo) {
-    const { dir, shared } = hooksDir(repo);
-    if (shared) return [];
+    return uninstallHookDirs(repo).flatMap((dir) => dispatchersLeftIn(dir));
+}
+
+function dispatchersLeftIn(dir) {
     return Object.keys(MANAGED).sort().flatMap((name) => {
         const path = join(dir, name);
         try {

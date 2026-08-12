@@ -85,11 +85,11 @@ and shows both gitleaks setups.
 
 ## husky
 
-husky sets `core.hooksPath` to `.husky`. `aimhooman init` refuses to install
-into or over an external or shared hooks directory by design: `.husky` is
-tracked repository content, and a dispatcher written there would stage this
-machine's absolute CLI and Node paths for everyone who clones
-(`src/githooks.mjs` has the full rule set). Two ways out:
+husky 9 sets `core.hooksPath` to `.husky/_` (older versions used `.husky`).
+`aimhooman init` refuses to install into or over an external or shared hooks
+directory by design: it is worktree content, and a dispatcher written there
+would stage this machine's absolute CLI and Node paths for everyone who clones
+(`src/githooks.mjs` has the full rule set). Three ways out:
 
 - Keep husky and call `aimhooman check --staged` from `.husky/pre-commit`.
   You get the CLI check only. The agent-tier guard (PreToolUse) asks for
@@ -98,6 +98,9 @@ machine's absolute CLI and Node paths for everyone who clones
 - Drop husky for the guarded hooks and let `aimhooman init` manage them.
   Existing hooks are not lost: init preserves each one as a chained
   predecessor, and the dispatcher runs it before its own check.
+- Keep the hooks path local: add it to `.git/info/exclude` (for husky 9,
+  `.husky/_/`) and re-run `aimhooman init`. It then manages that directory and
+  chains husky's shim, and nothing machine-specific is shared with clones.
 
 ## lint-staged
 
