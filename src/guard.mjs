@@ -236,6 +236,10 @@ export function scanProposedCommits(repo, commits, { rejectNote, limits = {} }) 
                 policyMigrationContexts: reviewContexts,
                 limits,
                 messageScope: authoredLocally ? 'commit' : 'changes-only',
+                // This guard runs over history the developer is receiving, not
+                // writing. A policy it cannot parse must not wedge every pull,
+                // merge and reset with no way forward.
+                tolerateUnreadablePolicy: true,
             });
         }
         catch (error) {
