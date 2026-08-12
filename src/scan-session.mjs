@@ -112,7 +112,8 @@ export function scanEntries(repo, engine, entries, options = {}) {
         // Binary detection still reads the blob. Count every examined byte so
         // later commits cannot reset the total budget merely by using NUL data.
         stats.bytes_scanned += blob.length;
-        if (isBinary(blob)) {
+        const utf16 = decodeUtf16(blob);
+        if (utf16 === null && isBinary(blob)) {
             // Content rules match text lines, so a binary blob carries nothing
             // they could fire on. Skipping it loses no coverage: the skip is
             // recorded as 'binary', which does not mark the scan incomplete.
@@ -122,7 +123,7 @@ export function scanEntries(repo, engine, entries, options = {}) {
         }
         stats.files_scanned += 1;
         const ranges = lineRanges.get(entry.path);
-        const matched = engine.checkContent(entry.path, blob.toString('utf8'),
+        const matched = engine.checkContent(entry.path, utf16 ?? blob.toString('utf8'),
             ranges && ranges.length ? { lineRanges: ranges } : {});
         stats.findings_total += matched.length;
         for (const finding of matched) {
@@ -240,6 +241,24 @@ function isBinary(buffer) {
     return false;
 }
 
+// A byte-order mark declares the bytes are UTF-16 text, so their NUL padding is
+// not evidence of a binary file. Returns the decoded text, or null to leave the
+// blob to isBinary. Only the mark is trusted: guessing at unmarked NUL data
+// would decode images into garbage and hand that to the content rules.
+function decodeUtf16(buffer) {
+    if (buffer.length < 4 || buffer.length % 2 !== 0) return null;
+    const [first, second] = buffer;
+    // FF FE 00 00 opens UTF-32LE, which shares the UTF-16LE mark's first two bytes.
+    if (first === 0xff && second === 0xfe && !(buffer[2] === 0 && buffer[3] === 0)) {
+        return buffer.subarray(2).toString('utf16le');
+    }
+    // swap16 mutates in place, so byte-swap a copy and leave the read batch alone.
+    if (first === 0xfe && second === 0xff) {
+        return Buffer.from(buffer.subarray(2)).swap16().toString('utf16le');
+    }
+    return null;
+}
+
 // collectLineRanges builds a Map<path, ranges[]> for all entries whose content
 // scan can be narrowed to changed hunks (W4, bug 12d-F1). It batches the work
 // into ONE `git diff --unified=0` per (commit, parent) pair rather than one diff
@@ -288,17 +307,41 @@ function collectLineRanges(repo, entries) {
         // comes from git diff --raw -z, also unquoted). Paths containing newlines
         // are not handled, but they fall back to a whole-blob scan (safe).
         let currentPath = null;
+        // Hunk bodies must never be read as headers. An added line is rendered as
+        // `+` plus its content, so source starting `++ ` arrives as `+++ ...` and
+        // otherwise passes for a new-file header, hiding every later hunk of that
+        // file behind a path nothing scans. Each `@@` header declares how many
+        // body lines follow on both sides; consume exactly that many first.
+        let pending = 0;
         for (const line of output.split('\n')) {
+            if (pending > 0) {
+                if (line.startsWith('\\')) continue; // "\ No newline at end of file"
+                if (line.startsWith('-') || line.startsWith('+')) {
+                    pending -= 1;
+                    continue;
+                }
+                pending = 0; // body ended sooner than declared: resume header parsing
+            }
+            // Content cannot forge this prefix, so it is the one reliable resync point.
+            if (line.startsWith('diff --git ')) {
+                currentPath = null;
+                continue;
+            }
             // With --no-prefix the +++ line is `+++ path` (no b/ prefix).
             const plusMatch = /^\+\+\+ (.+)$/.exec(line);
             if (plusMatch) {
                 currentPath = plusMatch[1] === '/dev/null' ? null : plusMatch[1];
                 continue;
             }
-            const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-            if (!match || !currentPath) continue;
-            const start = Number(match[1]);
-            const count = match[2] === undefined ? 1 : Number(match[2]);
+            const match = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+            if (!match) continue;
+            const removed = match[1] === undefined ? 1 : Number(match[1]);
+            const count = match[3] === undefined ? 1 : Number(match[3]);
+            // Set the budget before any bail below, or a skipped hunk re-exposes
+            // its body to the header branches above.
+            pending = removed + count;
+            if (!currentPath) continue;
+            const start = Number(match[2]);
             if (start === 0 || count === 0) continue; // pure deletion, no new content
             const range = { start, end: start + count - 1 };
             const existing = byPath.get(currentPath);
