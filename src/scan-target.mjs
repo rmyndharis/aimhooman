@@ -1,6 +1,6 @@
 import { Engine, newEngineWithDiagnostics } from './scan.mjs';
 import { loadOverrides } from './state.mjs';
-import { applyExplicitProfile, applyStrictFloor, resolvePolicy } from './policy-resolver.mjs';
+import { applyExplicitProfile, applyStrictFloor, localFallback, resolvePolicy } from './policy-resolver.mjs';
 import {
     GitRevisionError,
     stagedEntries,
@@ -155,19 +155,41 @@ export function resolveStagedPolicy(repo, explicitProfile) {
 function scanCommit(repo, options) {
     if (!options.revision) throw new TypeError('commit scan needs a revision');
     const snapshot = commitSnapshot(repo, options.revision);
-    const rawPolicy = resolvePolicy(repo, { target: 'commit', revision: snapshot.commit });
+    // The final ref guard scans history the developer did not write, so a policy
+    // this version cannot parse must not turn every pull, merge and reset into a
+    // refusal. It asks for tolerance; the profile then comes from local config
+    // and the reason is reported. Direct questions (check --commit, audit) still
+    // get the loud error.
+    const tolerant = Boolean(options.tolerateUnreadablePolicy);
+    const unreadablePolicies = [];
+    const resolvedPolicy = resolvePolicy(repo, { target: 'commit', revision: snapshot.commit, tolerant });
+    if (resolvedPolicy.unparseable) unreadablePolicies.push(resolvedPolicy.unparseable);
+    const rawPolicy = resolvedPolicy.unparseable
+        ? {
+            ...localFallback(repo, resolvedPolicy.target),
+            policy_object_id: resolvedPolicy.policy_object_id,
+            policy_mode: resolvedPolicy.policy_mode,
+        }
+        : resolvedPolicy;
     // Bind policy-migration acks to the repository's current HEAD — the state an
     // ack is recorded against (policy-review --head <repo HEAD> --transition X) —
     // matching scanRange and resolveStagedPolicy. Probing with snapshot.commit
     // almost never matched a real ack, so `check --commit X` spuriously blocked
     // transitions that `check --range` honored. Exact-match security on every
     // ack field is unchanged; a null head simply fails closed (no ack honored).
-    const headBaseline = headPolicy(repo);
+    const headBaseline = headPolicy(repo, tolerant);
     const head = headBaseline?.target?.startsWith('commit:')
         ? headBaseline.target.slice('commit:'.length) : null;
-    const strictParentPolicies = snapshot.parents
-        .map((parent) => resolvePolicy(repo, { target: 'commit', revision: parent }))
-        .filter(isVersionedStrict);
+    const parentPolicies = snapshot.parents
+        .map((parent) => resolvePolicy(repo, { target: 'commit', revision: parent, tolerant }));
+    for (const parent of parentPolicies) {
+        if (parent.unparseable) unreadablePolicies.push(parent.unparseable);
+    }
+    // A parent whose policy cannot be read might have been strict. Counting it
+    // toward the floor keeps the guard conservative; ignoring it would let an
+    // unreadable file switch strict enforcement off.
+    const unreadableParent = parentPolicies.some((parent) => parent.unparseable);
+    const strictParentPolicies = parentPolicies.filter(isVersionedStrict);
     const policyMigrationContexts = options.policyMigrationContexts ?? (head ? [{
         head,
         transition: snapshot.commit,
@@ -181,7 +203,8 @@ function scanCommit(repo, options) {
             newMode: rawPolicy.policy_mode,
         })
     ));
-    const floor = strictParentPolicies.length > 0 && !acknowledged && !isVersionedStrict(rawPolicy)
+    const floor = (strictParentPolicies.length > 0 || unreadableParent)
+        && !acknowledged && !isVersionedStrict(rawPolicy)
         ? 'parent-strict-floor'
         : null;
     const policy = effectivePolicy(
@@ -205,6 +228,12 @@ function scanCommit(repo, options) {
     const accumulator = createAccumulator(options.limits);
     accumulator.addSkipped(loaded.skipped);
     const diagnostics = [...loaded.diagnostics];
+    for (const message of unreadablePolicies) {
+        diagnostics.push({
+            level: 'warning',
+            message: `${message}; scanned ${snapshot.commit} under the ${policy.profile} profile instead`,
+        });
+    }
 
     if (snapshot.shallowBoundary) {
         const message = 'shallow repository: commit scan cannot prove parent policy; fetch full history (e.g. fetch-depth: 0)';
@@ -550,9 +579,9 @@ function effectivePolicy(raw, explicitProfile, floorSource, enforcedObjectIds = 
     return applyExplicitProfile(floored, explicitProfile);
 }
 
-function headPolicy(repo) {
+function headPolicy(repo, tolerant = false) {
     try {
-        return resolvePolicy(repo, { target: 'commit', revision: 'HEAD' });
+        return resolvePolicy(repo, { target: 'commit', revision: 'HEAD', tolerant });
     } catch (error) {
         if (error instanceof GitRevisionError) return null;
         throw error;

@@ -38,7 +38,7 @@ export function resolvePolicy(repo, options = {}) {
     if (!repo?.root || !repo?.stateDir) {
         throw new TypeError('repo must be an open repository');
     }
-    const { target = 'worktree', revision, profile, strictFloor } = options;
+    const { target = 'worktree', revision, profile, strictFloor, tolerant = false } = options;
     let resolved;
     if (target === 'worktree') {
         resolved = resolveWorktreePolicy(repo);
@@ -48,11 +48,26 @@ export function resolvePolicy(repo, options = {}) {
         if (typeof revision !== 'string' || !revision) {
             throw new PolicyTargetError('commit target needs a revision');
         }
-        resolved = resolveGitPolicy(
-            repo,
-            readCommitPath(repo, revision, POLICY_PATH),
-            'commit-policy',
-        );
+        const result = readCommitPath(repo, revision, POLICY_PATH);
+        try {
+            resolved = resolveGitPolicy(repo, result, 'commit-policy');
+        } catch (error) {
+            // History is not the caller's to fix. A policy a future version
+            // wrote cannot be read here, and throwing turns every pull, merge
+            // and reset that carries it into a refusal with no way forward. The
+            // caller asks for tolerance and decides the fallback; the worktree,
+            // the index, and anything the developer asked about directly still
+            // get the loud error.
+            if (!tolerant || !(error instanceof ProjectPolicyError)) throw error;
+            return {
+                profile: null,
+                source: 'commit-policy',
+                target: result.target,
+                policy_object_id: result.oid,
+                policy_mode: result.mode,
+                unparseable: error.message,
+            };
+        }
     } else {
         throw new PolicyTargetError('must be worktree, staged, or commit');
     }
@@ -141,7 +156,7 @@ function resolveGitPolicy(repo, result, source) {
     };
 }
 
-function localFallback(repo, target) {
+export function localFallback(repo, target) {
     const config = loadConfig(repo.stateDir);
     return {
         profile: config.profile,

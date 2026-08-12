@@ -12,6 +12,7 @@ import {
     resolvePolicy,
 } from '../src/policy-resolver.mjs';
 import { loadProjectPolicy, ProjectPolicyError, saveConfig } from '../src/state.mjs';
+import { scanGitTarget } from '../src/scan-target.mjs';
 
 function freshRepo() {
     const dir = mkdtempSync(join(tmpdir(), 'aim-policy-target-'));
@@ -195,6 +196,62 @@ test('worktree policy resolution rejects valid and dangling symlinks', {
         rmSync(target);
         assert.throws(() => resolvePolicy(repo), /must be a regular file/);
         assert.throws(() => loadProjectPolicy(dir), /must be a regular file/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// A policy this version cannot parse, anywhere in fetched history, used to make
+// the final ref guard refuse every update that would introduce it — pull, reset
+// and merge alike, with no message pointing at a way out. The guard needs a
+// resolution it can carry on from; the loud error stays for the worktree, the
+// index, and anything the developer asked about directly.
+test('a commit policy this version cannot parse resolves tolerantly instead of throwing', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'clean', exclude: ['vendor/**'] }));
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'unreadable policy'], { cwd: dir });
+
+        assert.throws(
+            () => resolvePolicy(repo, { target: 'commit', revision: 'HEAD' }),
+            ProjectPolicyError,
+            'the direct question still gets the loud answer',
+        );
+
+        const tolerant = resolvePolicy(repo, { target: 'commit', revision: 'HEAD', tolerant: true });
+        assert.equal(tolerant.profile, null, 'no profile can be read from it');
+        assert.match(tolerant.unparseable, /unsupported field/, 'and the reason travels with the result');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The other half: the guard that receives history must be able to finish a scan
+// of a commit whose policy it cannot read, under a profile it can reach, and say
+// which commit it fell back on.
+test('a commit scan tolerates an unreadable policy and reports the fallback', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'clean', exclude: ['vendor/**'] }));
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'unreadable policy'], { cwd: dir });
+        const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+
+        assert.throws(
+            () => scanGitTarget(repo, { kind: 'commit', revision: head }),
+            ProjectPolicyError,
+            'a direct scan still refuses loudly',
+        );
+
+        const scan = scanGitTarget(repo, { kind: 'commit', revision: head, tolerateUnreadablePolicy: true });
+        assert.ok(scan.profile, 'the scan runs under a profile it could reach');
+        assert.ok(
+            scan.diagnostics.some((d) => d.level === 'warning' && d.message.includes(head)),
+            'and names the commit it could not read the policy of',
+        );
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
