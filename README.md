@@ -15,6 +15,7 @@
   <img src="https://img.shields.io/badge/license-MIT-111111" alt="MIT">
   <img src="https://img.shields.io/npm/dm/@rmyndharis/aimhooman?label=downloads" alt="Downloads">
   <img src="https://img.shields.io/github/stars/rmyndharis/aimhooman?style=social" alt="GitHub Stars">
+  <a href="https://buymeacoffee.com/rmyndharis"><img src="https://img.shields.io/badge/Buy_Me_a_Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
 </p>
 
 <p align="center">aimhooman: <i>AI works. Hoomans ship.</i></p>
@@ -150,6 +151,12 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for rules, 
 adapters, tests, and the commit policy. This project has a [code of conduct](CODE_OF_CONDUCT.md);
 by participating you agree to abide by it. To report a security issue, see
 [SECURITY.md](SECURITY.md). Architecture notes live in [docs/design/](docs/design).
+
+## Support
+
+If aimhooman keeps your Git history clean, you can support its development by buying me a coffee.
+
+<a href="https://buymeacoffee.com/rmyndharis"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="50"/></a>
 
 ## License
 
