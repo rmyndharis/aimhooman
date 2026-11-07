@@ -4,3 +4,4 @@
   entry: aimhooman check --staged
   language: node
   pass_filenames: false
+  always_run: true
