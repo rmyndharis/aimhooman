@@ -1485,6 +1485,26 @@ test('a Claude Code worktree staged as a gitlink is kept out of the commit', () 
     }
 });
 
+test('compliance keeps a review a notice through the final ref guard', () => {
+    // pre-commit lets a review through on compliance; the reference-transaction
+    // guard must not then veto the same commit.
+    const repo = createRepo('compliance');
+    try {
+        writeFileSync(join(repo.root, 'AGENTS.md'), '# Agent instructions\n');
+        git(repo, ['add', 'AGENTS.md']);
+        const committed = spawnSync('git', ['commit', '-q', '-m', 'Add agent instructions'], {
+            cwd: repo.root,
+            env: repo.env,
+            encoding: 'utf8',
+        });
+        assert.equal(committed.status, 0, committed.stderr);
+        assert.match(committed.stderr, /REVIEW/);
+        assert.equal(git(repo, ['ls-tree', '--name-only', 'HEAD', 'AGENTS.md']), 'AGENTS.md');
+    } finally {
+        cleanup(repo);
+    }
+});
+
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -262,6 +262,7 @@ export function scanProposedCommits(repo, commits, { rejectNote, limits = {} }) 
         const code = exitCode(scan.findings, scan.profile, scan.complete, {
             failClosedIncomplete: true,
             incompleteReasons: scan.incomplete_reasons,
+            advisoryReviews: true,
         });
         if (code !== 0) {
             process.stderr.write(human(scan.findings, tone()));

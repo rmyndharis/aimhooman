@@ -103,7 +103,11 @@ function isSensitive(finding) {
 // the whole commit there cost developers a legit large file for a marker risk
 // that clean/compliance treat as advisory anyway. Strict stays fail-closed on
 // any gap, size-limit included.
-export function exitCode(findings, profile, complete = true, { failClosedIncomplete = false, incompleteReasons = [] } = {}) {
+export function exitCode(findings, profile, complete = true, {
+    failClosedIncomplete = false,
+    incompleteReasons = [],
+    advisoryReviews = false,
+} = {}) {
     let block = false;
     let review = false;
     for (const f of findings) {
@@ -116,7 +120,10 @@ export function exitCode(findings, profile, complete = true, { failClosedIncompl
             && incompleteReasons.every((reason) => reason === 'size-limit');
         if (profile === 'strict' || !sizeLimitOnly) return 31;
     }
-    if (review && findings.some((finding) => (finding.scanProfile || profile) !== 'clean')) return 11;
+    // `check` reports a review off clean as 11. The commit hooks pass
+    // advisoryReviews: there a review stops only on strict, as pre-commit does.
+    const stops = (scanProfile) => (advisoryReviews ? scanProfile === 'strict' : scanProfile !== 'clean');
+    if (review && findings.some((finding) => stops(finding.scanProfile || profile))) return 11;
     return 0;
 }
 
