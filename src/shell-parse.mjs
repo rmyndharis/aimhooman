@@ -499,10 +499,12 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         } else if (GIT_POLICY_TRANSITION_COMMANDS.has(verb)
             || GIT_REF_MUTATION_COMMANDS.has(verb)) {
+            const skip = hookSkipOptions(verb, verbArgs);
             commands.push({
                 verb,
                 args: verbArgs,
                 cwd,
+                noVerify: skip.noVerify,
                 bypassHooks: commandBypass,
                 environmentRisk,
                 targetEnvironmentRisk,
@@ -511,7 +513,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 explicitTargetOption: commandExplicitTargetOption,
                 targetUncertain: commandTargetUncertain,
                 pathDialectUncertain: commandPathDialectUncertain,
-                classification: 'mutation',
+                classification: skip.uncertain ? 'uncertain' : 'mutation',
             });
             policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         }
@@ -911,6 +913,27 @@ function dashedGitInvocation(tokens) {
     const executable = String(tokens[0] || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
     const match = /^git-([a-z][a-z0-9-]*?)(?:\.exe)?$/.exec(executable);
     return match ? ['git', match[1], ...tokens.slice(1)] : null;
+}
+
+// push, merge and pull take --no-verify; pull hands it to merge. A push skips
+// pre-push with it, and git accepts it shortened to any unique prefix there
+// (--no-veri), while -n is --dry-run. merge and pull also have
+// --no-verify-signatures, so only the full spelling counts for them. A word
+// the shell still expands may become any of these.
+function hookSkipOptions(verb, args) {
+    if (!['push', 'merge', 'pull'].includes(verb)) return { noVerify: false, uncertain: false };
+    let noVerify = false;
+    let uncertain = false;
+    for (const arg of args) {
+        if (arg === '--') break;
+        if (arg === '--verify') noVerify = false;
+        else if (arg === '--no-verify'
+            || (verb === 'push' && arg.length >= '--no-veri'.length && '--no-verify'.startsWith(arg))) {
+            noVerify = true;
+        }
+        uncertain ||= /[$`{}]/.test(arg);
+    }
+    return { noVerify, uncertain };
 }
 
 function isGitExecutable(value) {

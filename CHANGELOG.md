@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git-commit`.
 - On `strict`, the agent guard refuses `--no-verify` written as a word the shell
   expands, such as `$'--no-verify'` or `{--no-verify,}`.
+- The agent guard refuses `git push --no-verify`, which skips pre-push, on
+  every profile, and refuses any push while pre-push is not installed.
+- On `strict`, the agent guard refuses `git merge --no-verify` and
+  `git pull --no-verify`.
 
 ### Fixed
 

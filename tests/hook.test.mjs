@@ -3008,6 +3008,47 @@ test('unknown executor shape fails closed when project policy cannot load (stric
     }
 });
 
+test('a push that skips pre-push is refused on every profile', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-push-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'git push --no-verify origin HEAD:refs/heads/main',
+                'git push --no-veri origin main',
+                "git push origin $'--no-verify'",
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            // -n is --dry-run for push, not --no-verify.
+            assert.equal(await decide('git push -n origin main'), null, profile);
+            assert.equal(await decide('git push origin main'), null, profile);
+
+            // pre-push is the only check a push gets, so it has to be there.
+            rmSync(join(dir, '.git', 'hooks', 'pre-push'));
+            const missing = await decide('git push origin main');
+            assert.equal(missing?.permissionDecision, 'deny', profile);
+            assert.match(missing.permissionDecisionReason, /pre-push/, profile);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test('strict refuses merge and pull that skip their hooks; clean leaves them to the final guard', async () => {
+    for (const [profile, expected] of [['strict', 'deny'], ['clean', null]]) {
+        const dir = makeHookRepo(profile, `aim-hook-merge-${profile}-`);
+        try {
+            for (const command of ['git merge --no-verify feature', 'git pull --no-verify']) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision ?? null, expected, `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
 function initializeHookRepo(dir, profile) {
     mkdirSync(dir, { recursive: true });
     execFileSync('git', ['init', '-q'], { cwd: dir });
