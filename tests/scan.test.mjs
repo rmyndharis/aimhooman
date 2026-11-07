@@ -147,12 +147,43 @@ test('catalog: new AI-tool residue paths are blocked/flagged', () => {
     assert.equal(e.checkPaths(['.playwright-mcp/trace.json'])[0]?.decision, 'block');
     assert.equal(e.checkPaths(['sub/.remember/note.json'])[0]?.decision, 'block');
     assert.equal(e.checkPaths(['.superpowers/state.json'])[0]?.decision, 'block');
-    assert.equal(e.checkPaths(['.agent/x.json'])[0]?.decision, 'block');
-    assert.equal(newEngine('strict').checkPaths(['.agent/x.json'])[0]?.decision, 'block');
     assert.equal(e.checkPaths(['.copilot/session-42.json'])[0]?.decision, 'block');
     assert.equal(e.checkPaths(['.copilot/config.json'])[0]?.decision, 'block');
     assert.equal(e.checkPaths(['copilot/config.json']).length, 0);
     assert.equal(e.checkPaths(['.agents/rules/project.md']).length, 0);
+});
+
+test('catalog: blocks what agent tools write and leaves their project config alone', () => {
+    for (const profile of ['clean', 'strict']) {
+        const e = newEngine(profile);
+        for (const [path, ruleId] of [
+            ['.claude/worktrees/feature-x', 'claude.session-state'],
+            ['packages/app/.claude/worktrees/x/README.md', 'claude.session-state'],
+            ['CLAUDE.local.md', 'claude.local-settings'],
+            ['packages/app/CLAUDE.local.md', 'claude.local-settings'],
+            ['.aider.chat.history.md', 'aider.history'],
+            ['.aider.input.history', 'aider.history'],
+            ['.aider.llm.history', 'aider.history'],
+            ['.aider.tags.cache.v4/cache.db', 'aider.history'],
+            ['pkg/.aider.tags.cache.v3/cache.db', 'aider.history'],
+            ['.specstory/history/2026-11-07_session.md', 'specstory.history'],
+            ['.specstory/cursorcloud/run.jsonl', 'specstory.history'],
+        ]) {
+            const [finding] = e.checkPaths([path]);
+            assert.equal(finding?.decision, 'block', `${profile}: ${path}`);
+            assert.ok(finding.matchedRuleIds.includes(ruleId), `${profile}: ${path} -> ${finding.matchedRuleIds}`);
+        }
+        for (const path of [
+            '.agent/rules/team.md',
+            '.agent/workflows/deploy.md',
+            '.aider.conf.yml',
+            '.aider.model.settings.yml',
+            '.specstory/cli/config.toml',
+            '.specstory/.project.json',
+        ]) {
+            assert.equal(e.checkPaths([path]).length, 0, `${profile}: ${path} is project config`);
+        }
+    }
 });
 
 test('local rules: a user rule pack in stateDir is loaded and detects a custom path', () => {

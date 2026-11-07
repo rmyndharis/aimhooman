@@ -682,11 +682,11 @@ test('fix: strict preview exits 31, not 11, when a removable line hides an incom
 test('strict staged check catches rename destination', () => {
     const dir = makeRepo('strict');
     try {
-        execFileSync('git', ['mv', 'README.md', '.aider.log'], { cwd: dir });
+        execFileSync('git', ['mv', 'README.md', '.aider.chat.history.md'], { cwd: dir });
         const out = result('check', ['--staged', '--json'], dir);
         assert.equal(out.status, 10);
         const report = JSON.parse(out.stdout);
-        assert.equal(report.findings[0]?.path, '.aider.log');
+        assert.equal(report.findings[0]?.path, '.aider.chat.history.md');
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1009,12 +1009,12 @@ test('range and audit targets catch a violation already committed with hooks byp
         writeFileSync(join(dir, 'safe-name'), 'safe\n');
         execFileSync('git', ['add', 'safe-name'], { cwd: dir });
         execFileSync('git', ['commit', '--no-verify', '-q', '-m', 'base'], { cwd: dir });
-        execFileSync('git', ['mv', 'safe-name', '.aider.log'], { cwd: dir });
+        execFileSync('git', ['mv', 'safe-name', '.aider.chat.history.md'], { cwd: dir });
         execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'rename'], { cwd: dir });
 
         const range = result('check', ['--range', 'HEAD~1..HEAD', '--json'], dir);
         assert.equal(range.status, 10, range.stderr);
-        assert.equal(JSON.parse(range.stdout).findings[0]?.path, '.aider.log');
+        assert.equal(JSON.parse(range.stdout).findings[0]?.path, '.aider.chat.history.md');
 
         const audit = result('audit', ['--json'], dir);
         assert.equal(audit.status, 10, audit.stderr);

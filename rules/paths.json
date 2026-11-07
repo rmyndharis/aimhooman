@@ -1,7 +1,7 @@
 [
     {
         "id": "claude.local-settings",
-        "version": 2,
+        "version": 3,
         "provider": "claude-code",
         "category": "local-settings",
         "confidence": "high",
@@ -10,7 +10,9 @@
             "path_case": "insensitive",
             "paths": [
                 ".claude/settings.local.json",
-                "**/.claude/settings.local.json"
+                "**/.claude/settings.local.json",
+                "CLAUDE.local.md",
+                "**/CLAUDE.local.md"
             ]
         },
         "actions": {
@@ -18,14 +20,14 @@
             "strict": "block",
             "compliance": "block"
         },
-        "reason": "Personal Claude Code settings are not intended for source control.",
+        "reason": "Personal Claude Code settings and instructions are not intended for source control.",
         "remediation": [
-            "git restore --staged .claude/settings.local.json"
+            "git restore --staged <path>"
         ]
     },
     {
         "id": "claude.session-state",
-        "version": 2,
+        "version": 3,
         "provider": "claude-code",
         "category": "ephemeral-state",
         "confidence": "high",
@@ -48,7 +50,9 @@
                 ".claude/projects/**",
                 "**/.claude/projects/**",
                 ".claude/logs/**",
-                "**/.claude/logs/**"
+                "**/.claude/logs/**",
+                ".claude/worktrees/**",
+                "**/.claude/worktrees/**"
             ]
         },
         "actions": {
@@ -146,7 +150,7 @@
     },
     {
         "id": "aider.history",
-        "version": 3,
+        "version": 4,
         "provider": "aider",
         "category": "ephemeral-state",
         "confidence": "high",
@@ -154,8 +158,14 @@
         "match": {
             "path_case": "insensitive",
             "paths": [
-                ".aider.*",
-                "**/.aider.*"
+                ".aider.chat.history.md",
+                "**/.aider.chat.history.md",
+                ".aider.input.history",
+                "**/.aider.input.history",
+                ".aider.llm.history",
+                "**/.aider.llm.history",
+                ".aider.tags.cache.v*/**",
+                "**/.aider.tags.cache.v*/**"
             ]
         },
         "actions": {
@@ -163,14 +173,14 @@
             "strict": "block",
             "compliance": "block"
         },
-        "reason": "Aider dotfiles are local, not repository content.",
+        "reason": "Aider chat history and caches are local, not repository content.",
         "remediation": [
             "git restore --staged <path>"
         ]
     },
     {
         "id": "specstory.history",
-        "version": 2,
+        "version": 3,
         "provider": "specstory",
         "category": "ephemeral-state",
         "confidence": "medium",
@@ -178,8 +188,10 @@
         "match": {
             "path_case": "insensitive",
             "paths": [
-                ".specstory/**",
-                "**/.specstory/**"
+                ".specstory/history/**",
+                "**/.specstory/history/**",
+                ".specstory/cursorcloud/**",
+                "**/.specstory/cursorcloud/**"
             ]
         },
         "actions": {
@@ -339,30 +351,6 @@
             "compliance": "block"
         },
         "reason": "Superpowers plugin state is local, not repository content.",
-        "remediation": [
-            "git restore --staged <path>"
-        ]
-    },
-    {
-        "id": "agent.state",
-        "version": 3,
-        "provider": "generic",
-        "category": "ephemeral-state",
-        "confidence": "high",
-        "kind": "path",
-        "match": {
-            "path_case": "insensitive",
-            "paths": [
-                ".agent/**",
-                "**/.agent/**"
-            ]
-        },
-        "actions": {
-            "clean": "block",
-            "strict": "block",
-            "compliance": "block"
-        },
-        "reason": "Generic agent state is local, not repository content.",
         "remediation": [
             "git restore --staged <path>"
         ]

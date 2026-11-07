@@ -1462,6 +1462,29 @@ test('--purge-state removes a message backup left in a linked worktree', () => {
     }
 });
 
+test('a Claude Code worktree staged as a gitlink is kept out of the commit', () => {
+    // `claude --worktree` checks out under .claude/worktrees/<name>/; a forced
+    // add records it in the parent as a gitlink (mode 160000).
+    const repo = createRepo('clean');
+    try {
+        git(repo, ['worktree', 'add', '-q', '-b', 'feature-x', '.claude/worktrees/feature-x']);
+        writeFileSync(join(repo.root, 'README.md'), 'fixture\nchanged\n');
+        git(repo, ['add', 'README.md']);
+        git(repo, ['add', '-f', '.claude/worktrees/feature-x']);
+        assert.match(git(repo, ['ls-files', '-s', '.claude']), /^160000 /);
+
+        const committed = spawnSync('git', ['commit', '-q', '-m', 'Update readme'], {
+            cwd: repo.root,
+            env: repo.env,
+            encoding: 'utf8',
+        });
+        assert.equal(committed.status, 0, committed.stderr);
+        assert.equal(git(repo, ['ls-tree', '-r', '--name-only', 'HEAD']), 'README.md');
+    } finally {
+        cleanup(repo);
+    }
+});
+
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

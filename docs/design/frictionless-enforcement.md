@@ -103,7 +103,7 @@ rather than run the command on its own, which is the friction this tier exists t
 
 1. **Rule catalog** — `rules/paths.json`, `rules/attribution.json`,
    `rules/markers.json`. Covers Claude, Codex, Copilot, Cursor, Aider, SpecStory,
-   Continue, Playwright MCP, Remember, Superpowers, and a generic agent dir.
+   Continue, Playwright MCP, Remember, and Superpowers.
    Community extends via PR (core); personal extensions via
    `<common-git-dir>/aimhooman/rules/*.json` (local, shared by linked worktrees,
    loaded after core, and only able to add restrictions).
