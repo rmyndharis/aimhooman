@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The agent guard reads the commands Git runs for `rebase --exec`,
+  `submodule foreach` and `bisect run`, and refuses a commit, push or other
+  guarded Git command inside them.
+- The agent guard refuses a Git alias that expands to `rebase --exec`,
+  `submodule foreach` or `bisect run`.
+- The agent guard refuses a commit after a command that names `.git/config`,
+  which can repoint the hooks.
+- The agent guard refuses a commit after `echo` or `printf` writes into the
+  hooks directory, or after a `sh -c` command that touches the hooks.
 - The agent guard refuses a hooks-path override however the shell spells it
   (`$'...'`, `{a..b}`, `$VAR`, a PowerShell backtick), after a Git option it does
   not know, behind `time` or `timeout`, or through a dashed program such as

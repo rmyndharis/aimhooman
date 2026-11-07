@@ -1540,6 +1540,44 @@ test('inline alias configuration is denied before its unproved expansion can run
     }
 });
 
+test('commands Git runs for the agent are read like a sh -c payload', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-git-payload-${profile}-`);
+        try {
+            execFileSync('git', ['config', 'alias.rx', "rebase -x 'git commit --no-verify --allow-empty -m x'"], { cwd: dir });
+            for (const command of [
+                'git rx HEAD~1',
+                "git rebase -x 'git -c core.hooksPath=/dev/null commit --allow-empty -m x' HEAD~1",
+                "git rebase --exec='git -c core.hooksPath=/dev/null commit --allow-empty -m x' HEAD~1",
+                "git rebase -ix 'git commit --no-verify --allow-empty -m x' HEAD~1",
+                "git rebase -x 'rm -rf .git/hooks' HEAD~1",
+                "git submodule foreach 'git -c core.hooksPath=/dev/null commit -am x'",
+                "git submodule foreach --recursive git -c core.hooksPath=/dev/null commit -am x",
+                "git bisect run sh -c 'git -c core.hooksPath=/dev/null commit -am x'",
+                "sh -c 'rm -rf .git/hooks' && git commit -m x",
+                "echo '[core] hooksPath = /dev/null' >> .git/config && git commit -m x",
+                'cp ../other.config .git/config && git commit -m x',
+                "printf 'exit 0\\n' > .git/hooks/pre-commit && git commit -m x",
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                "git rebase -x 'npm test' HEAD~1",
+                'git submodule foreach git status',
+                'git bisect run npm test',
+                // strict refuses any redirect; clean only one into the hooks or config.
+                ...(profile === 'clean' ? ['echo done > build.log && git commit -m x'] : []),
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
 test('inline and external Git commands cannot hide future index or hook mutation', async () => {
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-unproved-alias-${profile}-`);

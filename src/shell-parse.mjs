@@ -100,6 +100,9 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                     || candidate.pathDialectUncertain,
             })));
             sawAdd ||= parsed.addPaths.length > 0;
+            // What the nested shell runs is a prefix to every command after it.
+            prefixRisk ||= parsed.prefixRisk;
+            prefixHooksRisk ||= parsed.prefixHooksRisk;
             if (!parsed.commit) {
                 const positional = nestedShellArgumentCommitInvocation(toks, nested, unwrapped.cwd);
                 if (positional) {
@@ -176,7 +179,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         }
         if (SHELL_CONTROL_DECLARATIONS.has(toks[0])) continue;
         if (toks.length < 2) {
-            if (toks.length && !READ_ONLY_SHELL_COMMANDS.has(basename(toks[0]))) {
+            if (toks.length && (!READ_ONLY_SHELL_COMMANDS.has(basename(toks[0])) || hasFileRedirect(unit.text))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
                 prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
                 prefixRisk = true;
@@ -264,7 +267,9 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                         || indirect.pathDialectUncertain,
                 });
             }
-            if (!READ_ONLY_SHELL_COMMANDS.has(basename(g0))
+            // echo and printf only read, unless the line writes their output
+            // to a file: `echo ... >> .git/config` repoints the hooks.
+            if ((!READ_ONLY_SHELL_COMMANDS.has(basename(g0)) || hasFileRedirect(unit.text))
                 && !PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(g0))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
                 prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
@@ -398,6 +403,14 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         // shell command. The current staged snapshot is therefore not the index
         // the commit will use, even when no literal `git add` appeared.
         if (gitIndexMutationRisk(verb, verbArgs)) sawAdd = true;
+        // Git runs this through a shell, so it is read as one. What it does to
+        // the hooks lands before Git's own remaining ref updates.
+        const gitRun = gitRunPayload(verb, verbArgs);
+        const ran = gitRun === null ? null : parseGit(gitRun, cwd);
+        if (ran?.prefixHooksRisk) {
+            prefixRisk = true;
+            prefixHooksRisk = true;
+        }
         if (uncertainShell && /\$\(|`/.test(verb)) {
             commit = true;
             bypassHooks ||= commandBypass;
@@ -516,6 +529,13 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 classification: skip.uncertain ? 'uncertain' : 'mutation',
             });
             policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
+        }
+        if (ran) {
+            // Git picks where it runs (each submodule, the top of the
+            // worktree), so a guarded command in it has no known target.
+            commands.push(...ran.commands.map((candidate) => ({ ...candidate, targetUncertain: true })));
+            uncertainShell ||= ran.opaqueCommitHiding;
+            prefixRisk ||= ran.prefixRisk;
         }
     }
     const indirectCommits = [
@@ -691,7 +711,33 @@ export function commandMayTouchHooks(tokens, source) {
     return /(?:^|[\s"'=/])\.git\/h(?!ead\b)/i.test(text)
         || /--git-path\s+hooks\b/i.test(text)
         || /\bhookspath\b/i.test(text)
-        || /\binclude(?:if\.[^\s"'=]*)?\.path\b/i.test(text);
+        || /\binclude(?:if\.[^\s"'=]*)?\.path\b/i.test(text)
+        // Whatever is written into .git/config can set core.hooksPath.
+        || /(?:^|[\s"'=/])\.git\/config\b/i.test(text);
+}
+
+// An unquoted > or >> that writes a file. fd duplications (2>&1, >&2, >&-)
+// write none.
+function hasFileRedirect(text) {
+    let quote = '';
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quote) {
+            if (char === quote) quote = '';
+            else if (char === '\\' && quote === '"') i += 1;
+            continue;
+        }
+        if (char === '\\') {
+            i += 1;
+            continue;
+        }
+        if (char === "'" || char === '"') {
+            quote = char;
+            continue;
+        }
+        if (char === '>' && !/^>?&[0-9-]/.test(text.slice(i))) return true;
+    }
+    return false;
 }
 
 export const GIT_POLICY_TRANSITION_COMMANDS = new Set([
@@ -1153,6 +1199,37 @@ function nestedShellPayload(tokens) {
         if (!option.startsWith('-')) break;
     }
     return null;
+}
+
+// The shell text Git itself runs for `rebase --exec`, `submodule foreach` and
+// `bisect run`, or null. rebase takes -x/--exec (any unique prefix, --ex), also
+// bundled as -ix or -xCMD, and may repeat it. foreach and bisect run take the
+// rest of the line: Git hands the first word to the shell and the others to it
+// as arguments.
+export function gitRunPayload(verb, args) {
+    if (verb === 'rebase') {
+        const commands = [];
+        for (let i = 0; i < args.length; i += 1) {
+            const arg = args[i];
+            if (arg === '--') break;
+            const long = /^--ex(?:ec?)?(?:=([\s\S]*))?$/.exec(arg);
+            const short = /^-[^-]/.test(arg) && arg.includes('x');
+            if (!long && !short) continue;
+            const attached = long ? long[1] : arg.slice(arg.indexOf('x') + 1);
+            const value = attached || args[(i += 1)];
+            if (value !== undefined) commands.push(value);
+        }
+        return commands.length ? commands.join('\n') : null;
+    }
+    let words;
+    if (verb === 'bisect' && args[0] === 'run') words = args.slice(1);
+    else if (verb === 'submodule') {
+        const at = args.findIndex((arg) => !arg.startsWith('-'));
+        if (args[at] !== 'foreach') return null;
+        words = args.slice(at + 1);
+        while (words[0]?.startsWith('-')) words = words.slice(1);
+    } else return null;
+    return words.length ? [words[0], ...words.slice(1).map(quoteShellWord)].join(' ') : null;
 }
 
 function nestedShellStartupTargetUncertain(tokens) {
