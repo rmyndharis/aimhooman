@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range scans.
 - Claude Code worktrees (`.claude/worktrees/`) and `CLAUDE.local.md` are kept
   out of commits.
+- A chained hook written for bash, Python or Node, such as the one pre-commit.com
+  installs, runs as a program; `/bin/sh` sourced it, which broke every commit on
+  Debian and Ubuntu. Run `aimhooman init` to update installed hooks.
 - Files inside Aider's `.aider.tags.cache.v*/` directories are caught; the old
   `.aider.*` pattern matched only the directory name.
 

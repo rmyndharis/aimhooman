@@ -2147,6 +2147,38 @@ test('a chained predecessor sees the original $0, so $(dirname "$0") resolves to
     }
 });
 
+test('a chained predecessor with a non-sh shebang runs as a program, not sourced', (t) => {
+    if (process.platform === 'win32' || !existsSync('/bin/dash')) {
+        t.skip('needs /bin/dash, the /bin/sh of Debian and Ubuntu');
+        return;
+    }
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-chained-bash-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            // The shape pre-commit.com installs: bash with arrays, which dash
+            // cannot parse when the dispatcher sources it.
+            writeFileSync(
+                join(hooks, 'pre-commit'),
+                '#!/usr/bin/env bash\n'
+                + 'ARGS=(hook-impl --hook-type=pre-commit)\n'
+                + 'printf \'%s\\n\' "${ARGS[1]}" > "$PWD/predecessor.ran"\n',
+                { mode: 0o755 },
+            );
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+            installHooks(repo, CLI);
+
+            const out = spawnSync('/bin/dash', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8' });
+            assert.equal(out.status, 0, `dispatcher failed under dash: ${out.stderr}`);
+            assert.equal(readFileSync(join(root, 'predecessor.ran'), 'utf8'), '--hook-type=pre-commit\n');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('real commit scans files staged by a chained pre-commit hook', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-stage-'));
     try {

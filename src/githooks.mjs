@@ -825,19 +825,31 @@ esac
 ) || exit $?
 `
         : '';
-    // The chained predecessor is sourced in a subshell, not exec'd. Git runs the
-    // dispatcher with $0 set to the original hook path (the dispatcher replaced
-    // it in place), and a subshell inherits $0, so sourcing lets the predecessor
-    // see the original $0 and resolve $(dirname "$0") to its real directory —
-    // the pattern husky and vanilla .githooks hooks use to find sibling scripts.
-    // Exec'ing "$CHAINED" would set the predecessor's $0 to the backup path and
-    // break that resolution. Sourcing runs the predecessor in this dispatcher's
-    // shell (/bin/sh -p), so its shebang is honoured only for sh-compatible
-    // scripts; bash-only predecessors are out of scope. exit inside the
+    // A predecessor written for sh is sourced in a subshell, not exec'd. Git runs
+    // the dispatcher with $0 set to the original hook path (the dispatcher
+    // replaced it in place), and a subshell inherits $0, so sourcing lets the
+    // predecessor resolve $(dirname "$0") to its real directory: the pattern
+    // husky and vanilla .githooks hooks use to find sibling scripts. Any other
+    // shebang (bash, python, node) runs as a program instead, because sourcing
+    // hands it to this dispatcher's /bin/sh, which is dash on Debian and Ubuntu
+    // and cannot parse the bash pre-commit.com installs. The first line is read
+    // with the `read` builtin, so the check spawns nothing. exit inside a sourced
     // predecessor exits the subshell and propagates via || exit $?.
-    const chainedInvocation = name === 'reference-transaction' || name === 'pre-push'
-        ? `  printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | ( . "$CHAINED" ) || exit $?`
-        : `  ( . "$CHAINED" ) || exit $?`;
+    const feed = name === 'reference-transaction' || name === 'pre-push'
+        ? `printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | `
+        : '';
+    const chainedInvocation = `  AIMHOOMAN_SHEBANG=
+  IFS= read -r AIMHOOMAN_SHEBANG < "$CHAINED" || :
+  case "$AIMHOOMAN_SHEBANG" in
+    '#!/bin/sh'|'#!/bin/sh'[[:space:]]*|'#!/usr/bin/sh'|'#!/usr/bin/sh'[[:space:]]*|'#!/bin/dash'|'#!/bin/dash'[[:space:]]*|'#!/usr/bin/env sh'|'#!/usr/bin/env sh'[[:space:]]*) AIMHOOMAN_SOURCE=1 ;;
+    '#!'*) AIMHOOMAN_SOURCE= ;;
+    *) AIMHOOMAN_SOURCE=1 ;;
+  esac
+  if [ -n "$AIMHOOMAN_SOURCE" ]; then
+    ${feed}( . "$CHAINED" ) || exit $?
+  else
+    ${feed}"$CHAINED" "$@" || exit $?
+  fi`;
     const aimCommand = name === 'commit-msg'
         ? 'commitmsg "$1" --tree "$AIMHOOMAN_COMMIT_TREE"'
         : name === 'reference-transaction'
