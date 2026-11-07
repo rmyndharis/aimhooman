@@ -20,6 +20,9 @@ An individual `check` may escalate to `--profile strict`, but cannot weaken or r
 the team profile. Malformed project policy fails closed with an actionable error;
 personal allow/deny exceptions and local rule packs remain in the common Git directory
 under `aimhooman/`.
+A committed policy this version cannot read counts as strict until a readable one
+replaces it: the repair commit goes through, and a replacement weaker than strict
+needs the same bound `policy-review` a strict downgrade does.
 Under `strict`, policy files and agent instructions are blocking findings (exit 10):
 both rules' strict action is `block`, not review. The product's `review` and
 `policy-review` commands record local, object-bound decisions. An ordinary path or

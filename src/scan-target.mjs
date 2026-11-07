@@ -74,13 +74,15 @@ export function scanMessage(repo, text, options = {}) {
 
 function scanIndex(repo, options) {
     const kind = options.kind || 'staged';
-    const { rawPolicy, floor, policy, head, acknowledged, baselineObjectId } = resolveStagedPolicy(repo, options.explicitProfile);
+    const {
+        rawPolicy, floor, policy, head, acknowledged, baselineObjectId, diagnostics: policyDiagnostics,
+    } = resolveStagedPolicy(repo, options.explicitProfile);
     const loaded = engineForPolicy(repo, policy, options.overrideHead || head);
     const accumulator = createAccumulator(options.limits);
     accumulator.addSkipped(loaded.skipped);
     let entries = kind === 'tracked' ? trackedEntries(repo) : stagedEntries(repo);
     const conflicts = unmergedPaths(repo);
-    const diagnostics = [...loaded.diagnostics];
+    const diagnostics = [...policyDiagnostics, ...loaded.diagnostics];
 
     if (conflicts.length) {
         if (kind === 'staged') {
@@ -124,17 +126,21 @@ function scanIndex(repo, options) {
 
 export function resolveStagedPolicy(repo, explicitProfile) {
     const rawPolicy = resolvePolicy(repo, { target: 'staged' });
-    const baseline = headPolicy(repo);
-    const baselineStrict = isVersionedStrict(baseline);
+    // HEAD's policy is what this commit replaces, not what it applies, so one
+    // this version cannot read must not stop the commit that repairs it. It
+    // might have said strict: it floors like a strict policy, and a weaker
+    // replacement needs the same bound review, named by its object ID.
+    const baseline = headPolicy(repo, true);
+    const floorPolicy = isVersionedStrict(baseline) || baseline?.unparseable ? baseline : null;
     const head = baseline?.target?.startsWith('commit:') ? baseline.target.slice('commit:'.length) : null;
-    const acknowledged = baselineStrict && policyMigrationAllowed(repo, {
+    const acknowledged = Boolean(floorPolicy) && policyMigrationAllowed(repo, {
         head,
         transition: 'staged',
-        oldObjectIds: [baseline.policy_object_id],
+        oldObjectIds: [floorPolicy.policy_object_id],
         newObjectId: rawPolicy.policy_object_id,
         newMode: rawPolicy.policy_mode,
     });
-    const floor = baselineStrict && !acknowledged && !isVersionedStrict(rawPolicy)
+    const floor = floorPolicy && !acknowledged && !isVersionedStrict(rawPolicy)
         ? 'head-strict-floor'
         : null;
     return {
@@ -142,12 +148,15 @@ export function resolveStagedPolicy(repo, explicitProfile) {
         floor,
         head,
         acknowledged,
-        baselineObjectId: baselineStrict ? baseline.policy_object_id : null,
+        baselineObjectId: floorPolicy ? floorPolicy.policy_object_id : null,
+        diagnostics: baseline?.unparseable
+            ? [{ level: 'warning', message: `${baseline.unparseable}; it counts as strict until a readable policy replaces it` }]
+            : [],
         policy: effectivePolicy(
             rawPolicy,
             explicitProfile,
             floor,
-            baselineStrict ? [baseline.policy_object_id] : [],
+            floorPolicy ? [floorPolicy.policy_object_id] : [],
         ),
     };
 }
@@ -185,33 +194,34 @@ function scanCommit(repo, options) {
     for (const parent of parentPolicies) {
         if (parent.unparseable) unreadablePolicies.push(parent.unparseable);
     }
-    // A parent whose policy cannot be read might have been strict. Counting it
-    // toward the floor keeps the guard conservative; ignoring it would let an
-    // unreadable file switch strict enforcement off.
-    const unreadableParent = parentPolicies.some((parent) => parent.unparseable);
-    const strictParentPolicies = parentPolicies.filter(isVersionedStrict);
+    // A parent whose policy cannot be read might have been strict. It floors
+    // like a strict one, which keeps an unreadable file from switching strict
+    // enforcement off, and its object ID binds the review that can clear it.
+    // The floor guards a change of the policy file: a commit that carries the
+    // parent's file forward unchanged downgrades nothing.
+    const floorParents = parentPolicies.filter((parent) => isVersionedStrict(parent) || parent.unparseable);
     const policyMigrationContexts = options.policyMigrationContexts ?? (head ? [{
         head,
         transition: snapshot.commit,
     }] : []);
-    const acknowledged = strictParentPolicies.length > 0 && policyMigrationContexts.some((context) => (
+    const acknowledged = floorParents.length > 0 && policyMigrationContexts.some((context) => (
         policyMigrationAllowed(repo, {
             head: context?.head,
             transition: context?.storedTransition ?? context?.transition,
-            oldObjectIds: strictParentPolicies.map((policy) => policy.policy_object_id),
+            oldObjectIds: floorParents.map((policy) => policy.policy_object_id),
             newObjectId: rawPolicy.policy_object_id,
             newMode: rawPolicy.policy_mode,
         })
     ));
-    const floor = (strictParentPolicies.length > 0 || unreadableParent)
-        && !acknowledged && !isVersionedStrict(rawPolicy)
+    const changed = floorParents.some((parent) => parent.policy_object_id !== rawPolicy.policy_object_id);
+    const floor = changed && !acknowledged && !isVersionedStrict(rawPolicy)
         ? 'parent-strict-floor'
         : null;
     const policy = effectivePolicy(
         rawPolicy,
         options.explicitProfile,
         floor,
-        strictParentPolicies.map((candidate) => candidate.policy_object_id),
+        floorParents.map((candidate) => candidate.policy_object_id),
     );
     const reviewContexts = options.reviewContexts ?? (head ? [{
         head,
@@ -246,7 +256,7 @@ function scanCommit(repo, options) {
 
     if (floor && !isVersionedStrict(rawPolicy)) {
         accumulator.add([protectedPolicyFinding(rawPolicy, policy, snapshot, {
-            oldObjectId: strictParentPolicies[0]?.policy_object_id ?? null,
+            oldObjectId: floorParents[0]?.policy_object_id ?? null,
             transition: snapshot.commit,
         })]);
     }
