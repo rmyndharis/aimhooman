@@ -468,7 +468,7 @@ function cmdCommitmsg(args) {
     if (treeScan) emitDiagnostics(treeScan.diagnostics);
     const { profile, findings } = scan;
     if (treeScan) {
-        const treeCode = exitCode(treeScan.findings, treeScan.profile, treeScan.complete);
+        const treeCode = exitCode(treeScan.findings, treeScan.profile, treeScan.complete, { advisoryReviews: true });
         if (treeCode !== 0) {
             if (treeScan.findings.length) process.stderr.write(human(treeScan.findings, tone()));
             if (!treeScan.complete) process.stderr.write(incompleteMessage(treeScan, { blocking: treeScan.profile === 'strict' }));

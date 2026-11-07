@@ -136,6 +136,17 @@ test('exitCode: review becomes 11 only off clean, even when the scan is incomple
     assert.equal(exitCode([{ decision: 'review', scanProfile: 'clean' }], 'strict', true), 0);
 });
 
+test('exitCode: with advisoryReviews only a strict review stops a hook', () => {
+    const review = { decision: 'review' };
+    const advisory = { advisoryReviews: true };
+    assert.equal(exitCode([review], 'compliance', true, advisory), 0);
+    assert.equal(exitCode([review], 'clean', true, advisory), 0);
+    assert.equal(exitCode([review], 'strict', true, advisory), 11);
+    assert.equal(exitCode([{ decision: 'review', scanProfile: 'strict' }], 'compliance', true, advisory), 11);
+    assert.equal(exitCode([{ decision: 'block' }, review], 'compliance', true, advisory), 10);
+    assert.equal(exitCode([review], 'compliance', false, { ...advisory, failClosedIncomplete: true }), 31);
+});
+
 test('exitCode: a clean scan exits 0 on every profile', () => {
     assert.equal(exitCode([], 'clean', true), 0);
     assert.equal(exitCode([], 'strict', true), 0);
