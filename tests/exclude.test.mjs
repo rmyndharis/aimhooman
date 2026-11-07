@@ -51,6 +51,33 @@ test('applyExclude writes a managed block and preserves user lines', () => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+test('refreshing the managed block keeps user lines on their side of it', () => {
+    // Git applies the last matching line, so a `!` negation only works below
+    // the pattern it overrides. A refresh must not move the block past it.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-ex-order-'));
+    const file = join(dir, 'exclude');
+    try {
+        writeFileSync(file, 'user-before\n');
+        applyExclude(file, ['.one/**']);
+        writeFileSync(file, `${readFileSync(file, 'utf8')}!.one/keep.md\n`);
+        applyExclude(file, ['.one/**', '.two/**']);
+
+        const once = readFileSync(file, 'utf8');
+        const lines = once.split('\n');
+        assert.ok(lines.indexOf('user-before') < lines.indexOf('.one/**'), once);
+        assert.ok(lines.indexOf('!.one/keep.md') > lines.indexOf('.two/**'), once);
+        assert.deepEqual(inspectExclude(file, ['.one/**', '.two/**']), {
+            installed: true,
+            current: true,
+            missing: [],
+        });
+        applyExclude(file, ['.one/**', '.two/**']);
+        assert.equal(readFileSync(file, 'utf8'), once, 'a refresh with the same patterns changes nothing');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('malformed managed markers fail without changing user excludes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aim-ex-malformed-'));
     const file = join(dir, 'exclude');

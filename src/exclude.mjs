@@ -39,15 +39,22 @@ export function defaultPatterns() {
     return cachedDefaultPatterns;
 }
 
-// applyExclude writes or refreshes the managed block. Idempotent.
+// applyExclude writes or refreshes the managed block. Idempotent. A refresh
+// rewrites the block where it stands: Git applies the last matching line, so
+// a user's `!` negation below the block stops working if the block moves past it.
 export function applyExclude(file, patterns) {
     validatePatterns(patterns);
     return withLock(`${file}.aimhooman.lock`, () => {
         mkdirSync(dirname(file), { recursive: true });
         const existing = readExclude(file, '');
-        let body = stripBlock(existing);
-        if (body && !body.endsWith('\n')) body += '\n';
         const block = BEGIN + '\n' + patterns.join('\n') + '\n' + END + '\n';
+        const range = managedRange(existing);
+        if (range) {
+            const rest = existing.slice(range.end + END.length).replace(/^\n/, '');
+            atomicWrite(file, existing.slice(0, range.start) + block + rest);
+            return;
+        }
+        const body = existing && !existing.endsWith('\n') ? `${existing}\n` : existing;
         atomicWrite(file, body + block);
     });
 }
