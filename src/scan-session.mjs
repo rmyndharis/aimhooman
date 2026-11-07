@@ -286,9 +286,14 @@ function collectLineRanges(repo, entries) {
     for (const { commit, parent } of groups.values()) {
         let output;
         try {
+            // --no-renames: a rename would hand over only its edited lines, so
+            // the rest of a moved file escaped the rules of its new path.
+            // --inter-hunk-context=0: diff.interHunkContext fuses hunks with
+            // context lines, which the body budget below does not expect.
             output = execFileSync('git', [
                 '-c', 'core.quotePath=false',
-                'diff', '--unified=0', '--no-color', '--no-prefix',
+                'diff', '--unified=0', '--inter-hunk-context=0', '--no-renames',
+                '--no-color', '--no-prefix',
                 parent, commit,
             ], {
                 cwd: repo.root,
