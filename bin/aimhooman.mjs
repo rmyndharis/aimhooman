@@ -670,7 +670,7 @@ function cmdRefcheck(args) {
 
     let commits;
     try {
-        commits = resolveIntroduced(repo, updates);
+        commits = resolveIntroduced(repo, updates, { trustBranches: true });
     }
     catch (error) {
         console.error(`aimhooman: cannot resolve proposed commits: ${error.message}`);

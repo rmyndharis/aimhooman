@@ -585,6 +585,45 @@ test('a branch update that is already visible cannot exclude itself from its own
     }
 });
 
+test('with trustBranches, an update skips commits another local branch already carries', () => {
+    const dir = freshRepo();
+    try {
+        const branch = git(dir, ['symbolic-ref', '--short', 'HEAD']);
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const onDefault = git(dir, ['commit-tree', tree, '-p', base, '-m', 'already on the default branch']);
+        git(dir, ['update-ref', `refs/heads/${branch}`, onDefault]);
+        git(dir, ['update-ref', 'refs/heads/feature', base]);
+        const merge = git(dir, ['commit-tree', tree, '-p', base, '-p', onDefault, '-m', 'merge into feature']);
+        const update = { oldObjectId: base, newObjectId: merge, ref: 'refs/heads/feature' };
+
+        assert.deepEqual(introducedCommits(openRepo(dir), [update], { trustBranches: true }), [merge]);
+        // Without the option (pushcheck) every commit the update brings counts.
+        assert.deepEqual(introducedCommits(openRepo(dir), [update]), [onDefault, merge]);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('with trustBranches and no other local branch, a new ref scans only its tip', () => {
+    // A clone or a first pull creates the only branch there is; measuring it
+    // against nothing scanned its whole history, one commit scan per commit.
+    const dir = freshRepo();
+    try {
+        const branch = git(dir, ['symbolic-ref', '--short', 'HEAD']);
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const middle = git(dir, ['commit-tree', tree, '-p', base, '-m', 'middle']);
+        const tip = git(dir, ['commit-tree', tree, '-p', middle, '-m', 'tip']);
+        const update = { oldObjectId: ZERO, newObjectId: tip, ref: `refs/heads/${branch}` };
+
+        assert.deepEqual(introducedCommits(openRepo(dir), [update], { trustBranches: true }), [tip]);
+        assert.deepEqual(introducedCommits(openRepo(dir), [update]), [base, middle, tip]);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('tracked entries leave gitlinks out of the cat-file metadata read', () => {
     // A gitlink (mode 160000) pins a commit of another repository: the object
     // is never present locally, and in a partial clone asking cat-file about

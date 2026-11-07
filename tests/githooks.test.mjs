@@ -2179,6 +2179,35 @@ test('a chained predecessor with a non-sh shebang runs as a program, not sourced
     }
 });
 
+test('merging a branch whose history predates the guard does not rescan that history', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-merge-history-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const main = git(root, ['symbolic-ref', '--short', 'HEAD']);
+            git(root, ['switch', '-q', '-c', 'feature']);
+            writeFileSync(join(root, 'feature.txt'), 'feature\n');
+            git(root, ['add', 'feature.txt']);
+            git(root, ['commit', '-q', '-m', 'feature work']);
+            git(root, ['switch', '-q', main]);
+            // History the guard predates: residue added, then removed.
+            mkdirSync(join(root, '.claude'));
+            writeFileSync(join(root, '.claude', 'settings.local.json'), '{}\n');
+            git(root, ['add', '-f', '.claude/settings.local.json']);
+            git(root, ['commit', '-q', '-m', 'add local settings']);
+            git(root, ['rm', '-q', '-r', '.claude']);
+            git(root, ['commit', '-q', '-m', 'remove local settings']);
+            installHooks(openRepo(root), CLI);
+
+            git(root, ['switch', '-q', 'feature']);
+            const merged = spawnSync('git', ['merge', '-q', '--no-edit', main], { cwd: root, encoding: 'utf8' });
+            assert.equal(merged.status, 0, merged.stderr);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('real commit scans files staged by a chained pre-commit hook', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-stage-'));
     try {

@@ -500,24 +500,32 @@ function gatedTips(repo, reviewing) {
 // `--not --all` would let an ignored tag or remote ref pre-poison reachability
 // and suppress the scan, so tips come from refs/heads/* alone. A newly created
 // branch is measured against those tips instead of its full ancestry, which
-// would otherwise rescan the entire repository on every `git checkout -b`;
-// ordinary updates scan exactly old..new.
-export function introducedCommits(repo, updates) {
+// would otherwise rescan the entire repository on every `git checkout -b`.
+// Without options an ordinary update scans exactly old..new, which is what a
+// push must judge. trustBranches (refcheck) applies the same tips to ordinary
+// updates too, so merging or rebasing onto a local branch does not rescan its
+// history, and with no other branch to measure against (a clone, a first pull)
+// it scans the tip's own change rather than every commit ever made.
+export function introducedCommits(repo, updates, { trustBranches = false } = {}) {
     const commits = [];
     const seen = new Set();
     const reviewing = new Set(updates.map((update) => update?.ref).filter(Boolean));
     const gated = gatedTips(repo, reviewing);
+    const notGated = gated.length ? ['--not', ...gated] : [];
     for (const update of updates) {
         const oldObjectId = update?.oldObjectId;
         const newObjectId = update?.newObjectId;
         assertOid(oldObjectId);
         assertOid(newObjectId);
-        const creation = [newObjectId, ...(gated.length ? ['--not', ...gated] : [])];
+        const creation = trustBranches && !gated.length
+            ? ['-n', '1', newObjectId]
+            : [newObjectId, ...notGated];
+        const ordinary = [newObjectId, `^${oldObjectId}`, ...(trustBranches ? notGated : [])];
         let raw;
         try {
             raw = gitBuf(['rev-list', '--reverse', ...(/^0+$/.test(oldObjectId)
                 ? creation
-                : [newObjectId, `^${oldObjectId}`])], repo.root);
+                : ordinary)], repo.root);
         } catch (error) {
             // pre-push hands over the remote's view of the ref, and githooks(5)
             // warns that remote object may not exist locally — a force-push over
