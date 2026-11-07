@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out of commits.
 - Files inside Aider's `.aider.tags.cache.v*/` directories are caught; the old
   `.aider.*` pattern matched only the directory name.
+- The pre-commit.com hook runs on every commit, including commits that only
+  delete files or add symlinks; pre-commit skipped it when no file matched.
 
 ### Changed
 

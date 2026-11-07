@@ -33,6 +33,10 @@ the hook. Blocks always do.
 This hook is the CLI check only. It does not install aimhooman's managed Git
 hooks or the agent guard; `aimhooman init` in the repository adds those.
 
+`pre-commit run --all-files`, the usual CI and pre-commit.ci invocation, runs
+the hook against an empty index, so it checks nothing there. In CI, scan the
+pull-request range with the action below instead.
+
 ## GitHub Actions
 
 The repository root has an `action.yml`, so a workflow can scan the exact
