@@ -639,13 +639,22 @@ test('tracked entries leave gitlinks out of the cat-file metadata read', () => {
 // pathspec. A leak here would accumulate one directory per failed repair.
 test('unstagePaths removes its pathspec file when git rejects the pathspec', () => {
     const dir = freshRepo();
-    const leaked = () => readdirSync(tmpdir()).filter((name) => name.startsWith('aimhooman-pathspec-'));
+    // Other test files run in parallel and create their own pathspec
+    // directories in the shared temp dir, so count inside a private one.
+    const scratch = mkdtempSync(join(tmpdir(), 'aim-pathspec-scratch-'));
+    const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
     try {
         const repo = openRepo(dir);
-        const before = leaked().length;
+        Object.assign(process.env, { TMPDIR: scratch, TEMP: scratch, TMP: scratch });
         assert.throws(() => unstagePaths(repo, ['no-such-path-in-this-repo']));
-        assert.equal(leaked().length, before, 'the pathspec directory must not survive a failed unstage');
+        const leaked = readdirSync(scratch).filter((name) => name.startsWith('aimhooman-pathspec-'));
+        assert.deepEqual(leaked, [], 'the pathspec directory must not survive a failed unstage');
     } finally {
+        for (const [name, value] of Object.entries(saved)) {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+        }
+        rmSync(scratch, { recursive: true, force: true });
         rmSync(dir, { recursive: true, force: true });
     }
 });

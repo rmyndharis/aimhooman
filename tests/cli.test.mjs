@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, readdirSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1866,6 +1866,7 @@ test('a write-tree that cannot answer keeps the incomplete-scan warning a warnin
     // profile had already decided to allow.
     const dir = mkdtempSync(join(tmpdir(), 'aim-warn-write-tree-'));
     const objects = join(dir, '.git', 'objects');
+    let lockedDirs = [];
     try {
         execFileSync('git', ['init', '-q'], { cwd: dir });
         execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir });
@@ -1887,8 +1888,14 @@ test('a write-tree that cannot answer keeps the incomplete-scan warning a warnin
         );
         execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
         // Read-only object store: cat-file still reads the staged blobs, but
-        // `git write-tree` cannot create the tree object it needs.
-        chmodSync(objects, 0o500);
+        // `git write-tree` cannot create the tree object it needs. The fan-out
+        // directories are locked too: git writes the tree into objects/xx/, and
+        // one already created by an earlier object sharing that prefix would
+        // still accept it.
+        lockedDirs = [objects, ...readdirSync(objects, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => join(objects, entry.name))];
+        for (const path of lockedDirs) chmodSync(path, 0o500);
         // Mode bits are not the whole permission story. macOS keeps inherited
         // ACLs across chmod, so a directory can read 0500 and still accept a new
         // file; write-tree then succeeds and the fixture proves nothing. Ask the
@@ -1923,7 +1930,9 @@ test('a write-tree that cannot answer keeps the incomplete-scan warning a warnin
         assert.equal(warned.status, 0, warned.stdout + warned.stderr);
         assert.match(warned.stderr, /warning: scan incomplete/);
     } finally {
-        try { chmodSync(objects, 0o700); } catch { /* fixture cleanup */ }
+        for (const path of lockedDirs) {
+            try { chmodSync(path, 0o700); } catch { /* fixture cleanup */ }
+        }
         rmSync(dir, { recursive: true, force: true });
     }
 });
