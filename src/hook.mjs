@@ -23,6 +23,7 @@ import {
     gitConfigMayMutate,
     gitIndexMutationRisk,
     gitReadOnlyRefCommand,
+    gitRunPayload,
     hasUnquotedPipe,
     inspectCommitOptions,
     isGuardedCandidate,
@@ -910,6 +911,10 @@ function resolveAliasCandidate(candidate) {
             const paths = args.filter((value) => !value.startsWith('-'));
             return { ...candidate, verb: 'add', addPaths: paths, classification: 'add' };
         }
+        // Git would run part of the expansion through a shell this check never
+        // reads, so it stays unresolved, as an expansion that starts with an
+        // option does.
+        if (gitRunPayload(verb, args) !== null) return { ...candidate, subcommand };
         if (SAFE_NON_COMMIT_GIT.has(verb)) {
             const indexMutationRisk = gitIndexMutationRisk(verb, args);
             const prefixMutationRisk = verb === 'init'
