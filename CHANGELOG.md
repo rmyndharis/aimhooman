@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The agent guard refuses a hooks-path override however the shell spells it
+  (`$'...'`, `{a..b}`, `$VAR`, a PowerShell backtick), after a Git option it does
+  not know, behind `time` or `timeout`, or through a dashed program such as
+  `git-commit`.
+- On `strict`, the agent guard refuses `--no-verify` written as a word the shell
+  expands, such as `$'--no-verify'` or `{--no-verify,}`.
+
 ### Fixed
 
 - On `compliance`, a review-required finding no longer aborts the commit or

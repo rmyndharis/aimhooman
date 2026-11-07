@@ -58,7 +58,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         uncertainShell ||= control.uncertain;
         if (updatePersistentEnvironment(words, persistentEnvironmentRisk)) continue;
         const unwrapped = unwrapCommand(words, shellCwd);
-        const toks = unwrapped.tokens;
+        const toks = dashedGitInvocation(unwrapped.tokens) ?? unwrapped.tokens;
         uncertainShell ||= unwrapped.uncertain;
         let commandPathDialectUncertain = shellPathDialectUncertain
             || unwrapped.pathDialectUncertain;
@@ -225,7 +225,13 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                         index > 0 && isGitExecutable(token.replace(/^\(+/, '').replace(/\)+$/, ''))
                     ));
                     if (gitIndex > 0) {
-                        const inner = parseGit(toks.slice(gitIndex).join(' '), unwrapped.cwd);
+                        // The tokens have lost their quotes, so each is quoted
+                        // again: an apostrophe in a message must not open a
+                        // quote that swallows the rest of the line.
+                        const innerText = toks.slice(gitIndex)
+                            .map((token, index) => quoteShellWord(index === 0 ? token.replace(/^\(+/, '') : token))
+                            .join(' ');
+                        const inner = parseGit(innerText, unwrapped.cwd);
                         commit ||= inner.commit;
                         noVerify ||= inner.noVerify;
                         bypassHooks ||= inner.bypassHooks;
@@ -275,6 +281,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         let commandHooksPathOverride = environmentRisk.some(gitConfigEnvName);
         let aliasResolutionRisk = !canResolveGitAlias(g0);
         let inlineAliasRisk = false;
+        let unknownGlobalOption = false;
         while (i < toks.length && toks[i].startsWith('-')) {
             const option = toks[i];
             if (option === '-C' && toks[i + 1]) {
@@ -351,9 +358,34 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 commandTargetUncertain = true;
                 commandPathDialectUncertain ||= shellPathIsAmbiguous(target);
                 i += 1;
+            } else if (GIT_GLOBAL_VALUE_OPTIONS.has(option)) {
+                i += 2;
             } else {
-                i += option === '--namespace' ? 2 : 1;
+                // An option this parser does not know may take a value, and
+                // then the next word is not the subcommand git runs.
+                unknownGlobalOption ||= !GIT_GLOBAL_OPTIONS.has(option.split('=', 1)[0]);
+                i += 1;
             }
+        }
+        if (unknownGlobalOption) {
+            commands.push({
+                verb: 'unknown',
+                subcommand: toks[i] ?? '',
+                args: toks.slice(i + 1),
+                cwd,
+                bypassHooks: commandBypass,
+                hooksPathOverride: commandHooksPathOverride,
+                environmentRisk,
+                targetEnvironmentRisk,
+                prefixRisk,
+                policyTransitionRisk,
+                explicitTargetOption: commandExplicitTargetOption,
+                targetUncertain: true,
+                pathDialectUncertain: commandPathDialectUncertain,
+                classification: 'unknown',
+            });
+            policyTransitionRisk = true;
+            continue;
         }
         if (i >= toks.length) continue;
         const verb = toks[i];
@@ -403,7 +435,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 hooksPathOverride: commandHooksPathOverride,
                 futureIndex,
                 editorRisk: commitOptions.editorRisk,
-                classification: uncertainShell
+                classification: uncertainShell || commitOptions.uncertain
                     ? 'uncertain'
                     : commandNoVerify || commandBypass
                         ? 'bypass'
@@ -858,6 +890,29 @@ export const SAFE_NON_COMMIT_GIT = new Set([
     'worktree', 'write-tree',
 ]);
 
+// Git's own global options. Those in the first set take their value as the
+// next word; -C, -c, --config-env, --git-dir and --work-tree are read above.
+const GIT_GLOBAL_VALUE_OPTIONS = new Set(['--namespace', '--shallow-file', '--attr-source', '--super-prefix']);
+const GIT_GLOBAL_OPTIONS = new Set([
+    ...GIT_GLOBAL_VALUE_OPTIONS,
+    '-p', '--paginate', '-P', '--no-pager', '--bare', '--no-replace-objects', '--no-lazy-fetch',
+    '--no-optional-locks', '--no-advice', '--literal-pathspecs', '--glob-pathspecs',
+    '--noglob-pathspecs', '--icase-pathspecs', '--exec-path', '--html-path', '--man-path',
+    '--info-path', '--list-cmds', '-v', '--version', '-h', '--help',
+]);
+
+function quoteShellWord(word) {
+    return `'${String(word).replace(/'/g, "'\\''")}'`;
+}
+
+// Git's dashed programs (libexec/git-core/git-commit) run the same command as
+// `git commit`, so they are read in that form.
+function dashedGitInvocation(tokens) {
+    const executable = String(tokens[0] || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
+    const match = /^git-([a-z][a-z0-9-]*?)(?:\.exe)?$/.exec(executable);
+    return match ? ['git', match[1], ...tokens.slice(1)] : null;
+}
+
 function isGitExecutable(value) {
     const executable = String(value || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
     return executable === 'git' || executable === 'git.exe';
@@ -867,9 +922,18 @@ function canResolveGitAlias(value) {
     return /^(?:git|git\.exe)$/i.test(String(value || ''));
 }
 
+// A key the shell still has to expand ($'...', $VAR, {a..b}, or a PowerShell
+// backtick escape) can turn into any key once the command runs, including the
+// ones below, so it is treated as one of them.
+function dynamicConfigKey(value) {
+    const key = String(value).split('=', 1)[0];
+    return shellPathHasExpansion(key) || key.includes('`');
+}
+
 function hookAffectingConfig(value) {
     const key = String(value).split('=', 1)[0];
-    return /^(?:core\.(?:editor|hookspath)|sequence\.editor|include\.path|includeif\..+\.path|remote\..+\.receivepack)$/i.test(key);
+    return dynamicConfigKey(value)
+        || /^(?:core\.(?:editor|hookspath)|sequence\.editor|include\.path|includeif\..+\.path|remote\..+\.receivepack)$/i.test(key);
 }
 
 // A narrower question than hookAffectingConfig: not "can this change how a hook
@@ -878,7 +942,7 @@ function hookAffectingConfig(value) {
 // running; these do not.
 function hooksPathOverrideConfig(value) {
     const key = String(value).split('=', 1)[0];
-    return /^(?:core\.hookspath|include\.path|includeif\..+\.path)$/i.test(key);
+    return dynamicConfigKey(value) || /^(?:core\.hookspath|include\.path|includeif\..+\.path)$/i.test(key);
 }
 
 function aliasAffectingConfig(value) {
@@ -986,6 +1050,7 @@ export function inspectCommitOptions(args) {
     let futureIndex = false;
     let messageSource = false;
     let editorOverride = null;
+    let uncertain = false;
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
         if (arg === '--') {
@@ -993,6 +1058,7 @@ export function inspectCommitOptions(args) {
                 noVerify,
                 futureIndex: futureIndex || i + 1 < args.length,
                 editorRisk: editorOverride ?? !messageSource,
+                uncertain,
             };
         }
         if (arg.startsWith('--')) {
@@ -1026,9 +1092,12 @@ export function inspectCommitOptions(args) {
             }
             continue;
         }
+        // A word the shell still expands ($'...', $VAR, {a,b}, a backtick) can
+        // become an option such as --no-verify; read as a pathspec it hid one.
+        uncertain ||= /[$`{}]/.test(arg);
         futureIndex = true;
     }
-    return { noVerify, futureIndex, editorRisk: editorOverride ?? !messageSource };
+    return { noVerify, futureIndex, editorRisk: editorOverride ?? !messageSource, uncertain };
 }
 
 function resolveLongCommitOption(spelling) {
