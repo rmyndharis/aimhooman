@@ -2609,6 +2609,11 @@ test('a foreign hook that replaced the dispatcher does not overwrite the stored 
 
             const backup = join(repo.stateDir, 'chained', 'pre-commit');
             assert.equal(readFileSync(backup, 'utf8'), original, 'the first backup is the genuine original');
+            assert.equal(
+                readFileSync(join(hooks, 'pre-commit'), 'utf8'), '#!/bin/sh\necho intruder\n',
+                'the newer hook has no backup slot left, so it must not be replaced',
+            );
+            assert.deepEqual(report.installed, []);
             assert.ok(
                 report.warnings.some((w) => w.includes('pre-commit')),
                 'skipping a backup has to be reported, not silent',

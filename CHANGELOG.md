@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.aider.*` pattern matched only the directory name.
 - The pre-commit.com hook runs on every commit, including commits that only
   delete files or add symlinks; pre-commit skipped it when no file matched.
+- A refused `init` no longer removes the dispatchers and chained hooks an
+  earlier `init` installed.
+- `init` refuses, instead of deleting it, when another tool's hook was written
+  over the dispatcher after the original was chained.
 
 ### Changed
 

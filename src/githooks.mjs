@@ -411,6 +411,21 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
             warnings.push(`${name} is managed for another repository; refusing to overwrite it`);
             unsafe = true;
         }
+        // One backup slot per hook: a foreign hook that differs from the stored
+        // original (a hook manager reinstalled over the dispatcher, or a new
+        // hooks path with its own hook) has nowhere to go, and replacing it would
+        // delete it.
+        if (current && !current.isSymbolicLink() && entry(chainedPath)) {
+            const cur = readFileSync(dest);
+            if (!ownedHook(cur, name) && !cur.includes(`\nCHAINED=${shq(chainedPath)}\n`)
+                && !readFileSync(chainedPath).equals(cur)) {
+                warnings.push(
+                    `${name} was replaced after aimhooman chained the original to ${chainedPath}; `
+                    + 'keep the one you want, remove the other, and run aimhooman init again'
+                );
+                unsafe = true;
+            }
+        }
     }
     // Do not leave a repository with only part of the policy hook set.
     if (unsafe) return { installed, chained, warnings, shared: false };
@@ -433,22 +448,11 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
                 // itself and the dispatcher would exec itself without bound.
                 const selfChained = cur.includes(`\nCHAINED=${shq(chainedPath)}\n`);
                 if (!ownedHook(cur, name) && !selfChained) {
-                    const stored = entry(chainedPath);
-                    if (stored && !readFileSync(chainedPath).equals(cur)) {
-                        // Something replaced the dispatcher after a chained
-                        // install. The stored backup was here first, so it is
-                        // the original worth keeping; the newer file is
-                        // replaced without one, which has to be said out loud.
-                        warnings.push(
-                            `${name} already has a chained backup at ${chainedPath}; kept it and replaced ${dest} without preserving it`
-                        );
-                    } else {
-                        mkdirSync(chainedDir, { recursive: true });
-                        const predecessorMode = current.mode & 0o777;
-                        writeHook(chainedPath, cur, { mode: predecessorMode });
-                        chmodSync(chainedPath, predecessorMode);
-                        chained.push(name);
-                    }
+                    mkdirSync(chainedDir, { recursive: true });
+                    const predecessorMode = current.mode & 0o777;
+                    writeHook(chainedPath, cur, { mode: predecessorMode });
+                    chmodSync(chainedPath, predecessorMode);
+                    chained.push(name);
                 }
             }
             writeHook(dest, hookScript(name, cmd, cliPath, join(chainedDir, name)), { mode: 0o755 });

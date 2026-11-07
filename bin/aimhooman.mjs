@@ -958,14 +958,19 @@ function cmdInit(args) {
             }
         } catch (error) {
             const rollbackFailures = [];
-            try {
-                const uninstalled = uninstallHooks(repo);
-                rollbackFailures.push(...(uninstalled.failures || []));
-            } catch (rollbackError) {
-                rollbackFailures.push(`hook uninstall: ${rollbackError.message}`);
-            }
             const hookSet = new Set(hookFiles);
             const restoreHooks = Boolean(rep?.installed?.length || rep?.chained?.length);
+            // Only hooks this run installed are ours to take back. A refused
+            // install wrote none, and uninstalling anyway removed the dispatchers
+            // and chained originals an earlier init had left in .git/hooks.
+            if (restoreHooks) {
+                try {
+                    const uninstalled = uninstallHooks(repo);
+                    rollbackFailures.push(...(uninstalled.failures || []));
+                } catch (rollbackError) {
+                    rollbackFailures.push(`hook uninstall: ${rollbackError.message}`);
+                }
+            }
             for (const snapshot of snapshots.reverse()) {
                 if (!restoreHooks && hookSet.has(snapshot.path)) continue;
                 try { restoreSnapshot(snapshot); }

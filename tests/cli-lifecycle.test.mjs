@@ -1264,6 +1264,55 @@ test('late init failure preserves an existing managed dispatcher and chained pre
     }
 });
 
+test('a refused init leaves the hooks an earlier init installed in place', () => {
+    const repo = createRepo();
+    const outside = mkdtempSync(join(tmpdir(), 'aim-lifecycle-outside-hooks-'));
+    try {
+        const precommit = join(gitPath(repo, 'hooks'), 'pre-commit');
+        const chained = join(stateDir(repo), 'chained', 'pre-commit');
+        const original = '#!/bin/sh\nprintf original-hook\\n\n';
+        writeFileSync(precommit, original, { mode: 0o755 });
+        chmodSync(precommit, 0o755);
+        const initialized = run(repo, ['init', '--profile', 'clean']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+        const dispatcher = readFileSync(precommit);
+
+        git(repo, ['config', '--local', 'core.hooksPath', outside]);
+        const refused = run(repo, ['init', '--profile', 'clean']);
+        assert.equal(refused.status, 20, refused.stderr);
+        assert.match(refused.stderr, /hook installation incomplete/);
+        assert.deepEqual(readFileSync(precommit), dispatcher, 'the refused init removed the dispatcher');
+        assert.equal(readFileSync(chained, 'utf8'), original, 'the refused init removed the chained original');
+    } finally {
+        rmSync(outside, { recursive: true, force: true });
+        cleanup(repo);
+    }
+});
+
+test('init refuses to replace a hook written over its dispatcher while the chained original is kept', () => {
+    const repo = createRepo();
+    try {
+        const precommit = join(gitPath(repo, 'hooks'), 'pre-commit');
+        const chained = join(stateDir(repo), 'chained', 'pre-commit');
+        const original = '#!/bin/sh\nprintf original-hook\\n\n';
+        writeFileSync(precommit, original, { mode: 0o755 });
+        chmodSync(precommit, 0o755);
+        const initialized = run(repo, ['init', '--profile', 'clean']);
+        assert.equal(initialized.status, 0, initialized.stderr);
+
+        // Another hook manager writes its own hook over the dispatcher.
+        const replacement = '#!/bin/sh\nprintf replacement-hook\\n\n';
+        writeFileSync(precommit, replacement);
+        const reinit = run(repo, ['init', '--profile', 'clean']);
+        assert.equal(reinit.status, 20, reinit.stderr);
+        assert.match(reinit.stderr, /was replaced after aimhooman chained the original/);
+        assert.equal(readFileSync(precommit, 'utf8'), replacement, 'the replacement hook was lost');
+        assert.equal(readFileSync(chained, 'utf8'), original, 'the chained original was lost');
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('corrupt override state fails clearly at every enforcement entry point', async (t) => {
     const repo = createRepo('strict');
     const message = join(repo.root, 'COMMIT_MESSAGE');
