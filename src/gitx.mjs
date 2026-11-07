@@ -501,8 +501,14 @@ function gatedTips(repo, reviewing) {
 // and suppress the scan, so tips come from refs/heads/* alone. A newly created
 // branch is measured against those tips instead of its full ancestry, which
 // would otherwise rescan the entire repository on every `git checkout -b`;
-// ordinary updates scan exactly old..new.
-export function introducedCommits(repo, updates) {
+// ordinary updates scan exactly old..new. Ordinary updates do not subtract the
+// other branch tips: a branch made before the guard, or with its hooks
+// switched off, never passed it, and trusting it would wave its commits into
+// a guarded branch. firstBranchTipOnly (refcheck) covers the one creation with
+// no other branch to measure against, a clone or a first pull: it checks the
+// tip's own change instead of every commit ever made. A push still scans all
+// of them, because pushcheck does not pass it.
+export function introducedCommits(repo, updates, { firstBranchTipOnly = false } = {}) {
     const commits = [];
     const seen = new Set();
     const reviewing = new Set(updates.map((update) => update?.ref).filter(Boolean));
@@ -512,7 +518,9 @@ export function introducedCommits(repo, updates) {
         const newObjectId = update?.newObjectId;
         assertOid(oldObjectId);
         assertOid(newObjectId);
-        const creation = [newObjectId, ...(gated.length ? ['--not', ...gated] : [])];
+        const creation = firstBranchTipOnly && !gated.length
+            ? ['-n', '1', newObjectId]
+            : [newObjectId, ...(gated.length ? ['--not', ...gated] : [])];
         let raw;
         try {
             raw = gitBuf(['rev-list', '--reverse', ...(/^0+$/.test(oldObjectId)
