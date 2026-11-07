@@ -3,7 +3,7 @@ name: aimhooman
 description: >
   Keep AI tooling artifacts out of Git. Use whenever staging, committing, or
   pushing changes: block AI session/state files (.claude/session.json,
-  .codex/history, .copilot, .cursor/session, .aider.*, .specstory, .agent)
+  .codex/history, .copilot, .cursor/session, .aider history, .specstory/history)
   and unwanted AI attribution in
   commit messages (Co-authored-by an AI, "Generated with AI"). Also use when the user says
   "aimhooman", "ship it like a hooman", or asks to clean AI residue before a commit.
@@ -17,13 +17,14 @@ This repository uses aimhooman to keep AI tooling artifacts out of Git history.
 Its policy:
 
 - Never stage or commit local AI session/state files. Examples include
-  `.claude.json`, `.claude/session*.json`,
+  `.claude.json`, `.claude/session*.json`, `.claude/worktrees/*`,
   `.claude/history*`, `.claude/todos/*`, `.claude/shell-snapshots/*`,
-  `.claude/statsig/*`, `.claude/projects/*`, `.claude/logs/*`,
+  `.claude/statsig/*`, `.claude/projects/*`, `.claude/logs/*`, `CLAUDE.local.md`,
   `.codex/sessions/*`, `.codex/history*`, `.codex/log/*`, `.codex/logs/*`,
   `.copilot/*`, `.cursor/session*`, `.cursor/chats/*`, `.cursor/logs/*`,
-  `.aider.*`, `.specstory/*`, `.continue/sessions/*`, `.playwright-mcp/*`,
-  `.remember/*`, `.superpowers/*`, and `.agent/*`. The examples are not
+  `.aider.*history*`, `.aider.tags.cache.v*/*`, `.specstory/history/*`,
+  `.continue/sessions/*`, `.playwright-mcp/*`, `.remember/*`, and
+  `.superpowers/*`. The examples are not
   exhaustive; the packaged `rules/paths.json` is the detection source of truth
   for these artifacts. If one is staged, unstage it and keep it out of Git
   instead.
