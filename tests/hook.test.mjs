@@ -969,6 +969,55 @@ test('hook-affecting config cannot bypass the final ref guard for protected Git 
     }
 });
 
+test('a hooks-path override is refused however the shell spells it', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-dynamic-key-${profile}-`);
+        try {
+            for (const command of [
+                "git -c $'core.hooksPath=/dev/null' commit -m x",
+                'git -c core.hooksPat{h..h}=/dev/null commit -m x',
+                'K=core.hooksPath; git -c "$K=/dev/null" commit -m x',
+                "git --config-env=$'core.hooksPath'=PWD commit -m x",
+                'time git -c "a.b=\'" -c core.hooksPath=/dev/null commit -m x',
+                'git -c core.hooksPath=/dev/null --shallow-file status commit -m x',
+                'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null '
+                    + '/usr/libexec/git-core/git-commit -m x',
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test('strict refuses --no-verify however the shell spells or prefixes it', async () => {
+    const dir = makeHookRepo('strict', 'aim-hook-dynamic-noverify-');
+    try {
+        for (const command of [
+            "git commit -m x $'--no-verify'",
+            'git commit -m x {--no-verify,}',
+            'time git commit -m "it\'s done" --no-verify',
+            'timeout 60 git commit -m "don\'t" -n',
+            'git --shallow-file status commit --no-verify -m x',
+        ]) {
+            const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(decision?.permissionDecision, 'deny', command);
+        }
+        for (const command of [
+            'git -c color.ui=always log -1',
+            'git --no-pager log -1',
+            'time git commit -m "it\'s done"',
+        ]) {
+            const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            assert.equal(decision, null, command);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('every profile denies protected Git operations when the final managed guard is missing', async () => {
     for (const profile of ['clean', 'compliance', 'strict']) {
         const dir = makeHookRepo(profile, `aim-hook-missing-final-${profile}-`);
