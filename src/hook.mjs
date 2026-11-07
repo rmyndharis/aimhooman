@@ -326,9 +326,13 @@ function hookPreToolUse(input) {
                 );
             }
             const activeHooks = installedHooks(targetRepo);
+            // A push moves no local branch, so reference-transaction does not see
+            // what leaves; pre-push is the check that does.
             const requiredHooks = gitCommand.verb === 'commit'
                 ? ['pre-commit', 'commit-msg', 'reference-transaction']
-                : ['reference-transaction'];
+                : gitCommand.verb === 'push'
+                    ? ['reference-transaction', 'pre-push']
+                    : ['reference-transaction'];
             const missingHooks = requiredHooks
                 .filter((hook) => !activeHooks.includes(hook));
             if (missingHooks.length) {
@@ -349,6 +353,14 @@ function hookPreToolUse(input) {
                     'deny',
                     'aimhooman cannot verify the managed pre-commit and reference-transaction guards for '
                     + 'git commit when the command overrides the hooks path; run the commit without the override.'
+                );
+            }
+            // The same holds for a push without pre-push: nothing after it sees
+            // the objects leave.
+            if (gitCommand.verb === 'push' && gitCommand.noVerify) {
+                return emitDecision(
+                    'deny',
+                    'aimhooman cannot verify a push that skips the managed pre-push guard (--no-verify); push without it.'
                 );
             }
             if (targetProfile !== 'strict') continue;
