@@ -881,6 +881,76 @@ test('staged policy review is bound to head, transition, and policy object IDs',
     }
 });
 
+// A policy this version cannot read, as a pull delivers it: committed without
+// this clone's hooks.
+function commitUnreadablePolicy(repo, text) {
+    writeFileSync(join(repo.root, '.aimhooman.json'), text);
+    git(repo, ['add', '.aimhooman.json']);
+    git(repo, ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'Policy edited elsewhere']);
+    return git(repo, ['rev-parse', 'HEAD:.aimhooman.json']);
+}
+
+function commitWithHooks(repo, args) {
+    return spawnSync('git', ['commit', '-q', ...args], { cwd: repo.root, env: repo.env, encoding: 'utf8' });
+}
+
+test('an unreadable policy in HEAD can be repaired without uninstalling the guard', () => {
+    const strictRepo = createRepo('clean');
+    const cleanRepo = createRepo('clean');
+    try {
+        // Restoring strict weakens nothing: it takes only the path review every
+        // strict policy change takes.
+        commitUnreadablePolicy(strictRepo, '{\n  "schema_version": 1,\n  "profile": "clean",\n}\n');
+        writePolicy(strictRepo, 'strict');
+        git(strictRepo, ['add', '.aimhooman.json']);
+        const pathReview = run(strictRepo, ['review', '.aimhooman.json', '--head', 'HEAD', '--reason', 'restore a readable policy']);
+        assert.equal(pathReview.status, 0, pathReview.stderr);
+        let committed = commitWithHooks(strictRepo, ['-m', 'Repair policy as strict']);
+        assert.equal(committed.status, 0, committed.stderr);
+
+        // The unreadable file might have said strict, so anything weaker needs
+        // the bound review the error names, with both object IDs.
+        const oldObject = commitUnreadablePolicy(cleanRepo, '{"schema_version": 2, "profile": "clean"}\n');
+        writePolicy(cleanRepo, 'clean');
+        git(cleanRepo, ['add', '.aimhooman.json']);
+        const newObject = git(cleanRepo, ['rev-parse', ':.aimhooman.json']);
+        const checked = run(cleanRepo, ['check', '--staged', '--json']);
+        assert.equal(checked.status, 10, checked.stderr);
+        const finding = jsonOutput(checked).findings
+            .find((candidate) => candidate.ruleId === 'generic.project-policy' && candidate.decision === 'block');
+        assert.ok(finding, checked.stdout);
+        assert.ok(
+            finding.remediation.some((line) => line.includes(`--old ${oldObject}`) && line.includes(`--new ${newObject}`)),
+            finding.remediation.join('\n'),
+        );
+        const reviewed = run(cleanRepo, [
+            'policy-review', '--head', 'HEAD', '--staged',
+            '--old', oldObject, '--new', newObject, '--reason', 'repair unreadable policy',
+        ]);
+        assert.equal(reviewed.status, 0, reviewed.stderr);
+        committed = commitWithHooks(cleanRepo, ['-m', 'Repair policy as clean']);
+        assert.equal(committed.status, 0, committed.stderr);
+    } finally {
+        cleanup(strictRepo, cleanRepo);
+    }
+});
+
+test('the final ref guard lets a commit carry an unreadable policy forward unchanged', () => {
+    const repo = createRepo('clean');
+    try {
+        commitUnreadablePolicy(repo, '{"schema_version": 2, "profile": "clean"}\n');
+        writeFileSync(join(repo.root, 'notes.txt'), 'unrelated\n');
+        git(repo, ['add', 'notes.txt']);
+        // --no-verify leaves the reference-transaction guard as the only check;
+        // the policy file did not change, so there is no downgrade to veto.
+        const committed = commitWithHooks(repo, ['--no-verify', '-m', 'Unrelated change']);
+        assert.equal(committed.status, 0, committed.stderr);
+        assert.doesNotMatch(committed.stderr, /cannot be downgraded/);
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('fix follows clean, compliance, and strict write policies', () => {
     const clean = createRepo('clean');
     const compliance = createRepo('compliance');

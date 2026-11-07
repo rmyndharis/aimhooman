@@ -1372,21 +1372,23 @@ function cmdPolicyReview(args) {
     const transition = options.staged ? 'staged' : resolveCommit(repo, options.transition);
     const expectedOld = normalizeObjectId(options.old, false);
     const expectedNew = normalizeObjectId(options.new, true);
+    // The guards floor an unreadable baseline policy like a strict one, so the
+    // review that clears that floor has to be able to name it.
     let oldPolicies;
     let newPolicy;
     if (options.staged) {
-        oldPolicies = [resolvePolicy(repo, { target: 'commit', revision: head })];
+        oldPolicies = [resolvePolicy(repo, { target: 'commit', revision: head, tolerant: true })];
         newPolicy = resolvePolicy(repo, { target: 'staged' });
     } else {
         const transitionInfo = commitParents(repo, transition);
         oldPolicies = transitionInfo.parents.map((parent) => (
-            resolvePolicy(repo, { target: 'commit', revision: parent })
+            resolvePolicy(repo, { target: 'commit', revision: parent, tolerant: true })
         ));
         newPolicy = resolvePolicy(repo, { target: 'commit', revision: transition });
     }
     const oldPolicy = oldPolicies.find((policy) => policy.policy_object_id === expectedOld);
-    if (!oldPolicy || oldPolicy.profile !== 'strict') {
-        throw new ArgumentError('--old must identify a strict policy object in the reviewed transition baseline');
+    if (!oldPolicy || (oldPolicy.profile !== 'strict' && !oldPolicy.unparseable)) {
+        throw new ArgumentError('--old must identify a strict or unreadable policy object in the reviewed transition baseline');
     }
     if ((newPolicy.policy_object_id ?? null) !== expectedNew) {
         throw new ArgumentError('--new does not identify the policy object at the reviewed transition');

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content moved out of an excepted path is no longer skipped.
 - A `diff.interHunkContext` setting no longer hides later hunks from commit and
   range scans.
+- A committed `.aimhooman.json` this version cannot read no longer blocks the
+  commit that repairs it, and `policy-review` can acknowledge it; commits that
+  carry it forward unchanged pass the final ref guard.
 - Refreshing the managed exclude block keeps it in place, so a `!` negation
   written below it keeps working.
 - Claude Code worktrees (`.claude/worktrees/`) and `CLAUDE.local.md` are kept
