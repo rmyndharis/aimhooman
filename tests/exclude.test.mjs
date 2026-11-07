@@ -13,14 +13,19 @@ test('defaultPatterns is derived from unambiguous AI residue rules', () => {
         '.codex/logs/**',
         '.copilot/**',
         '.cursor/chats/**',
-        '.aider.*',
+        '.claude/worktrees/**',
+        '.aider.chat.history.md',
+        '.aider.tags.cache.v*/**',
         '.continue/sessions/**',
         '.playwright-mcp/**',
         '.remember/**',
         '.superpowers/**',
-        '.agent/**',
     ]) {
         assert.ok(defaultPatterns().some((x) => x.startsWith(p)), `missing ${p}`);
+    }
+    // Project config these tools read must stay visible to git status.
+    for (const p of ['.aider.*', '.agent/**', '.specstory/**']) {
+        assert.equal(defaultPatterns().includes(p), false, `${p} would hide project config`);
     }
     // Review-required files stay visible in git status, and .env was never in
     // the auto-exclude set: it was enforced by content and path scanning until

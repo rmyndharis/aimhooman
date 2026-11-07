@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content moved out of an excepted path is no longer skipped.
 - A `diff.interHunkContext` setting no longer hides later hunks from commit and
   range scans.
+- Claude Code worktrees (`.claude/worktrees/`) and `CLAUDE.local.md` are kept
+  out of commits.
+- Files inside Aider's `.aider.tags.cache.v*/` directories are caught; the old
+  `.aider.*` pattern matched only the directory name.
+
+### Changed
+
+- `.aider.conf.yml` and other Aider project config are no longer blocked; the
+  rule covers Aider's history and cache files only.
+- SpecStory project config is no longer blocked; only `.specstory/history/` and
+  `.specstory/cursorcloud/` are.
+- `.agent/` is no longer blocked or excluded: Google Antigravity still reads
+  workspace rules and workflows from it.
 
 ## [0.6.0] - 2026-08-12
 

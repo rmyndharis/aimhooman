@@ -57,12 +57,12 @@ const contracts = {
         nearMiss: { path: '.cursor/rules/project.mdc' },
     },
     'aider.history': {
-        positive: { path: 'packages/web/.aider.conf.yml' },
-        nearMiss: { path: 'packages/web/aider.conf.yml' },
+        positive: { path: 'packages/web/.aider.chat.history.md' },
+        nearMiss: { path: 'packages/web/.aider.conf.yml' },
     },
     'specstory.history': {
         positive: { path: '.specstory/history/session.json' },
-        nearMiss: { path: 'docs/specstory/history.md' },
+        nearMiss: { path: '.specstory/cli/config.toml' },
     },
     'continue.sessions': {
         positive: { path: '.continue/sessions/active.json' },
@@ -87,10 +87,6 @@ const contracts = {
     'superpowers.state': {
         positive: { path: '.superpowers/cache/state.json' },
         nearMiss: { path: '.superpowers.md' },
-    },
-    'agent.state': {
-        positive: { path: '.agent/state.json' },
-        nearMiss: { path: '.agents/rules/aimhooman.md' },
     },
     'aimhooman.lock-residue': {
         positive: { path: '.gitignore.aimhooman.lock.queue/2f1f9d24-6f0a-4b1c-8d2e-3a4b5c6d7e8f.json' },

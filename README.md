@@ -103,7 +103,7 @@ git commit -m "ship it"   # guarded automatically
 
 ## What it catches
 
-- **AI session/state artifacts**: `.claude/session*.json`, `.codex/sessions/`, `.aider.*`
+- **AI session/state artifacts**: `.claude/worktrees/`, `.codex/sessions/`, `.aider.chat.history.md`
   — catalog: [docs/catalog.md](docs/catalog.md). Just want the ignore list? [docs/ai-artifacts.gitignore](docs/ai-artifacts.gitignore).
 - **AI attribution** in commit messages (`Co-authored-by:` an AI, "Generated with" lines, AI noreply trailers) and **AI markers** left in code.
 - **Review-required** files: `.aimhooman.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`.

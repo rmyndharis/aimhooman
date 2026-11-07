@@ -24,12 +24,12 @@ recommend instead.
 | `attribution.ai-noreply` | generic | ai-attribution | message | review | review | allow | AI service noreply email in the message. |
 | `marker.corner-cut` | generic | ai-marker | code | review | block | review | AI-tooling corner-cut marker left in committed code. |
 | `marker.ai-authored` | generic | ai-marker | code | review | block | review | AI-authored code marker left in committed code. |
-| `claude.local-settings` | claude-code | local-settings | path | block | block | block | Personal Claude Code settings are not intended for source control. |
+| `claude.local-settings` | claude-code | local-settings | path | block | block | block | Personal Claude Code settings and instructions are not intended for source control. |
 | `claude.session-state` | claude-code | ephemeral-state | path | block | block | block | Claude Code session and state artifacts are local, not repository content. |
 | `codex.session-state` | codex | ephemeral-state | path | block | block | block | Codex session, history, and log artifacts are local, not repository content. |
 | `copilot.session-state` | copilot | ephemeral-state | path | block | block | block | Copilot local state is not repository content. |
 | `cursor.session-state` | cursor | ephemeral-state | path | block | block | block | Cursor session artifacts are local, not repository content. |
-| `aider.history` | aider | ephemeral-state | path | block | block | block | Aider dotfiles are local, not repository content. |
+| `aider.history` | aider | ephemeral-state | path | block | block | block | Aider chat history and caches are local, not repository content. |
 | `specstory.history` | specstory | ephemeral-state | path | block | block | block | SpecStory session history is local, not repository content. |
 | `continue.sessions` | continue | ephemeral-state | path | block | block | block | Continue session artifacts are local, not repository content. |
 | `generic.agent-instructions` | generic | ambiguous-instructions | path | review | block | review | Agent instruction files may be intentional team config. Review before committing. |
@@ -37,6 +37,5 @@ recommend instead.
 | `playwright-mcp.state` | playwright-mcp | ephemeral-state | path | block | block | block | Playwright MCP session artifacts are local, not repository content. |
 | `remember.state` | remember | ephemeral-state | path | block | block | block | Remember second-brain data is local, not repository content. |
 | `superpowers.state` | superpowers | ephemeral-state | path | block | block | block | Superpowers plugin state is local, not repository content. |
-| `agent.state` | generic | ephemeral-state | path | block | block | block | Generic agent state is local, not repository content. |
 | `aimhooman.lock-residue` | aimhooman | ephemeral-state | path | block | block | block | aimhooman state-lock files and queue candidates are local tooling residue, not repository content. |
 <!-- aimhooman:catalog-end -->

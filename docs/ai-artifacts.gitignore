@@ -14,8 +14,10 @@
 # >>> aimhooman:catalog-start
 **/*.aimhooman.lock
 **/*.aimhooman.lock.queue/**
-**/.agent/**
-**/.aider.*
+**/.aider.chat.history.md
+**/.aider.input.history
+**/.aider.llm.history
+**/.aider.tags.cache.v*/**
 **/.claude.json
 **/.claude/history*
 **/.claude/logs/**
@@ -25,6 +27,7 @@
 **/.claude/shell-snapshots/**
 **/.claude/statsig/**
 **/.claude/todos/**
+**/.claude/worktrees/**
 **/.codex/history*
 **/.codex/log/**
 **/.codex/logs/**
@@ -36,12 +39,16 @@
 **/.cursor/session*
 **/.playwright-mcp/**
 **/.remember/**
-**/.specstory/**
+**/.specstory/cursorcloud/**
+**/.specstory/history/**
 **/.superpowers/**
+**/CLAUDE.local.md
 *.aimhooman.lock
 *.aimhooman.lock.queue/**
-.agent/**
-.aider.*
+.aider.chat.history.md
+.aider.input.history
+.aider.llm.history
+.aider.tags.cache.v*/**
 .claude.json
 .claude/history*
 .claude/logs/**
@@ -51,6 +58,7 @@
 .claude/shell-snapshots/**
 .claude/statsig/**
 .claude/todos/**
+.claude/worktrees/**
 .codex/history*
 .codex/log/**
 .codex/logs/**
@@ -62,6 +70,8 @@
 .cursor/session*
 .playwright-mcp/**
 .remember/**
-.specstory/**
+.specstory/cursorcloud/**
+.specstory/history/**
 .superpowers/**
+CLAUDE.local.md
 # <<< aimhooman:catalog-end
