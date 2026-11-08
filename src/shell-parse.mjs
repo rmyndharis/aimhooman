@@ -43,6 +43,17 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
     let prefixIndexMutationRisk = false;
     let prefixHooksRisk = false;
     let policyTransitionRisk = false;
+    // What Git runs for the line (an --exec, a command-valued config key or
+    // environment variable) is read as a sh -c payload is. Git picks where it
+    // runs, so a guarded Git command in it has no known target. Only what it
+    // can do to Git counts against the rest of the line; a pager or a test
+    // run does not.
+    const mergeGitRun = (ran) => {
+        commands.push(...ran.commands.map((candidate) => ({ ...candidate, targetUncertain: true })));
+        uncertainShell ||= ran.opaqueCommitHiding;
+        prefixRisk ||= ran.prefixHooksRisk;
+        prefixHooksRisk ||= ran.prefixHooksRisk;
+    };
     for (const unit of shellUnits(cmd)) {
         const precedingOperator = previousOperator;
         previousOperator = unit.operator;
@@ -56,7 +67,12 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         const control = unwrapShellControl(shellWords(unit.text.trim()));
         const words = control.tokens;
         uncertainShell ||= control.uncertain;
-        if (updatePersistentEnvironment(words, persistentEnvironmentRisk)) continue;
+        if (updatePersistentEnvironment(words, persistentEnvironmentRisk)) {
+            // An exported GIT_SSH_COMMAND runs under the Git commands after it.
+            const exported = environmentCommands(words.filter(isAssignment));
+            if (exported.length) mergeGitRun(parseGit(exported.join('\n'), shellCwd));
+            continue;
+        }
         const unwrapped = unwrapCommand(words, shellCwd);
         const toks = dashedGitInvocation(unwrapped.tokens) ?? unwrapped.tokens;
         uncertainShell ||= unwrapped.uncertain;
@@ -287,6 +303,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         let aliasResolutionRisk = !canResolveGitAlias(g0);
         let inlineAliasRisk = false;
         let unknownGlobalOption = false;
+        const configRuns = [];
         while (i < toks.length && toks[i].startsWith('-')) {
             const option = toks[i];
             if (option === '-C' && toks[i + 1]) {
@@ -309,6 +326,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
                 }
+                configRuns.push(...configCommands(toks[i + 1]));
                 i += 2;
             } else if (option.startsWith('-c') && option.length > 2) {
                 if (hookAffectingConfig(option.slice(2))) commandBypass = true;
@@ -317,8 +335,12 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
                 }
+                configRuns.push(...configCommands(option.slice(2)));
                 i += 1;
             } else if (option === '--config-env' && toks[i + 1]) {
+                // A command-valued key read from the environment is a command
+                // this check cannot see.
+                unknownGlobalOption ||= commandConfigKey(toks[i + 1].split('=', 1)[0]);
                 if (hookAffectingConfig(toks[i + 1])) commandBypass = true;
                 if (hooksPathOverrideConfig(toks[i + 1])) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(toks[i + 1])) {
@@ -327,6 +349,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 }
                 i += 2;
             } else if (option.startsWith('--config-env=')) {
+                unknownGlobalOption ||= commandConfigKey(option.slice('--config-env='.length).split('=', 1)[0]);
                 if (hookAffectingConfig(option.slice('--config-env='.length))) commandBypass = true;
                 if (hooksPathOverrideConfig(option.slice('--config-env='.length))) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(option.slice('--config-env='.length))) {
@@ -403,10 +426,14 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         // shell command. The current staged snapshot is therefore not the index
         // the commit will use, even when no literal `git add` appeared.
         if (gitIndexMutationRisk(verb, verbArgs)) sawAdd = true;
-        // Git runs this through a shell, so it is read as one. What it does to
-        // the hooks lands before Git's own remaining ref updates.
-        const gitRun = gitRunPayload(verb, verbArgs);
-        const ran = gitRun === null ? null : parseGit(gitRun, cwd);
+        // If what Git runs for this command touches the hooks, it does so
+        // before Git's own remaining ref updates.
+        const gitRun = [
+            gitRunPayload(verb, verbArgs),
+            ...configRuns,
+            ...environmentCommands(unwrapped.assignments),
+        ].filter((text) => text !== null);
+        const ran = gitRun.length ? parseGit(gitRun.join('\n'), cwd) : null;
         if (ran?.prefixHooksRisk) {
             prefixRisk = true;
             prefixHooksRisk = true;
@@ -530,13 +557,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             });
             policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         }
-        if (ran) {
-            // Git picks where it runs (each submodule, the top of the
-            // worktree), so a guarded command in it has no known target.
-            commands.push(...ran.commands.map((candidate) => ({ ...candidate, targetUncertain: true })));
-            uncertainShell ||= ran.opaqueCommitHiding;
-            prefixRisk ||= ran.prefixRisk;
-        }
+        if (ran) mergeGitRun(ran);
     }
     const indirectCommits = [
         ...pipedShellCommitInvocations(cmd, initialCwd),
@@ -1201,35 +1222,126 @@ function nestedShellPayload(tokens) {
     return null;
 }
 
-// The shell text Git itself runs for `rebase --exec`, `submodule foreach` and
-// `bisect run`, or null. rebase takes -x/--exec (any unique prefix, --ex), also
-// bundled as -ix or -xCMD, and may repeat it. foreach and bisect run take the
-// rest of the line: Git hands the first word to the shell and the others to it
-// as arguments.
-export function gitRunPayload(verb, args) {
-    if (verb === 'rebase') {
-        const commands = [];
-        for (let i = 0; i < args.length; i += 1) {
-            const arg = args[i];
-            if (arg === '--') break;
-            const long = /^--ex(?:ec?)?(?:=([\s\S]*))?$/.exec(arg);
-            const short = /^-[^-]/.test(arg) && arg.includes('x');
-            if (!long && !short) continue;
-            const attached = long ? long[1] : arg.slice(arg.indexOf('x') + 1);
-            const value = attached || args[(i += 1)];
-            if (value !== undefined) commands.push(value);
-        }
-        return commands.length ? commands.join('\n') : null;
+// Options whose value Git runs through a shell, as [short letter, long name,
+// shortest prefix Git accepts, value must be attached]. difftool keeps unknown
+// options for diff and so takes no abbreviation. A fetch from a local path
+// starts its --upload-pack itself, as archive does its --exec, and grep -O
+// opens the matching files with the command it is given.
+const GIT_RUN_OPTIONS = {
+    rebase: ['x', '--exec', 4],
+    difftool: ['x', '--extcmd', 8],
+    fetch: ['', '--upload-pack', 3],
+    pull: ['', '--upload-pack', 3],
+    'ls-remote': ['', '--upload-pack', 3],
+    clone: ['u', '--upload-pack', 3],
+    archive: ['', '--exec', 3],
+    grep: ['O', '--open-files-in-pager', 4, true],
+};
+
+// Values of an option written -xVALUE, -x VALUE, bundled as -ix VALUE,
+// --name=VALUE or --name VALUE.
+function optionValues(args, [short, long, shortest, attachedOnly = false]) {
+    const values = [];
+    for (let i = 0; i < args.length; i += 1) {
+        const arg = args[i];
+        if (arg === '--') break;
+        let value;
+        if (arg.startsWith('--')) {
+            const at = arg.indexOf('=');
+            const name = at < 0 ? arg : arg.slice(0, at);
+            if (name.length < shortest || !long.startsWith(name)) continue;
+            value = at >= 0 ? arg.slice(at + 1) : attachedOnly ? undefined : args[(i += 1)];
+        } else if (short && /^-[^-]/.test(arg) && arg.includes(short)) {
+            value = arg.slice(arg.indexOf(short) + 1) || (attachedOnly ? undefined : args[(i += 1)]);
+        } else continue;
+        if (value !== undefined) values.push(value);
     }
-    let words;
+    return values;
+}
+
+// The shell text Git itself runs for this command line, or null: the options
+// above, the rest of `submodule foreach` and `bisect run` (Git hands the first
+// word to the shell and the others to it as arguments), what `git config`
+// stores under a command-valued key, and the command of an ext:: URL.
+export function gitRunPayload(verb, args) {
+    const runs = args.filter((arg) => arg.startsWith('ext::')).flatMap(extCommands);
+    if (GIT_RUN_OPTIONS[verb]) runs.push(...optionValues(args, GIT_RUN_OPTIONS[verb]));
+    if (verb === 'clone') runs.push(...optionValues(args, ['c', '--config', 3]).flatMap(configCommands));
+    if (verb === 'config') {
+        const at = args.findIndex(commandConfigKey);
+        if (at >= 0 && args[at + 1] !== undefined) runs.push(args[at + 1]);
+    }
+    let words = [];
     if (verb === 'bisect' && args[0] === 'run') words = args.slice(1);
     else if (verb === 'submodule') {
         const at = args.findIndex((arg) => !arg.startsWith('-'));
-        if (args[at] !== 'foreach') return null;
-        words = args.slice(at + 1);
+        if (args[at] === 'foreach') words = args.slice(at + 1);
         while (words[0]?.startsWith('-')) words = words.slice(1);
-    } else return null;
-    return words.length ? [words[0], ...words.slice(1).map(quoteShellWord)].join(' ') : null;
+    }
+    if (words.length) runs.push([words[0], ...words.slice(1).map(quoteShellWord)].join(' '));
+    return runs.length ? runs.join('\n') : null;
+}
+
+// Config keys whose value Git runs as a command: pagers and editors, external
+// diff, textconv and diff filters, ssh, proxy and askpass programs, filter,
+// merge and credential helpers, signing programs, diff and merge tools,
+// trailer commands, upload-pack and receive-pack, sendemail, browser and man
+// commands, the IMAP tunnel and submodule update commands.
+const COMMAND_CONFIG_KEYS = [
+    /^core\.(?:pager|editor|sshcommand|askpass|gitproxy|fsmonitor|alternaterefscommand)$/,
+    /^(?:sequence\.editor|diff\.external|interactive\.difffilter|imap\.tunnel|instaweb\.httpd)$/,
+    /^(?:uploadpack\.packobjectshook|gpg\.ssh\.defaultkeycommand)$/,
+    /^pager\..+$/,
+    /^diff\..+\.(?:command|textconv)$/,
+    /^(?:diff|merge)tool\..+\.(?:cmd|path)$/,
+    /^merge\..+\.driver$/,
+    /^filter\..+\.(?:clean|smudge|process)$/,
+    /^credential(?:\..+)?\.helper$/,
+    /^gpg(?:\..+)?\.program$/,
+    /^trailer\..+\.(?:cmd|command)$/,
+    /^remote\..+\.(?:uploadpack|receivepack)$/,
+    /^sendemail\.(?:sendmail|to|cc|header)cmd$/,
+    /^(?:browser|man)\..+\.(?:cmd|path)$/,
+    /^submodule\..+\.update$/,
+];
+
+function commandConfigKey(key) {
+    const name = String(key).toLowerCase();
+    return COMMAND_CONFIG_KEYS.some((pattern) => pattern.test(name));
+}
+
+// Whatever follows ext:: is a command Git runs to reach the remote.
+function extCommands(text) {
+    const at = String(text).indexOf('ext::');
+    return at < 0 ? [] : [String(text).slice(at + 'ext::'.length)];
+}
+
+// The commands a key=value setting hands Git to run.
+function configCommands(setting) {
+    const text = String(setting);
+    const at = text.indexOf('=');
+    const value = at >= 0 && commandConfigKey(text.slice(0, at)) ? [text.slice(at + 1)] : [];
+    return [...value, ...extCommands(text)];
+}
+
+// Variables whose value Git runs as a command, and config passed through the
+// environment. <unset> and <declared> stand for values the line never shows.
+const COMMAND_ENVIRONMENT = new Set([
+    'EDITOR', 'GIT_ASKPASS', 'GIT_EDITOR', 'GIT_EXTERNAL_DIFF', 'GIT_PAGER', 'GIT_PROXY_COMMAND',
+    'GIT_SEQUENCE_EDITOR', 'GIT_SSH', 'GIT_SSH_COMMAND', 'PAGER', 'SSH_ASKPASS', 'VISUAL',
+]);
+
+function environmentCommands(assignments) {
+    return assignments.flatMap((assignment) => {
+        const at = assignment.indexOf('=');
+        const name = assignment.slice(0, at).toUpperCase();
+        const value = assignment.slice(at + 1);
+        if (/^<(?:unset|declared)>$/.test(value)) return [];
+        if (COMMAND_ENVIRONMENT.has(name)) return [value];
+        if (/^GIT_CONFIG_VALUE_\d+$/.test(name)) return [value, ...extCommands(value)];
+        if (name === 'GIT_CONFIG_PARAMETERS') return shellWords(value).flatMap(configCommands);
+        return [];
+    });
 }
 
 function nestedShellStartupTargetUncertain(tokens) {

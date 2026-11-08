@@ -1578,6 +1578,43 @@ test('commands Git runs for the agent are read like a sh -c payload', async () =
     }
 });
 
+test('commands Git takes from options, config and the environment are read before they run', async () => {
+    const hidden = 'git -c core.hooksPath=/dev/null commit -am x';
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-git-config-run-${profile}-`);
+        try {
+            for (const command of [
+                `git difftool -y -x '${hidden}' HEAD`,
+                `git fetch --upload-pack='${hidden} #' .`,
+                `git -c diff.external='${hidden} #' diff`,
+                `git -c core.fsmonitor='${hidden} #' status`,
+                `git -c credential.helper='!${hidden} #' fetch origin`,
+                `git -c protocol.ext.allow=always ls-remote 'ext::sh -c "${hidden}"'`,
+                `GIT_EXTERNAL_DIFF='${hidden} #' git diff`,
+                `export GIT_SSH_COMMAND='${hidden} #'; git fetch origin`,
+                `GIT_EDITOR='${hidden} #' git config --edit`,
+                `git config diff.external '${hidden} #'`,
+                'git --config-env=core.sshCommand=SSH_COMMAND fetch origin',
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git -c core.pager=cat log',
+                'GIT_PAGER=cat git log -3 && git push origin main',
+                "git difftool -y -x 'diff -u' HEAD",
+                "GIT_SSH_COMMAND='ssh -i ~/.ssh/id_deploy' git fetch origin",
+                'git config core.pager less',
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
 test('inline and external Git commands cannot hide future index or hook mutation', async () => {
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-unproved-alias-${profile}-`);
