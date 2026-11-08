@@ -411,6 +411,19 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
             warnings.push(`${name} is managed for another repository; refusing to overwrite it`);
             unsafe = true;
         }
+        // A dispatcher that names its backup slot but no longer reads as ours
+        // was edited after install (git-lfs tells users to append its line to
+        // the hook). Rewriting it would drop the edit.
+        if (current && !current.isSymbolicLink()) {
+            const cur = readFileSync(dest);
+            if (!ownedHook(cur, name) && cur.includes(`\nCHAINED=${shq(chainedPath)}\n`)) {
+                warnings.push(
+                    `${name} was edited after aimhooman installed it; move the added lines to `
+                    + `${chainedPath}, which it runs first, remove ${dest}, and run aimhooman init again`
+                );
+                unsafe = true;
+            }
+        }
         // One backup slot per hook: a foreign hook that differs from the stored
         // original (a hook manager reinstalled over the dispatcher, or a new
         // hooks path with its own hook) has nowhere to go, and replacing it would
@@ -443,11 +456,9 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
             if (current) {
                 const cur = readFileSync(dest);
                 const chainedPath = join(chainedDir, name);
-                // A file already naming the backup slot as its predecessor is
-                // our own damaged output. Chaining it would point the backup at
-                // itself and the dispatcher would exec itself without bound.
-                const selfChained = cur.includes(`\nCHAINED=${shq(chainedPath)}\n`);
-                if (!ownedHook(cur, name) && !selfChained) {
+                // The check above refused any file that names this backup slot,
+                // so chaining one never points the backup at itself.
+                if (!ownedHook(cur, name)) {
                     mkdirSync(chainedDir, { recursive: true });
                     const predecessorMode = current.mode & 0o777;
                     writeHook(chainedPath, cur, { mode: predecessorMode });
@@ -829,31 +840,37 @@ esac
 ) || exit $?
 `
         : '';
-    // A predecessor written for sh is sourced in a subshell, not exec'd. Git runs
-    // the dispatcher with $0 set to the original hook path (the dispatcher
-    // replaced it in place), and a subshell inherits $0, so sourcing lets the
-    // predecessor resolve $(dirname "$0") to its real directory: the pattern
-    // husky and vanilla .githooks hooks use to find sibling scripts. Any other
-    // shebang (bash, python, node) runs as a program instead, because sourcing
-    // hands it to this dispatcher's /bin/sh, which is dash on Debian and Ubuntu
-    // and cannot parse the bash pre-commit.com installs. The first line is read
-    // with the `read` builtin, so the check spawns nothing. exit inside a sourced
-    // predecessor exits the subshell and propagates via || exit $?.
+    // Git runs the dispatcher with $0 set to the original hook path, and a
+    // chained hook may rely on it: husky resolves sibling scripts from
+    // $(dirname "$0"), and pre-commit.com looks for its .legacy hook there. A
+    // hook written for sh or bash is therefore read by its own interpreter,
+    // with $0 passed through (`sh -c '. file' "$0" "$@"`), which also keeps the
+    // options on its #! line such as -e. A file with no #! line is sourced in a
+    // subshell, as sh would run it; any other interpreter (python, node) runs
+    // the file as a program. The first line is read with the `read` builtin,
+    // and trailing blanks, a carriage return included, are cut from it.
     const feed = name === 'reference-transaction' || name === 'pre-push'
         ? `printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | `
         : '';
+    const shellShebangs = ['sh', 'dash', 'bash', 'ash'].flatMap((shell) => [
+        `'#!'*/${shell}`, `'#!'*/${shell}[[:space:]]*`, `'#!'*[[:space:]]${shell}`, `'#!'*[[:space:]]${shell}[[:space:]]*`,
+    ]).join('|');
     const chainedInvocation = `  AIMHOOMAN_SHEBANG=
   IFS= read -r AIMHOOMAN_SHEBANG < "$CHAINED" || :
   case "$AIMHOOMAN_SHEBANG" in
-    '#!/bin/sh'|'#!/bin/sh'[[:space:]]*|'#!/usr/bin/sh'|'#!/usr/bin/sh'[[:space:]]*|'#!/bin/dash'|'#!/bin/dash'[[:space:]]*|'#!/usr/bin/env sh'|'#!/usr/bin/env sh'[[:space:]]*) AIMHOOMAN_SOURCE=1 ;;
-    '#!'*) AIMHOOMAN_SOURCE= ;;
-    *) AIMHOOMAN_SOURCE=1 ;;
-  esac
-  if [ -n "$AIMHOOMAN_SOURCE" ]; then
-    ${feed}( . "$CHAINED" ) || exit $?
-  else
-    ${feed}"$CHAINED" "$@" || exit $?
-  fi`;
+    ${shellShebangs})
+      AIMHOOMAN_INTERPRETER=\${AIMHOOMAN_SHEBANG#'#!'}
+      while :; do
+        case "$AIMHOOMAN_INTERPRETER" in
+          *[[:space:]]) AIMHOOMAN_INTERPRETER=\${AIMHOOMAN_INTERPRETER%?} ;;
+          *) break ;;
+        esac
+      done
+      ${feed}AIMHOOMAN_CHAINED=$CHAINED $AIMHOOMAN_INTERPRETER -c '. "$AIMHOOMAN_CHAINED"' "$0" "$@" || exit $?
+      ;;
+    '#!'*) ${feed}"$CHAINED" "$@" || exit $? ;;
+    *) ${feed}( . "$CHAINED" ) || exit $? ;;
+  esac`;
     const aimCommand = name === 'commit-msg'
         ? 'commitmsg "$1" --tree "$AIMHOOMAN_COMMIT_TREE"'
         : name === 'reference-transaction'

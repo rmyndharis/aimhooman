@@ -9,6 +9,7 @@ import {
     mkdtempSync,
     mkdirSync,
     readFileSync,
+    realpathSync,
     renameSync,
     rmSync,
     symlinkSync,
@@ -2147,7 +2148,7 @@ test('a chained predecessor sees the original $0, so $(dirname "$0") resolves to
     }
 });
 
-test('a chained predecessor with a non-sh shebang runs as a program, not sourced', (t) => {
+test('a chained bash predecessor runs under bash and sees the original $0', (t) => {
     if (process.platform === 'win32' || !existsSync('/bin/dash')) {
         t.skip('needs /bin/dash, the /bin/sh of Debian and Ubuntu');
         return;
@@ -2159,12 +2160,14 @@ test('a chained predecessor with a non-sh shebang runs as a program, not sourced
             const repo = openRepo(root);
             const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
             // The shape pre-commit.com installs: bash with arrays, which dash
-            // cannot parse when the dispatcher sources it.
+            // cannot parse, and a hook directory taken from $0, where it looks
+            // for the .legacy hook it moved aside.
             writeFileSync(
                 join(hooks, 'pre-commit'),
                 '#!/usr/bin/env bash\n'
                 + 'ARGS=(hook-impl --hook-type=pre-commit)\n'
-                + 'printf \'%s\\n\' "${ARGS[1]}" > "$PWD/predecessor.ran"\n',
+                + 'HERE="$(cd "$(dirname "$0")" && pwd -P)"\n'
+                + 'printf \'%s %s\\n\' "${ARGS[1]}" "$HERE" > "$PWD/predecessor.ran"\n',
                 { mode: 0o755 },
             );
             chmodSync(join(hooks, 'pre-commit'), 0o755);
@@ -2172,7 +2175,39 @@ test('a chained predecessor with a non-sh shebang runs as a program, not sourced
 
             const out = spawnSync('/bin/dash', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8' });
             assert.equal(out.status, 0, `dispatcher failed under dash: ${out.stderr}`);
-            assert.equal(readFileSync(join(root, 'predecessor.ran'), 'utf8'), '--hook-type=pre-commit\n');
+            assert.equal(
+                readFileSync(join(root, 'predecessor.ran'), 'utf8'),
+                `--hook-type=pre-commit ${realpathSync(hooks)}\n`,
+            );
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('a chained predecessor keeps the options on its #! line', (t) => {
+    if (process.platform === 'win32') {
+        t.skip('runs the dispatcher with /bin/sh');
+        return;
+    }
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-chained-options-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            // -e on the #! line stops the hook at its first failing command.
+            writeFileSync(
+                join(hooks, 'pre-commit'),
+                '#!/bin/sh -e\nfalse\ntouch "$PWD/after-failure"\n',
+                { mode: 0o755 },
+            );
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+            installHooks(repo, CLI);
+
+            const out = spawnSync('/bin/sh', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8' });
+            assert.notEqual(out.status, 0, out.stderr);
+            assert.equal(existsSync(join(root, 'after-failure')), false);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -2557,16 +2592,17 @@ test('install and uninstall refuse to follow hook symlinks', () => {
     }
 });
 
-// A hook file that already points at the backup slot is our own damaged output.
-// Chaining it makes the backup its own predecessor, so the dispatcher execs
-// itself without bound; and copying it over the slot destroys whatever original
-// hook was preserved there.
+// A dispatcher with its fingerprint zeroed: it still names its backup slot,
+// but no longer reads as ours.
 function damagedDispatcher(hooksPath) {
     const dispatcher = readFileSync(hooksPath, 'utf8');
     return dispatcher.replace(/^# aimhooman-hook-fingerprint: .*$/m, '# aimhooman-hook-fingerprint: ' + '0'.repeat(64));
 }
 
-test('a damaged dispatcher is replaced rather than chained onto its own backup', () => {
+// git-lfs tells users to append its line to the hook. The dispatcher still
+// names its backup slot but no longer reads as ours: rewriting it would drop
+// the edit, and chaining it would make the backup its own predecessor.
+test('a dispatcher edited after install is left in place and reported', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-selfchain-'));
     try {
         isolatedGitConfig(base, () => {
@@ -2580,10 +2616,13 @@ test('a damaged dispatcher is replaced rather than chained onto its own backup',
             const backup = join(repo.stateDir, 'chained', 'pre-commit');
             assert.equal(readFileSync(backup, 'utf8'), original);
 
-            writeFileSync(join(hooks, 'pre-commit'), damagedDispatcher(join(hooks, 'pre-commit')), { mode: 0o755 });
+            appendFileSync(join(hooks, 'pre-commit'), 'git lfs pre-commit "$@"\n');
+            const edited = readFileSync(join(hooks, 'pre-commit'), 'utf8');
             const report = installHooks(repo, CLI);
 
-            assert.equal(report.chained.includes('pre-commit'), false, 'our own damaged output must not be chained');
+            assert.equal(report.chained.includes('pre-commit'), false, 'an edited dispatcher must not be chained');
+            assert.equal(readFileSync(join(hooks, 'pre-commit'), 'utf8'), edited, 'the edit must survive');
+            assert.ok(report.warnings.some((w) => w.includes('pre-commit was edited')), report.warnings.join('\n'));
             assert.equal(readFileSync(backup, 'utf8'), original, "the user's original hook must survive");
         });
     } finally {

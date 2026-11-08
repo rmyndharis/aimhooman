@@ -948,9 +948,10 @@ function cmdInit(args) {
                 // after B2, worktree content the next add would commit), name the two
                 // ways out so the user is not stuck: let aimhooman use the default
                 // .git/hooks, or — for a worktree hooks path kept local — exclude it
-                // first. The uninstall hint lets them undo this init attempt.
+                // first. A refused install leaves earlier dispatchers in place, so
+                // there is nothing to undo, and uninstall would remove those too.
                 const remedy = rep.shared
-                    ? ' To proceed, either unset core.hooksPath so aimhooman uses the default .git/hooks, or (for a worktree hooks path you keep local) add it to .gitignore or .git/info/exclude and retry. Run "aimhooman uninstall" to undo this init attempt.'
+                    ? ' To proceed, either unset core.hooksPath so aimhooman uses the default .git/hooks, or (for a worktree hooks path you keep local) add it to .gitignore or .git/info/exclude and retry.'
                     : '';
                 throw new Error(`hook installation incomplete; ${cause}repository guard is not active.${remedy}`);
             }
