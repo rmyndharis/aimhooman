@@ -157,8 +157,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is, and the managed exclude re-includes that config with `!` lines.
 - `.agent/` is no longer blocked or excluded: Google Antigravity still reads
   workspace rules and workflows from it.
-- A chained bash hook sees the backup path as `$0`, so pre-commit.com no longer
-  finds a `.legacy` hook it moved aside before aimhooman was installed.
+- A chained bash hook sees the backup path as `$0`. `init` puts a shim beside
+  the backup, so pre-commit.com still runs the `.legacy` hook it moved aside.
 - The npm package no longer ships the logos or the Codex manifest validator,
   which only this repository uses.
 - `docs/ai-artifacts.gitignore` drops root patterns that a `**/` twin already

@@ -2413,6 +2413,54 @@ test('a chained bash predecessor runs as a program under bash', (t) => {
     }
 });
 
+// pre-commit.com reads its hook dir from $0 and runs <name>.legacy there, the
+// hook it moved aside. A chained copy runs from the backup slot, so init puts a
+// shim beside it, and uninstall takes the shim away again.
+test('a chained pre-commit.com hook still runs the .legacy hook it moved aside', (t) => {
+    if (process.platform === 'win32') {
+        t.skip('runs POSIX hook scripts directly');
+        return;
+    }
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-legacy-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            const shim = join(repo.stateDir, 'chained', 'pre-commit.legacy');
+            writeFileSync(join(hooks, 'pre-commit.legacy'), '#!/bin/sh\necho legacy >> "$PWD/ran"\n');
+            writeFileSync(
+                join(hooks, 'pre-commit'),
+                '#!/bin/sh\nHERE="$(cd "$(dirname "$0")" && pwd)"\n'
+                + '[ -x "$HERE/pre-commit.legacy" ] && "$HERE/pre-commit.legacy" "$@"\n'
+                + 'echo pre-commit >> "$PWD/ran"\n',
+            );
+            chmodSync(join(hooks, 'pre-commit.legacy'), 0o755);
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+            installHooks(repo, CLI);
+            installHooks(repo, CLI);
+
+            const out = spawnSync('sh', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8' });
+            assert.equal(out.status, 0, out.stderr);
+            assert.equal(readFileSync(join(root, 'ran'), 'utf8'), 'legacy\npre-commit\n');
+
+            // An older dispatcher left as .legacy would run this chain again.
+            copyFileSync(join(hooks, 'pre-commit'), join(hooks, 'pre-commit.legacy'));
+            installHooks(repo, CLI);
+            assert.equal(existsSync(shim), false, 'no shim for a dispatcher');
+            writeFileSync(join(hooks, 'pre-commit.legacy'), '#!/bin/sh\nexit 0\n');
+            installHooks(repo, CLI);
+            assert.equal(existsSync(shim), true);
+
+            uninstallHooks(repo);
+            assert.equal(existsSync(shim), false, 'uninstall removes the shim');
+            assert.match(readFileSync(join(hooks, 'pre-commit'), 'utf8'), /HERE=/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('a chained sh predecessor that re-execs itself through $0 runs once', (t) => {
     if (process.platform === 'win32' || !existsSync('/bin/dash')) {
         t.skip('needs /bin/dash, the /bin/sh of Debian and Ubuntu');
