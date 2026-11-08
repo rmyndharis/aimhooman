@@ -136,7 +136,8 @@ function parseGitLine(cmd, initialCwd) {
             continue;
         }
         const unwrapped = unwrapCommand(words, shellCwd);
-        const toks = dashedGitInvocation(unwrapped.tokens) ?? unwrapped.tokens;
+        const commandTokens = passthroughTarget(unwrapped.tokens) ?? unwrapped.tokens;
+        const toks = dashedGitInvocation(commandTokens) ?? commandTokens;
         uncertainShell ||= unwrapped.uncertain;
         let commandPathDialectUncertain = shellPathDialectUncertain
             || unwrapped.pathDialectUncertain;
@@ -283,47 +284,6 @@ function parseGitLine(cmd, initialCwd) {
                     environmentRisk,
                     'git',
                 );
-                // A passthrough prefix (time, timeout, nice, ...) execs the inner
-                // command with the same argv in the same place, so it cannot
-                // inject a flag or hide a --no-verify the way eval/sudo/bash -c
-                // can. Re-parse the inner command from its `git` token so the
-                // commit is judged exactly as if the prefix were not there
-                // (--no-verify still denied, a clean commit still allowed). The
-                // carve-out only applies when nothing else injects risk;
-                // otherwise the wrapper falls back to the closed uncertain path.
-                const passthroughExecutable = PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(g0))
-                    && environmentRisk.length === 0
-                    && !targetEnvironmentRisk
-                    && !indirectTargetEnvironmentRisk
-                    && !commandTargetUncertain
-                    && !indirect.targetUncertain
-                    && !indirect.pathDialectUncertain
-                    && !commandPathDialectUncertain
-                    && !unwrapped.uncertain
-                    ? shellExecutable(g0)
-                    : null;
-                if (passthroughExecutable) {
-                    const gitIndex = toks.findIndex((token, index) => (
-                        index > 0 && isGitExecutable(token.replace(/^\(+/, '').replace(/\)+$/, ''))
-                    ));
-                    if (gitIndex > 0) {
-                        // The tokens have lost their quotes, so each is quoted
-                        // again: an apostrophe in a message must not open a
-                        // quote that swallows the rest of the line.
-                        const innerText = toks.slice(gitIndex)
-                            .map((token, index) => quoteShellWord(index === 0 ? token.replace(/^\(+/, '') : token))
-                            .join(' ');
-                        const inner = parseGit(innerText, unwrapped.cwd);
-                        commit ||= inner.commit;
-                        noVerify ||= inner.noVerify;
-                        bypassHooks ||= inner.bypassHooks;
-                        uncertainShell ||= inner.uncertainShell;
-                        addPaths.push(...inner.addPaths);
-                        commands.push(...inner.commands);
-                        sawAdd ||= inner.addPaths.length > 0;
-                        continue;
-                    }
-                }
                 commit = true;
                 uncertainShell = true;
                 commands.push({
@@ -947,10 +907,12 @@ const GIT_BRANCH_READONLY_FLAGS = new Set([
 
 export function gitCommandMayBypassRefGuard(verb, args = []) {
     if (verb !== 'push') return false;
-    return args.some((arg) => arg === '--receive-pack'
-        || arg === '--exec'
-        || arg.startsWith('--receive-pack=')
-        || arg.startsWith('--exec='));
+    // Git takes any unique prefix: --rece, --e.
+    return args.some((arg) => {
+        const name = arg.split('=', 1)[0];
+        return (name.length >= 6 && '--receive-pack'.startsWith(name))
+            || (name.length >= 3 && '--exec'.startsWith(name));
+    });
 }
 
 export function isProtectedMutation(candidate) {
@@ -1064,7 +1026,7 @@ function mayExpandToOption(word) {
 // (--no-veri), while -n is --dry-run. merge and pull also have
 // --no-verify-signatures, so only the full spelling counts for them. A word
 // the shell still expands may become any of these.
-function hookSkipOptions(verb, args) {
+export function hookSkipOptions(verb, args) {
     if (!['push', 'merge', 'pull'].includes(verb)) return { noVerify: false, uncertain: false };
     let noVerify = false;
     let uncertain = false;
@@ -2360,6 +2322,14 @@ const PASSTHROUGH_PREFIX_EXECUTORS = new Set([
     'time', 'timeout', 'nice', 'ionice', 'chrt', 'taskset', 'numactl',
     'stdbuf', 'setsid', 'nohup', 'prlimit', 'faketime',
 ]);
+
+// time, timeout, nice and the like run the command after them with the same
+// argv, so a Git command behind one is read where it stands.
+function passthroughTarget(tokens) {
+    if (!PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(tokens[0]))) return null;
+    const at = tokens.findIndex((token, index) => index > 0 && isGitExecutable(token));
+    return at > 0 ? tokens.slice(at) : null;
+}
 
 function indirectCommitInvocation(words, initialCwd) {
     if (!words.length) return false;

@@ -25,6 +25,7 @@ import {
     gitReadOnlyRefCommand,
     gitRunPayload,
     hasUnquotedPipe,
+    hookSkipOptions,
     inspectCommitOptions,
     isGuardedCandidate,
     isProtectedMutation,
@@ -913,9 +914,11 @@ function resolveAliasCandidate(candidate) {
                 bypassHooks: candidate.bypassHooks,
                 futureIndex: options.futureIndex,
                 editorRisk: options.editorRisk,
-                classification: candidate.bypassHooks || options.noVerify
-                    ? 'bypass'
-                    : options.futureIndex ? 'future-index' : 'direct',
+                classification: options.uncertain
+                    ? 'uncertain'
+                    : candidate.bypassHooks || options.noVerify
+                        ? 'bypass'
+                        : options.futureIndex ? 'future-index' : 'direct',
             };
         }
         if (verb === 'add') {
@@ -936,6 +939,8 @@ function resolveAliasCandidate(candidate) {
                 || GIT_REF_MUTATION_COMMANDS.has(verb)
                 || indexMutationRisk
                 || prefixMutationRisk) {
+                // An alias reaches push, merge and pull with the same options.
+                const skip = hookSkipOptions(verb, args);
                 return {
                     ...candidate,
                     verb,
@@ -944,8 +949,9 @@ function resolveAliasCandidate(candidate) {
                     aliasExpansion: alias,
                     indexMutationRisk,
                     prefixMutationRisk,
+                    noVerify: skip.noVerify,
                     bypassHooks,
-                    classification: 'non-commit',
+                    classification: skip.uncertain ? 'uncertain' : 'non-commit',
                 };
             }
             return null;

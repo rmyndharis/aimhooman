@@ -1658,6 +1658,33 @@ test('everyday pushes, merges and git-<name> tools are not taken for hook bypass
     }
 });
 
+test('hook-skipping options behind time, an alias or an abbreviation are still read', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-hidden-skip-${profile}-`);
+        try {
+            execFileSync('git', ['config', 'alias.p', 'push'], { cwd: dir });
+            execFileSync('git', ['config', 'alias.m', 'merge'], { cwd: dir });
+            const refused = [
+                'time git push --no-verify origin main',
+                'git p --no-verify origin main',
+                'git push --rece=/tmp/receive origin main',
+                "time git -c core.fsmonitor='rm -rf .git/hooks #' commit --allow-empty -m x",
+                ...(profile === 'strict' ? ['git m --no-verify feature'] : []),
+            ];
+            for (const command of refused) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of ['time git push origin main', 'git p origin main']) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
 test('inline and external Git commands cannot hide future index or hook mutation', async () => {
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-unproved-alias-${profile}-`);
