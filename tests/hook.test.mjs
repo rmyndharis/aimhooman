@@ -1631,6 +1631,33 @@ test('commands Git takes from options, config and the environment are read befor
     }
 });
 
+test('everyday pushes, merges and git-<name> tools are not taken for hook bypasses', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-everyday-${profile}-`);
+        try {
+            for (const command of [
+                'git merge --ff-only @{u}',
+                'git merge --no-ff -m "Merge feature {x}" feature',
+                'git push "https://x-access-token:${GITHUB_TOKEN}@github.com/o/r.git" HEAD:main',
+                'git push -o --no-verify origin main',
+                'git-lfs track "*.psd"',
+                'git --no-literal-pathspecs status',
+                'git commit -m x src/{a,b}.js',
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            const expanded = await invokePreToolUse(dir, {
+                tool_name: 'Bash',
+                tool_input: { command: 'git push origin {--no-verify,} main' },
+            });
+            assert.equal(expanded?.permissionDecision, 'deny', `${profile}: an expansion can still become --no-verify`);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
 test('inline and external Git commands cannot hide future index or hook mutation', async () => {
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-unproved-alias-${profile}-`);

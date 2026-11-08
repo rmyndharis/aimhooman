@@ -1029,7 +1029,7 @@ const GIT_GLOBAL_VALUE_OPTIONS = new Set(['--namespace', '--shallow-file', '--at
 const GIT_GLOBAL_OPTIONS = new Set([
     ...GIT_GLOBAL_VALUE_OPTIONS,
     '-p', '--paginate', '-P', '--no-pager', '--bare', '--no-replace-objects', '--no-lazy-fetch',
-    '--no-optional-locks', '--no-advice', '--literal-pathspecs', '--glob-pathspecs',
+    '--no-optional-locks', '--no-advice', '--literal-pathspecs', '--no-literal-pathspecs', '--glob-pathspecs',
     '--noglob-pathspecs', '--icase-pathspecs', '--exec-path', '--html-path', '--man-path',
     '--info-path', '--list-cmds', '-v', '--version', '-h', '--help',
 ]);
@@ -1038,12 +1038,25 @@ function quoteShellWord(word) {
     return `'${String(word).replace(/'/g, "'\\''")}'`;
 }
 
+const KNOWN_GIT_VERBS = new Set([
+    ...SAFE_NON_COMMIT_GIT, ...GIT_REF_MUTATION_COMMANDS, ...GIT_POLICY_TRANSITION_COMMANDS,
+]);
+
 // Git's dashed programs (libexec/git-core/git-commit) run the same command as
 // `git commit`, so they are read in that form.
 function dashedGitInvocation(tokens) {
-    const executable = String(tokens[0] || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
-    const match = /^git-([a-z][a-z0-9-]*?)(?:\.exe)?$/.exec(executable);
-    return match ? ['git', match[1], ...tokens.slice(1)] : null;
+    const path = String(tokens[0] || '').replace(/\\/g, '/');
+    const match = /^git-([a-z][a-z0-9-]*?)(?:\.exe)?$/.exec(path.split('/').at(-1).toLowerCase());
+    // git-lfs, git-cliff and other tools named git-<name> are not Git.
+    if (!match || !(/\/git-core\//i.test(path) || KNOWN_GIT_VERBS.has(match[1]))) return null;
+    return ['git', match[1], ...tokens.slice(1)];
+}
+
+// A word the shell still expands can become an option only where it can
+// start one: $X, {--no-verify,} or a dash with an expansion after it. @{u},
+// origin/$BRANCH and a URL holding ${TOKEN} cannot.
+function mayExpandToOption(word) {
+    return /^[-$`{]/.test(word) && /[$`{}]/.test(word);
 }
 
 // push, merge and pull take --no-verify; pull hands it to merge. A push skips
@@ -1055,17 +1068,31 @@ function hookSkipOptions(verb, args) {
     if (!['push', 'merge', 'pull'].includes(verb)) return { noVerify: false, uncertain: false };
     let noVerify = false;
     let uncertain = false;
-    for (const arg of args) {
+    for (let i = 0; i < args.length; i += 1) {
+        const arg = args[i];
         if (arg === '--') break;
+        // A message or a push option is a value, never one of the flags.
+        if (HOOK_SKIP_VALUE_OPTIONS.has(arg)) {
+            i += 1;
+            continue;
+        }
         if (arg === '--verify') noVerify = false;
         else if (arg === '--no-verify'
             || (verb === 'push' && arg.length >= '--no-veri'.length && '--no-verify'.startsWith(arg))) {
             noVerify = true;
         }
-        uncertain ||= /[$`{}]/.test(arg);
+        uncertain ||= mayExpandToOption(arg);
     }
+    // merge and pull skip only hooks that strict alone requires, so there an
+    // expansion counts as --no-verify, not as a ref update nothing can verify.
+    if (verb !== 'push' && uncertain) return { noVerify: true, uncertain: false };
     return { noVerify, uncertain };
 }
+
+const HOOK_SKIP_VALUE_OPTIONS = new Set([
+    '-m', '-F', '--file', '-o', '--push-option', '--repo', '--receive-pack', '--exec',
+    '-s', '--strategy', '-X', '--strategy-option', '--into-name',
+]);
 
 function isGitExecutable(value) {
     const executable = String(value || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
@@ -1248,7 +1275,7 @@ export function inspectCommitOptions(args) {
         }
         // A word the shell still expands ($'...', $VAR, {a,b}, a backtick) can
         // become an option such as --no-verify; read as a pathspec it hid one.
-        uncertain ||= /[$`{}]/.test(arg);
+        uncertain ||= mayExpandToOption(arg);
         futureIndex = true;
     }
     return { noVerify, futureIndex, editorRisk: editorOverride ?? !messageSource, uncertain };
