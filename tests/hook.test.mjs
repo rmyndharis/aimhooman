@@ -1689,6 +1689,55 @@ test('hook-skipping options behind time, an alias or an abbreviation are still r
     }
 });
 
+test('an escaped quote in an ANSI-C string does not hide the command after it', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-ansi-c-${profile}-`);
+        try {
+            for (const command of [
+                "echo $'\\''; git -c core.hooksPath=/dev/null commit --allow-empty -m x",
+                "echo $'\\''; git push --no-verify origin main",
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of ["git commit -m $'line one\\nline two'", "printf $'a\\tb\\n' && git status"]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test('a command in a case branch is read like any other', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-case-${profile}-`);
+        try {
+            for (const command of [
+                'case x in x) git push --no-verify origin main;; esac',
+                'case x in x) git -c core.hooksPath=/dev/null commit --allow-empty -m x;; esac',
+                'case "$1" in a) git status;; b) git push --no-verify origin main;; esac',
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+    const clean = makeHookRepo('clean', 'aim-hook-case-read-');
+    try {
+        const decision = await invokePreToolUse(clean, {
+            tool_name: 'Bash',
+            tool_input: { command: 'case x in x) git status;; esac' },
+        });
+        assert.notEqual(decision?.permissionDecision, 'deny');
+    } finally {
+        rmSync(clean, { recursive: true, force: true });
+    }
+});
+
 test('inline and external Git commands cannot hide future index or hook mutation', async () => {
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-unproved-alias-${profile}-`);
