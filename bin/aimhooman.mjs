@@ -33,6 +33,7 @@ import {
     openRepo,
     readCommitPath,
     readStagedPath,
+    refObjectId,
     stagedTreeSha,
     withIndexFromTree,
 } from '../src/gitx.mjs';
@@ -668,9 +669,23 @@ function cmdRefcheck(args) {
         return 30;
     }
 
+    // A forced update (`switch -C`, `branch -f`, update-ref with no old value)
+    // arrives with the same zero old value as a creation. At prepared the
+    // branch still holds what it held, so read it: only a branch that does not
+    // exist yet is new.
+    for (const update of updates) {
+        if (update.ref === 'HEAD' || !/^0+$/.test(update.oldObjectId)) continue;
+        try {
+            update.oldObjectId = refObjectId(repo, update.ref) ?? update.oldObjectId;
+        } catch (error) {
+            console.error(`aimhooman: cannot read ${update.ref}: ${error.message}`);
+            return 30;
+        }
+    }
+
     let commits;
     try {
-        commits = resolveIntroduced(repo, updates, { firstBranchTipOnly: true });
+        commits = resolveIntroduced(repo, updates, { firstBranchFromRemotes: true });
     }
     catch (error) {
         console.error(`aimhooman: cannot resolve proposed commits: ${error.message}`);
