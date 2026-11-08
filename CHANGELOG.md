@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused.
 - The agent guard refuses `git push --rece=` and `--ex=`, which Git takes as
   `--receive-pack` and `--exec`.
+- The agent guard reads a `$'...'` string the way the shell does, so an
+  escaped quote inside one (`$'\''`) no longer hides the command after it.
 
 ### Fixed
 

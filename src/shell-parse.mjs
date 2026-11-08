@@ -66,7 +66,50 @@ function payloadUnreadable(text) {
     return SOURCED_COMMAND.test(text) || hasUncertainShellSyntax(text, { payload: true });
 }
 
-function parseGitLine(cmd, initialCwd) {
+// $'...' reads backslash escapes, so \' does not end it, while every scanner
+// in this module ends a single quote at the next '. Rewriting each $'...' as
+// a $"..." with the same boundaries keeps a command after $'\'' in sight.
+// An unterminated $' is left alone; the leading $ keeps the word dynamic.
+export function normalizeAnsiCQuotes(command) {
+    const text = String(command ?? '');
+    if (!text.includes("$'")) return text;
+    let out = '';
+    let quote = '';
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quote) {
+            out += char;
+            if (quote === '"' && char === '\\' && i + 1 < text.length) out += text[++i];
+            else if (char === quote) quote = '';
+            continue;
+        }
+        if (char === '\\' && i + 1 < text.length) {
+            out += char + text[++i];
+            continue;
+        }
+        if (char === '$' && text[i + 1] === "'") {
+            let body = '';
+            let end = i + 2;
+            for (; end < text.length && text[end] !== "'"; end += 1) {
+                if (text[end] === '\\' && end + 1 < text.length) {
+                    const escaped = text[++end];
+                    body += escaped === "'" || escaped === '\\' ? escaped : `\\${escaped}`;
+                } else body += text[end];
+            }
+            if (end < text.length) {
+                out += `$"${body.replace(/[\\"$`]/g, '\\$&')}"`;
+                i = end;
+                continue;
+            }
+        }
+        if (char === "'" || char === '"') quote = char;
+        out += char;
+    }
+    return out;
+}
+
+function parseGitLine(command, initialCwd) {
+    const cmd = normalizeAnsiCQuotes(command);
     let commit = false;
     let noVerify = false;
     let bypassHooks = false;

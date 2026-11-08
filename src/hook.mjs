@@ -29,6 +29,7 @@ import {
     inspectCommitOptions,
     isGuardedCandidate,
     isProtectedMutation,
+    normalizeAnsiCQuotes,
     parseGit,
     shellExecutable,
     shellUnits,
@@ -155,8 +156,11 @@ export function hookSessionStart() {
 function hookPreToolUse(input) {
     const executor = classifyExecutor(toolName(input));
     if (!executor) return 0;
-    const executorCommand = command(input, executor);
-    if (executorCommand === null) return unknownExecutorShape(input, executor.name);
+    const rawCommand = command(input, executor);
+    if (rawCommand === null) return unknownExecutorShape(input, executor.name);
+    // A POSIX shell reads $'...' with escapes; every check below sees the line
+    // with the same quote boundaries the shell does.
+    const executorCommand = nonPosixExecutor(executor.name) ? rawCommand : normalizeAnsiCQuotes(rawCommand);
     const rawParsed = parseGit(executorCommand);
     if (nonPosixExecutor(executor.name)) {
         rawParsed.uncertainShell = true;
