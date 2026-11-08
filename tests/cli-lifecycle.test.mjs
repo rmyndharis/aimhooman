@@ -1581,6 +1581,46 @@ test('--purge-state removes a message backup left in a linked worktree', () => {
     }
 });
 
+test('a forced move or a recreation of the only branch scans every commit it brings', () => {
+    // Git hands reference-transaction a zero old value for a forced update as
+    // well as for a creation. The two commits are minted without hooks: the
+    // first adds an artifact, the second only a note.
+    const repo = createRepo('clean');
+    try {
+        const branch = git(repo, ['symbolic-ref', '--short', 'HEAD']);
+        const base = git(repo, ['rev-parse', 'HEAD']);
+        const index = join(repo.home, 'plumbing-index');
+        const plumb = (args) => execFileSync('git', args, {
+            cwd: repo.root,
+            env: { ...repo.env, GIT_INDEX_FILE: index },
+            encoding: 'utf8',
+        }).trim();
+        writeFileSync(join(repo.home, 'blob.json'), '{}\n');
+        const blob = git(repo, ['hash-object', '-w', join(repo.home, 'blob.json')]);
+        plumb(['read-tree', base]);
+        plumb(['update-index', '--add', '--cacheinfo', `100644,${blob},.claude/settings.local.json`]);
+        const artifact = git(repo, ['commit-tree', plumb(['write-tree']), '-p', base, '-m', 'Add settings']);
+        plumb(['update-index', '--add', '--cacheinfo', `100644,${blob},notes.txt`]);
+        const tip = git(repo, ['commit-tree', plumb(['write-tree']), '-p', artifact, '-m', 'Add notes']);
+
+        const moved = spawnSync('git', ['update-ref', `refs/heads/${branch}`, tip], {
+            cwd: repo.root, env: repo.env, encoding: 'utf8',
+        });
+        assert.notEqual(moved.status, 0, 'a forced move of the only branch must scan its commits');
+        assert.match(moved.stderr, /claude\.local-settings/);
+        assert.equal(git(repo, ['rev-parse', branch]), base);
+
+        git(repo, ['update-ref', '-d', `refs/heads/${branch}`]);
+        const recreated = spawnSync('git', ['update-ref', `refs/heads/${branch}`, tip], {
+            cwd: repo.root, env: repo.env, encoding: 'utf8',
+        });
+        assert.notEqual(recreated.status, 0, 'recreating the only branch must still scan its commits');
+        assert.match(recreated.stderr, /claude\.local-settings/);
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('a Claude Code worktree staged as a gitlink is kept out of the commit', () => {
     // `claude --worktree` checks out under .claude/worktrees/<name>/; a forced
     // add records it in the parent as a gitlink (mode 160000).

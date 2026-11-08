@@ -504,11 +504,12 @@ function gatedTips(repo, reviewing) {
 // ordinary updates scan exactly old..new. Ordinary updates do not subtract the
 // other branch tips: a branch made before the guard, or with its hooks
 // switched off, never passed it, and trusting it would wave its commits into
-// a guarded branch. firstBranchTipOnly (refcheck) covers the one creation with
-// no other branch to measure against, a clone or a first pull: it checks the
-// tip's own change instead of every commit ever made. A push still scans all
-// of them, because pushcheck does not pass it.
-export function introducedCommits(repo, updates, { firstBranchTipOnly = false } = {}) {
+// a guarded branch. A creation with no other branch to measure against, a
+// clone or a first pull, is measured against the remote-tracking refs when
+// refcheck passes firstBranchFromRemotes: the fetch that wrote them ran first,
+// so it scans what no remote holds instead of every commit ever made, while
+// commits made here are still scanned. pushcheck does not pass it.
+export function introducedCommits(repo, updates, { firstBranchFromRemotes = false } = {}) {
     const commits = [];
     const seen = new Set();
     const reviewing = new Set(updates.map((update) => update?.ref).filter(Boolean));
@@ -518,9 +519,9 @@ export function introducedCommits(repo, updates, { firstBranchTipOnly = false } 
         const newObjectId = update?.newObjectId;
         assertOid(oldObjectId);
         assertOid(newObjectId);
-        const creation = firstBranchTipOnly && !gated.length
-            ? ['-n', '1', newObjectId]
-            : [newObjectId, ...(gated.length ? ['--not', ...gated] : [])];
+        const creation = gated.length
+            ? [newObjectId, '--not', ...gated]
+            : [newObjectId, ...(firstBranchFromRemotes ? ['--not', '--remotes'] : [])];
         let raw;
         try {
             raw = gitBuf(['rev-list', '--reverse', ...(/^0+$/.test(oldObjectId)
@@ -560,6 +561,18 @@ function objectExists(repo, oid) {
         return true;
     } catch (error) {
         return typeof error?.status !== 'number';
+    }
+}
+
+// refObjectId returns the object a ref holds, or null when the ref does not
+// exist. Any other failure throws, so callers stay closed.
+export function refObjectId(repo, ref) {
+    try {
+        return gitBuf(['rev-parse', '--verify', '--quiet', '--end-of-options', ref], repo.root)
+            .toString('utf8').trim();
+    } catch (error) {
+        if (error?.status === 1) return null;
+        throw error;
     }
 }
 

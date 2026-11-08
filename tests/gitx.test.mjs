@@ -585,7 +585,7 @@ test('a branch update that is already visible cannot exclude itself from its own
     }
 });
 
-test('an ordinary update scans commits another local branch carries, tip-only option or not', () => {
+test('an ordinary update scans commits another local branch carries, remote option or not', () => {
     // A local branch made before the guard, or with its hooks off, never passed
     // it. Its commits are scanned when they reach a guarded branch.
     const dir = freshRepo();
@@ -597,27 +597,30 @@ test('an ordinary update scans commits another local branch carries, tip-only op
         git(dir, ['update-ref', 'refs/heads/side', unguarded]);
         const update = { oldObjectId: base, newObjectId: unguarded, ref: `refs/heads/${branch}` };
 
-        assert.deepEqual(introducedCommits(openRepo(dir), [update], { firstBranchTipOnly: true }), [unguarded]);
+        assert.deepEqual(introducedCommits(openRepo(dir), [update], { firstBranchFromRemotes: true }), [unguarded]);
         assert.deepEqual(introducedCommits(openRepo(dir), [update]), [unguarded]);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
 });
 
-test('with firstBranchTipOnly and no other local branch, a new ref scans only its tip', () => {
-    // A clone or a first pull creates the only branch there is; measuring it
-    // against nothing scanned its whole history, one commit scan per commit.
+test('with no other local branch, a new ref skips only what a remote-tracking ref holds', () => {
+    // A clone or a first pull creates the only branch there is, after the fetch
+    // wrote the remote-tracking refs. Measuring it against nothing scanned its
+    // whole history; commits no remote holds are still scanned.
     const dir = freshRepo();
     try {
         const branch = git(dir, ['symbolic-ref', '--short', 'HEAD']);
         const base = git(dir, ['rev-parse', 'HEAD']);
         const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
-        const middle = git(dir, ['commit-tree', tree, '-p', base, '-m', 'middle']);
-        const tip = git(dir, ['commit-tree', tree, '-p', middle, '-m', 'tip']);
-        const update = { oldObjectId: ZERO, newObjectId: tip, ref: `refs/heads/${branch}` };
+        const fetched = git(dir, ['commit-tree', tree, '-p', base, '-m', 'fetched']);
+        const local = git(dir, ['commit-tree', tree, '-p', fetched, '-m', 'made here']);
+        git(dir, ['update-ref', 'refs/remotes/origin/main', fetched]);
+        git(dir, ['update-ref', '-d', `refs/heads/${branch}`]);
+        const update = { oldObjectId: ZERO, newObjectId: local, ref: `refs/heads/${branch}` };
 
-        assert.deepEqual(introducedCommits(openRepo(dir), [update], { firstBranchTipOnly: true }), [tip]);
-        assert.deepEqual(introducedCommits(openRepo(dir), [update]), [base, middle, tip]);
+        assert.deepEqual(introducedCommits(openRepo(dir), [update], { firstBranchFromRemotes: true }), [local]);
+        assert.deepEqual(introducedCommits(openRepo(dir), [update]), [base, fetched, local]);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

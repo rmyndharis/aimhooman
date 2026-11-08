@@ -178,7 +178,7 @@ export function repairStagedBlocks(repo, blocks, paths) {
 // includeStagedContexts carries a staged review into the direct tip's scan;
 // pushcheck leaves it off because a pushed commit is judged as an object, not
 // against the live index it may never have passed through.
-export function resolveIntroduced(repo, updates, { includeStagedContexts = true, firstBranchTipOnly = false } = {}) {
+export function resolveIntroduced(repo, updates, { includeStagedContexts = true, firstBranchFromRemotes = false } = {}) {
     const contextsByCommit = new Map();
     // A commit's message belongs to whoever wrote it. Attribution and marker
     // rules police the text a local developer can edit, so they are scoped
@@ -190,7 +190,7 @@ export function resolveIntroduced(repo, updates, { includeStagedContexts = true,
     // change, and scanning it only blocks the review.
     const localAuthorTips = new Set();
     for (const update of updates) {
-        const introduced = introducedCommits(repo, [update], { firstBranchTipOnly });
+        const introduced = introducedCommits(repo, [update], { firstBranchFromRemotes });
         if (!/^0+$/.test(update.oldObjectId)
             && introduced.length === 1
             && introduced[0] === update.newObjectId) {
