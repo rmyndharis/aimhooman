@@ -204,14 +204,20 @@ function hookPreToolUse(input) {
     }
     // A setting already in a config file can hand Git a command that commits,
     // moves refs or repoints the hooks behind an ordinary call such as git log,
-    // whatever spells that call (g''it log) or runs Git for it (npm version).
-    const configuredKey = configuredGitRisk(configListing(), process.cwd());
-    if (configuredKey) {
-        return emitDecision(
-            'deny',
-            `aimhooman cannot verify the command Git config ${configuredKey} runs: it commits, moves refs or changes the hooks path. `
-            + 'Remove or change that setting and retry.',
-        );
+    // whatever spells that call (g''it log, $G log). A line that shows no Git
+    // call is left alone, and so is git config, the way to fix the setting.
+    const unquoted = executorCommand.replace(/['"\\]/g, '');
+    if (/(?<![.\w-])git(?!\w)/i.test(unquoted) || /(?:^|[;&|(\n])[^\S\n]*[$`]/.test(unquoted)) {
+        const key = configuredGitRisk(configListing(), process.cwd());
+        const repairs = key !== 'pager.config'
+            && shellUnits(executorCommand).every((unit) => /^\s*git\s+config\b/.test(unit.text));
+        if (key && !repairs) {
+            return emitDecision(
+                'deny',
+                `aimhooman cannot verify the command Git config ${key} runs: it commits, moves refs or changes the hooks path. `
+                + `Remove or change that setting (git config --unset ${key}) and retry.`,
+            );
+        }
     }
     const parsed = resolveGitAliases(rawParsed);
     const { commit, noVerify, addPaths } = parsed;

@@ -24,9 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent guard reads a credential helper written as a shell function
   (`!f() { ...; }; f`) through the commands in its body, so a helper that
   pushes is refused and one that prints a token is not.
-- The agent guard refuses a command while a config file, an included one too,
-  sets a command that commits, moves refs or changes the hooks path, such as a
-  `core.pager` that runs `git commit --no-verify`.
+- The agent guard refuses a line that can run Git while a config file, an
+  included one too, sets a command that commits, moves refs or changes the
+  hooks path, such as a `core.pager` that runs `git commit --no-verify`.
+  `git config` stays allowed, to fix the setting.
 - The agent guard refuses a commit after a command that names `.git/config`,
   which can repoint the hooks.
 - The agent guard refuses a commit after `echo` or `printf` writes into the
@@ -63,8 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `refs/heads`. Run `aimhooman init` to update installed hooks.
 - The agent guard refuses a command word the shell can expand into Git:
   `git${IFS}push`, `/usr/bin/gi? push`, `{git,push}`, zsh's `=git`, a variable
-  the same line sets, a positional parameter, or `$G` before arguments that
-  skip the hooks, such as `push --no-verify`.
+  the same line sets to anything but a plain value, a positional parameter, or
+  `$G` before arguments that skip the hooks, such as `push --no-verify`. A
+  plain value is read as the command it names.
 - A glob that can match a file named like an option, such as `--no-ver*` or
   `-*`, counts as a possible `--no-verify`.
 - The agent guard refuses a line where `printf -v` sets a variable Git runs or
