@@ -1314,8 +1314,11 @@ function expandedWordMayRunGit(tokens, setNames, cwd) {
         if (setNames().has(name)) return true;
     }
     if (tokens.length === 1) return true;
-    if (tokens.slice(1).some((token) => /no-verify|hookspath|config-env/i.test(token))) return true;
-    const asGit = parseGit(['git', ...tokens.slice(1)].map(quoteShellWord).join(' '), cwd);
+    // Without an option, or a word that can become one, nothing skips a hook.
+    const args = tokens.slice(1);
+    if (!args.some((token) => token.startsWith('-') || mayExpandToOption(token))) return false;
+    if (args.some((token) => /no-verify|hookspath|config-env/i.test(token))) return true;
+    const asGit = parseGit(['git', ...args].map(quoteShellWord).join(' '), cwd);
     return asGit.noVerify || asGit.bypassHooks || asGit.commands.some((candidate) => (
         candidate.noVerify || candidate.bypassHooks || candidate.hooksPathOverride
     ));

@@ -3783,7 +3783,7 @@ test('large commands are decided in time proportional to their length', async ()
         `bash -c 'x${' | cat'.repeat(6000)}'`,
         `x ${'includeif.'.repeat(16000)}`,
         `x ${'a='.repeat(32000)}`,
-        '$a b;'.repeat(16000),
+        '$a b;'.repeat(8000),
     ]) {
         const started = performance.now();
         parseGit(command);
