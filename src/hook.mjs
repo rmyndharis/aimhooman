@@ -871,9 +871,10 @@ function scriptThatBypasses(commands) {
 }
 
 // Why an agent may not run this aimhooman command, or null. init may keep the
-// profile or raise it to strict. A script that sets the profile from a variable
-// is not judged: what it holds is not in the file.
+// profile or raise it to strict. A script that sets the profile or the
+// subcommand from a variable is not judged: what it holds is not in the file.
 function adminRefusal(admin, inScript) {
+    if (inScript && admin.dynamic) return null;
     if (admin.subcommand !== 'init') {
         return `aimhooman ${admin.subcommand} changes what this guard enforces; ask the user to run it.`;
     }
@@ -892,20 +893,25 @@ function scriptTexts(script) {
             return null;
         }
     };
+    // What the same line wrote to the file before it runs it, as echo > r.sh && sh r.sh.
+    const inline = Array.isArray(script.inline) ? script.inline : [];
     if (script.kind === 'package') {
-        let scripts;
-        try {
-            scripts = JSON.parse(read('package.json') ?? '{}').scripts ?? {};
-        } catch {
-            return [];
-        }
-        return [`pre${script.name}`, script.name, `post${script.name}`]
-            .map((key) => scripts[key])
-            .filter((value) => typeof value === 'string');
+        const packages = [read('package.json') ?? '{}', ...inline];
+        return packages.flatMap((text) => {
+            let scripts;
+            try {
+                scripts = JSON.parse(text).scripts ?? {};
+            } catch {
+                return [];
+            }
+            return [`pre${script.name}`, script.name, `post${script.name}`]
+                .map((key) => scripts[key])
+                .filter((value) => typeof value === 'string');
+        });
     }
     // A file run by its path is shell text when its #! names a shell or it has none.
-    return script.paths.map(read).filter((text) => text !== null && (!script.shebang || !text.startsWith('#!')
-        || /^#!\s*(?:\S*\/)?(?:env\s+(?:-\S+\s+)*)?(?:ash|bash|dash|ksh|mksh|sh|zsh)\b/.test(text)));
+    return [...inline, ...script.paths.map(read).filter((text) => text !== null && (!script.shebang || !text.startsWith('#!')
+        || /^#!\s*(?:\S*\/)?(?:env\s+(?:-\S+\s+)*)?(?:ash|bash|dash|ksh|mksh|sh|zsh)\b/.test(text)))];
 }
 
 // The profile aimhooman enforces where it is installed at cwd, or null where it

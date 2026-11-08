@@ -11,10 +11,34 @@ import { basename, dirname, isAbsolute, posix, resolve } from 'node:path';
 // refused rather than read, before deep nesting exhausts the stack.
 const MAX_PARSE_DEPTH = 16;
 let parseDepth = 0;
+// The text echo, printf and tee write into files, shared by every parse of one
+// line: a script written in the line is run by a unit, a substitution, a nested
+// shell or a wrapper that parses on its own.
+let writtenInLine = null;
 
 // parseGit inspects a shell command line for staged-path, commit, policy-transition,
 // and branch/reference operations that need an agent-side guard decision.
 export function parseGit(cmd, initialCwd = process.cwd(), { posix = true } = {}) {
+    const outermost = writtenInLine === null;
+    if (outermost) writtenInLine = new Map();
+    try {
+        const parsed = parseGitNested(cmd, initialCwd, posix);
+        // A script's text is known once the whole line has been read, whatever
+        // came first: the file, or the unit that writes it.
+        if (outermost && writtenInLine.size) {
+            for (const [index, candidate] of parsed.commands.entries()) {
+                if (candidate.verb === 'script') {
+                    parsed.commands[index] = { ...candidate, inline: inlineScriptTexts(candidate, writtenInLine, candidate.cwd) };
+                }
+            }
+        }
+        return parsed;
+    } finally {
+        if (outermost) writtenInLine = null;
+    }
+}
+
+function parseGitNested(cmd, initialCwd, posix) {
     if (parseDepth >= MAX_PARSE_DEPTH) {
         return {
             commit: false,
@@ -282,6 +306,11 @@ function parseGitLine(command, initialCwd, posix = true) {
     let unreadable = payloadUnreadable(cmd);
     let setNames;
     let assignedHooks;
+    // Whether a unit reads its own input as code (a bare sh, python -), for the
+    // >( ) that holds one; and the text echo and printf units write to files.
+    let stdinCode = false;
+    const writtenFiles = writtenInLine;
+    let echoedBefore = null;
     // A command before Git can take the hooks away when its words name them,
     // when it runs inside .git (cd .git && rm -rf hooks), or when it expands a
     // word and the line assigns a value that names them (H=.git/hooks; rm -rf $H).
@@ -323,7 +352,7 @@ function parseGitLine(command, initialCwd, posix = true) {
     // against the rest of the line: a substitution that reads (git branch
     // --show-current) or runs Git with its hooks is no reason to refuse. One
     // that cannot be read to its end is unreadable.
-    for (const { inner } of substitutions) {
+    for (const { inner, kind } of substitutions) {
         if (inner === null) {
             if (posix) {
                 markUncertain();
@@ -333,6 +362,13 @@ function parseGitLine(command, initialCwd, posix = true) {
         }
         const ran = parseGit(dropDataHeredocs(inner), initialCwd);
         mergeGitRun({ ...ran, unreadable: false, commands: ran.commands.filter(runsBeyondTheLine) }, initialCwd);
+        // tee >(sh) writes text into a shell: the substitution that was read is
+        // the program that runs it.
+        if (kind === 'process' && ran.stdinCode) markUncertain();
+    }
+    if (posix && heredocBodyLeaksQuote(cmd)) {
+        markUncertain();
+        commands.push(unreadableCommand(initialCwd));
     }
     for (const unit of shellUnits(cmd)) {
         const precedingOperator = previousOperator;
@@ -382,7 +418,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         if (mayChangeAimhoomanState(toks, unit.text, unwrapped.cwd)) {
             commands.push({ verb: 'aimhooman-state', cwd: unwrapped.cwd });
         }
-        const admin = aimhoomanInvocation(toks);
+        const admin = aimhoomanInvocation(toks) ?? expandedAimhoomanInvocation(toks, () => (setNames ??= namesSetIn(cmd)));
         if (admin) commands.push({ verb: 'aimhooman', ...admin, cwd: unwrapped.cwd });
         let commandPathDialectUncertain = shellPathDialectUncertain
             || unwrapped.pathDialectUncertain;
@@ -518,6 +554,19 @@ function parseGitLine(command, initialCwd, posix = true) {
             }
         }
         if (SHELL_CONTROL_DECLARATIONS.has(toks[0])) continue;
+        // A shell or interpreter that takes its code from a file made by a process
+        // substitution, bash <(...), or reads it from its own input, runs text this
+        // parser cannot see.
+        if (isCodeReader(shellExecutable(toks[0]))
+            && toks.slice(1).some((word) => /^[<>]\(/.test(word))) markUncertain();
+        if (readsStdinAsCode(toks)) stdinCode = true;
+        // echo 'git push --no-verify' > r.sh writes a script that a later unit may
+        // run: the file is not there yet for the guard to read, but its text is here.
+        const written = writtenScript(toks, unit.text, unwrapped.cwd, precedingOperator === '|' ? echoedBefore : null);
+        if (written) {
+            for (const path of written.paths) writtenFiles.set(path, `${writtenFiles.get(path) ?? ''}\n${written.text}`);
+        }
+        echoedBefore = printedText(toks);
         const dynamicName = commandWordExpands(toks[0] ?? '');
         if (toks.length < 2 && !dynamicName) {
             // ./leak.sh or a bare make runs a file of its own.
@@ -578,12 +627,27 @@ function parseGitLine(command, initialCwd, posix = true) {
                 // may change. Only a skipped hook counts: Git run with its hooks
                 // is no reason to refuse, nor is a loop the wrapper's shell
                 // runs, or grep -l "git push" under find.
-                const rest = toks.slice(1);
+                const args = toks.slice(1);
                 const wholeLine = ['parallel', 'watch'].includes(shellExecutable(g0));
-                const texts = rest.filter((word, index) => /\s/.test(word)
-                    && (wholeLine || rest[index - 1] === '-c' || rest[index - 1] === '--command'));
+                const texts = args.filter((word, index) => /\s/.test(word)
+                    && (wholeLine || args[index - 1] === '-c' || args[index - 1] === '--command'));
+                // parallel gives its command the inputs after :::.
+                const rest = shellExecutable(g0) === 'parallel' ? args.filter((word) => !/^::::?\+?$/.test(word)) : args;
                 const at = rest.findIndex((word) => isGitExecutable(word) || WRAPPED_SHELLS.has(shellExecutable(word)));
                 if (at >= 0) texts.unshift(rest.slice(at).map(quoteShellWord).join(' '));
+                // aimhooman among the words is a command of its own, up to the
+                // next one: find -exec aimhooman allow x \;. Its subcommand is the
+                // next word, so gh --repo owner/aimhooman --label review is not
+                // one, and printed or searched for (xargs echo aimhooman allow) it
+                // is only text.
+                const adminAt = rest.flatMap((word, index) => (
+                    namesAimhooman(word) && !NON_EXECUTING_COMMANDS.has(shellExecutable(rest[index - 1])) ? [index] : []
+                ));
+                adminAt.forEach((from, next) => {
+                    const admin = aimhoomanInvocation(rest.slice(from, adminAt[next + 1]), { adjacent: true });
+                    if (admin) commands.push({ verb: 'aimhooman', ...admin, cwd: unwrapped.cwd });
+                });
+                for (const command of wrappedCommands(shellExecutable(g0), args)) texts.push(command.map(quoteShellWord).join(' '));
                 const program = interpreterCode(toks);
                 if (program && (SHELL_CODE_PROGRAMS.has(shellExecutable(g0)) || CODE_RUNS_COMMANDS.test(program.code))) {
                     texts.push(...embeddedGitTexts([program.code, ...program.rest].join(' ')));
@@ -595,7 +659,7 @@ function parseGitLine(command, initialCwd, posix = true) {
                     mergeGitRun({
                         ...ran,
                         unreadable: false,
-                        commands: ran.commands.filter(skipsGitHooks),
+                        commands: ran.commands.filter((candidate) => (skipsGitHooks(candidate) || NOTE_VERBS.has(candidate.verb)) && !candidate.dynamic),
                     }, unwrapped.cwd);
                 }
             } else if (dynamicName && expandedWordMayRunGit(toks, () => (setNames ??= namesSetIn(cmd)), unwrapped.cwd)) {
@@ -911,7 +975,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         // git submodule foreach git pull runs with each submodule's own hooks.
         if (ran) {
             mergeGitRun(verb === 'submodule'
-                ? { ...ran, commands: ran.commands.filter((candidate) => candidate.verb === 'commit' || skipsGitHooks(candidate)) }
+                ? { ...ran, commands: ran.commands.filter((candidate) => candidate.verb === 'commit' || skipsGitHooks(candidate) || NOTE_VERBS.has(candidate.verb)) }
                 : ran, cwd);
         }
     }
@@ -964,6 +1028,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         uncertainShell,
         opaqueCommitHiding,
         opaqueSink: opaqueCommitHiding && (opaqueSink || (redirectOnly && (prefixHooksRisk || prefixIndexMutationRisk))),
+        stdinCode,
         classification,
         environmentRisk: unique(commands.flatMap((candidate) => candidate.environmentRisk || [])),
         prefixRisk,
@@ -1173,22 +1238,25 @@ function substitutionSpans(text, backticks = true) {
             let end = i + 1;
             while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1;
             if (end >= text.length) {
-                spans.push({ start: i, end: text.length, inner: null });
+                spans.push({ start: i, end: text.length, inner: null, kind: 'command' });
                 break;
             }
-            spans.push({ start: i, end: end + 1, inner: text.slice(i + 1, end) });
+            spans.push({ start: i, end: end + 1, inner: text.slice(i + 1, end), kind: 'command' });
             i = end;
             continue;
         }
         const opens = text[i + 1] === '(' && text[i + 2] !== '('
             && (char === '$' || (!quote && (char === '<' || char === '>')));
         if (!opens) continue;
+        // $( ) and backticks hand their output to the line as text; <( ) and >( )
+        // hand a file, or a pipe into a program.
+        const kind = char === '$' ? 'command' : 'process';
         const close = closingParen(text, i + 2);
         if (close < 0) {
-            spans.push({ start: i, end: text.length, inner: null });
+            spans.push({ start: i, end: text.length, inner: null, kind });
             break;
         }
-        spans.push({ start: i, end: close + 1, inner: text.slice(i + 2, close) });
+        spans.push({ start: i, end: close + 1, inner: text.slice(i + 2, close), kind });
         i = close;
     }
     return spans;
@@ -1249,6 +1317,67 @@ function dataReaderLine(line) {
     // cat <<EOF | fold -w 72: the body may pass through a pipe of text filters.
     const [reader, ...sinks] = rest.split('|').map((segment) => shellExecutable(shellWords(segment.trim())[0] ?? ''));
     return HEREDOC_DATA_READERS.has(reader) && sinks.every((sink) => SAFE_PIPE_EXECUTABLES.has(sink));
+}
+
+// Whether a heredoc body that stands in the line itself, not inside a
+// substitution, leaves a quote open. The body is not shell text, but the
+// splitters here read it as such, so "echo it's" in it would turn everything
+// after the terminator into one quoted word and the command there would never be
+// seen. The shell reads the same lines as data; this parser cannot, so a body
+// that would leak a quote is refused.
+function heredocBodyLeaksQuote(text) {
+    if (!text.includes('<<')) return false;
+    const pending = [];
+    let quote = '';
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quote) {
+            if (char === '\\' && quote === '"') i += 1;
+            else if (char === quote) quote = '';
+            continue;
+        }
+        if (char === '\\') {
+            i += 1;
+        } else if (char === "'" || char === '"') {
+            quote = char;
+        } else if (char === '<' && text[i + 1] === '<') {
+            const operator = heredocOperator(text, i);
+            if (operator) {
+                if (!operator.hereString) pending.push(operator);
+                i = operator.end - 1;
+            }
+        } else if (char === '\n' && pending.length) {
+            let at = i + 1;
+            for (const operator of pending.splice(0)) {
+                const body = heredocBody(text, at, operator);
+                if (endsInsideQuote(text.slice(at, body.end))) return true;
+                at = body.after;
+            }
+            i = at - 1;
+        } else if ((char === '$' || char === '<' || char === '>') && text[i + 1] === '(' && text[i + 2] !== '(') {
+            // A substitution is parsed on its own, with its heredocs.
+            const close = closingParen(text, i + 2);
+            if (close < 0) return false;
+            i = close;
+        }
+    }
+    return false;
+}
+
+function endsInsideQuote(text) {
+    let quote = '';
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quote) {
+            if (char === '\\' && quote === '"') i += 1;
+            else if (char === quote) quote = '';
+        } else if (char === '\\') {
+            i += 1;
+        } else if (char === "'" || char === '"') {
+            quote = char;
+        }
+    }
+    return quote !== '';
 }
 
 function dropDataHeredocs(text) {
@@ -1589,27 +1718,42 @@ function redirectTargets(text, limit = Infinity) {
 // that says "run aimhooman allow", is not one.
 const AIMHOOMAN_LAUNCHERS = new Set(['bun', 'bunx', 'deno', 'node', 'nodejs', 'npm', 'npx', 'pnpm', 'pnpx', 'yarn']);
 
-function aimhoomanInvocation(tokens) {
-    const named = (word) => /^aimhooman(?:@\S*)?(?:\.[cm]?js)?$/i.test(String(word ?? '').replace(/\\/g, '/').split('/').at(-1));
+function namesAimhooman(word) {
+    return /^aimhooman(?:@\S*)?(?:\.[cm]?js)?$/i.test(String(word ?? '').replace(/\\/g, '/').split('/').at(-1));
+}
+
+// With adjacent, the subcommand is the word right after the name: the words of a
+// program that merely has aimhooman among its arguments follow it.
+function aimhoomanInvocation(tokens, { adjacent = false } = {}) {
     let at = 0;
-    if (!named(tokens[0])) {
+    if (!namesAimhooman(tokens[0])) {
         if (!AIMHOOMAN_LAUNCHERS.has(shellExecutable(tokens[0]))) return null;
         at = 1;
-        while (at < tokens.length && (tokens[at].startsWith('-') || ['dlx', 'exec', 'x'].includes(tokens[at]))) at += 1;
-        if (!named(tokens[at])) return null;
+        while (at < tokens.length && (tokens[at].startsWith('-') || ['dlx', 'exec', 'run', 'x'].includes(tokens[at]))) at += 1;
+        if (!namesAimhooman(tokens[at])) return null;
     }
-    let args = tokens.slice(at + 1);
-    while (named(args[0])) args = args.slice(1);
-    const subcommand = args.find((arg) => !arg.startsWith('-')) ?? '';
+    let first = at + 1;
+    while (namesAimhooman(tokens[first])) first += 1;
+    const args = tokens.slice(first);
+    const subcommand = (adjacent ? args[0] : args.find((arg) => !arg.startsWith('-'))) ?? '';
     const option = args.findIndex((arg) => arg === '--profile' || arg.startsWith('--profile='));
     const profile = option < 0 ? null
         : args[option].startsWith('--profile=') ? args[option].slice('--profile='.length) : (args[option + 1] ?? '');
+    // A subcommand that expands (aimhooman $S x) is not known to be a harmless one.
+    if (!adjacent && /[$`*?[{]/.test(subcommand)) return { subcommand, profile, dynamic: true };
     if (['allow', 'review', 'policy-review', 'uninstall'].includes(subcommand)
         || (subcommand === 'override' && args.some((arg) => arg === 'remove' || arg === 'reset'))
         || (subcommand === 'init' && profile !== null)) {
         return { subcommand, profile };
     }
     return null;
+}
+
+// $A allow x where the line sets A to aimhooman: the variable is read as the
+// command. One set to a value the line does not show, or not set in it, is not.
+function expandedAimhoomanInvocation(tokens, setNames) {
+    const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(tokens[0] ?? '')?.[1];
+    return name && namesAimhooman(setNames().get(name)) ? aimhoomanInvocation(['aimhooman', ...tokens.slice(1)]) : null;
 }
 
 // Programs that change nothing in the files they name, so they change the
@@ -2510,7 +2654,9 @@ function hasUncertainShellSyntax(command, {
             const sink = shellExecutable(first.split(/[;&|)]/)[0]);
             // The sink's own words end where the next command starts.
             const own = after.findIndex((word) => /^(?:\|\|?|&&?|;)$/.test(word));
-            if (safePipes.has(sink) || (programFilters && textFilterIsData(sink, own < 0 ? after : after.slice(0, own)))) continue;
+            if (safePipes.has(sink)
+                || (programFilters && (PIPE_INTO_READ_LOOP.has(sink)
+                    || textFilterIsData(sink, own < 0 ? after : after.slice(0, own))))) continue;
         }
         if (char === '`' || char === '(' || char === ')' || char === '<' || char === '>') return true;
         if (char === '|' || char === '&') return true;
@@ -2521,6 +2667,11 @@ function hasUncertainShellSyntax(command, {
         return SHELL_CONTROL_WORDS.has(words[0]);
     });
 }
+
+// A pipe into a loop or a group feeds the read in it: ls | while read f; do ...
+// The commands in the loop are read one by one, and a dynamic word among them is
+// refused on its own, so the pipe hides nothing.
+const PIPE_INTO_READ_LOOP = new Set(['while', 'until', 'for', 'if', 'case', 'select', 'read', '!']);
 
 // Whether a pipe into awk or sed only filters the text: the program is on the
 // command line, where it is read, and it neither starts a program nor takes its
@@ -3617,6 +3768,66 @@ const PACKAGE_MANAGER_COMMANDS = new Set([
     'unlink', 'up', 'update', 'upgrade', 'version', 'why', 'workspace', 'workspaces',
 ]);
 
+// Programs that run what they are given as code: the shells, the interpreters
+// with a code option, and the tools whose program or recipe is a file or a
+// command line, as make, awk and sed.
+const OTHER_CODE_READERS = new Set([
+    'fish', 'csh', 'tcsh', 'nu', 'elvish', 'pwsh', 'powershell', 'deno', 'bun', 'tclsh', 'osascript',
+    'awk', 'gawk', 'mawk', 'nawk', 'sed',
+]);
+
+function isCodeReader(program) {
+    return WRAPPED_SHELLS.has(program) || OTHER_CODE_READERS.has(program)
+        || /^python(?:\d+(?:\.\d+)*)?$/.test(program) || INTERPRETER_EVAL_OPTIONS.has(program);
+}
+
+// A shell or interpreter started with no code on its command line and no script
+// file reads the code from its input: sh, bash -s, python3 -, node -.
+function readsStdinAsCode(tokens) {
+    const program = shellExecutable(tokens[0]);
+    if (!isCodeReader(program) || program === 'make' || program === 'gmake' || OTHER_CODE_READERS.has(program)) return false;
+    const args = tokens.slice(1);
+    const evalOptions = INTERPRETER_EVAL_OPTIONS.get(program) ?? ['-c'];
+    if (args.some((arg) => evalOptions.includes(arg) || (WRAPPED_SHELLS.has(program) && /^-[a-zA-Z]*c/.test(arg)))) return false;
+    return !args.some((arg) => arg !== '-' && !arg.startsWith('-'));
+}
+
+// The text an echo or printf unit prints, or null. printf, and the echo of zsh
+// and sh -e, turn \n and \t into a newline and a tab; a recipe line of a makefile
+// needs the tab.
+function printedText(tokens) {
+    const program = shellExecutable(tokens[0]);
+    if (program !== 'echo' && program !== 'printf') return null;
+    const end = tokens.findIndex((word, index) => index > 0 && /^[0-9&]*>/.test(word));
+    const words = tokens.slice(1, end < 0 ? undefined : end);
+    return (program === 'printf' ? words.join('\n') : words.join(' ')).replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+}
+
+// A path as one place on disk, for telling a file the line writes from the file
+// it runs: relative to where the unit runs, and no ./ or // in it.
+function placeOf(cwd, path) {
+    return resolve(cwd, posix.normalize(String(path).replace(/\\/g, '/')));
+}
+
+// The script an echo or printf unit writes to a file, or tee writes after one in
+// a pipe: the file is not on disk yet for the guard to read, but its text is in
+// the line. Returns the places written and the text.
+function writtenScript(tokens, source, cwd, pipedText) {
+    const targets = shellExecutable(tokens[0]) === 'tee' && pipedText !== null
+        ? tokens.slice(1).filter((word) => !word.startsWith('-'))
+        : redirectTargets(source);
+    const text = pipedText !== null && shellExecutable(tokens[0]) === 'tee' ? pipedText : printedText(tokens);
+    const places = targets.filter((target) => target && !target.startsWith('/dev/')).map((target) => placeOf(cwd, target));
+    return text !== null && places.length ? { paths: places, text } : null;
+}
+
+// What a script that was written earlier in the same line will hold.
+function inlineScriptTexts(script, writtenFiles, cwd) {
+    if (!writtenFiles.size) return [];
+    const paths = script.kind === 'files' ? script.paths : script.kind === 'package' ? ['package.json'] : [];
+    return paths.map((path) => writtenFiles.get(placeOf(cwd, path))).filter(Boolean);
+}
+
 // The file a command runs shell text from, for the guard to read: the
 // makefiles of make, the package.json script npm, yarn, pnpm or bun runs, a
 // script handed to a shell or to source, or an executable run by its path.
@@ -3657,20 +3868,51 @@ function executedScript(tokens) {
     return String(tokens[0] ?? '').includes('/') ? { kind: 'files', paths: [tokens[0]], shebang: true, label: tokens[0] } : null;
 }
 
-// The Git commands a program's code spells: the words after each git, read
-// once with the quotes that join string literals taken out ('core.hooks''Path',
-// 'comm''it') and once with every quote as a separator (['git','push']). Code
-// that builds a word at run time ('--no-ver' + 'ify', a decoded string) is not
-// seen; strict refuses a commit there, and CI stays the backstop.
+// xargs options that take the next word as their value.
+const XARGS_VALUE_OPTIONS = new Set([
+    '-a', '-d', '-E', '-I', '-J', '-L', '-n', '-P', '-R', '-S', '-s', '--arg-file', '--delimiter',
+    '--max-args', '--max-chars', '--max-lines', '--max-procs', '--process-slot-var',
+]);
+
+// The commands find and xargs run, as words: what follows each -exec, -execdir,
+// -ok or -okdir up to its ; or +, and what follows the options of xargs. Read as
+// a command line of their own, they show a script run by its path (xargs
+// ./r.sh) as well as Git and aimhooman.
+function wrappedCommands(program, args) {
+    const commands = [];
+    if (program === 'find') {
+        for (let at = 0; at < args.length; at += 1) {
+            if (!['-exec', '-execdir', '-ok', '-okdir'].includes(args[at])) continue;
+            let end = at + 1;
+            while (end < args.length && args[end] !== ';' && args[end] !== '+') end += 1;
+            commands.push(args.slice(at + 1, end));
+            at = end;
+        }
+    } else if (program === 'xargs') {
+        let at = 0;
+        while (at < args.length && args[at].startsWith('-') && args[at] !== '--') at += XARGS_VALUE_OPTIONS.has(args[at]) ? 2 : 1;
+        if (args[at] === '--') at += 1;
+        if (at < args.length) commands.push(args.slice(at));
+    }
+    return commands.filter((command) => command.length);
+}
+
+// The Git and aimhooman commands a program's code spells: the words after each
+// git or aimhooman, read once with the quotes that join string literals taken
+// out ('core.hooks''Path', 'comm''it') and once with every quote as a separator
+// (['git','push']). Code that builds a word at run time ('--no-ver' + 'ify', a
+// decoded string) is not seen; strict refuses a commit there, and CI stays the
+// backstop.
 function embeddedGitTexts(code) {
     const texts = [];
+    const starts = (word) => isGitExecutable(word) || namesAimhooman(word);
     for (const view of [code.replace(/['"`]/g, ''), code.replace(/['"`]/g, ' ')]) {
         const fragments = view.split(/[\s,;()[\]{}+]+/).filter(Boolean);
         for (let at = 0; at < fragments.length; at += 1) {
-            if (!isGitExecutable(fragments[at])) continue;
-            const words = ['git'];
+            if (!starts(fragments[at])) continue;
+            const words = [isGitExecutable(fragments[at]) ? 'git' : fragments[at]];
             for (let next = at + 1; next < fragments.length && words.length < 64; next += 1) {
-                if (/^(?:&&|\|\||\||&)$/.test(fragments[next]) || isGitExecutable(fragments[next])) break;
+                if (/^(?:&&|\|\||\||&)$/.test(fragments[next]) || starts(fragments[next])) break;
                 words.push(fragments[next]);
             }
             texts.push(words.map(quoteShellWord).join(' '));
