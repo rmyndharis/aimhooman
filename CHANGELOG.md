@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Listings with an expanded pattern, `arr[0]=x`, `$GIT status` and `./$SCRIPT` are no longer refused.
 - Git behind `find -execdir`, `parallel` or `submodule foreach` is refused only when it skips the hooks.
 - Long chains of `env`, `nice`, `sudo` or assignments are decided quickly, and very large commands no longer crash the parser.
+- A commit the final ref guard refused stays refused under another committer identity, and no branch can be started on it.
+- With `log.showSignature` set, a signed commit made here is no longer read as someone else's.
+- An empty or broken ref file no longer makes the final ref guard refuse an update.
+- Advisory reviews are named for `git am` and for a message changed with `--amend --no-verify`, and no longer for a commit a fetch brought in.
+- `aimhooman init` after `pre-commit install` keeps both hooks running instead of failing.
+- A hook that mentions pre-commit's header is no longer taken for its script, and a removed `.legacy` hook no longer fails every commit once `aimhooman init` rewrites the shim.
 
 ## [0.7.0] - 2026-11-08
 
