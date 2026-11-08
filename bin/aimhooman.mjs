@@ -33,6 +33,7 @@ import {
     openRepo,
     readCommitPath,
     readStagedPath,
+    fetchHeadObjects,
     refObjectId,
     stagedTreeSha,
     symbolicHead,
@@ -530,28 +531,42 @@ function cmdCommitmsg(args) {
 }
 
 // Git cuts a message file at its scissors line, which `git commit -v` writes
-// above the diff it shows, so nothing from that line on reaches the commit.
-// The line opens with the comment string, which core.commentChar and
-// core.commentString both set; the last one read wins.
+// above the diff it shows, so nothing from that line on reaches the commit. It
+// cuts only for a verbose commit (-v, which leaves the diff below the line, or
+// commit.verbose) or commit.cleanup=scissors; a scissors line typed into -F
+// text otherwise stays. The line opens with the comment string, which
+// core.commentChar and core.commentString both set; the last one read wins.
 function scissorsOffset(repo, bytes) {
     if (!bytes.includes(' >8 ')) return bytes.length;
     let comment = '#';
+    let cuts = false;
     try {
-        const last = execFileSync('git', ['config', '-z', '--get-regexp', '^core\\.comment(char|string)$'], {
+        const settings = execFileSync('git', [
+            'config', '-z', '--get-regexp', '^(core\\.comment(char|string)|commit\\.(cleanup|verbose))$',
+        ], {
             cwd: repo.root,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
             timeout: GIT_TIMEOUT_MS,
-        }).split('\0').filter(Boolean).at(-1);
-        if (last?.includes('\n')) comment = last.slice(last.indexOf('\n') + 1);
-    } catch { /* neither is set */ }
+        }).split('\0').filter(Boolean).map((entry) => [
+            entry.slice(0, entry.indexOf('\n')).toLowerCase(),
+            entry.slice(entry.indexOf('\n') + 1),
+        ]);
+        const last = settings.filter(([key]) => key.startsWith('core.comment')).at(-1);
+        if (last) comment = last[1];
+        const value = (name) => settings.filter(([key]) => key === name).at(-1)?.[1] ?? '';
+        cuts = value('commit.cleanup').toLowerCase() === 'scissors'
+            || !/^(?:|false|no|off|0)$/i.test(value('commit.verbose'));
+    } catch { /* none is set */ }
     // auto picks one of these per commit. Cutting at the latest of their first
     // lines never drops text Git keeps.
     const framed = Buffer.concat([Buffer.from('\n'), bytes]);
     const found = (/^auto$/i.test(comment) ? [...'#;@!$%^&|:'] : [comment])
         .map((candidate) => framed.indexOf(`\n${candidate} ------------------------ >8 ------------------------\n`))
         .filter((offset) => offset >= 0);
-    return found.length ? Math.max(...found) : bytes.length;
+    if (!found.length) return bytes.length;
+    const offset = Math.max(...found);
+    return cuts || framed.indexOf('\ndiff --git ', offset + 1) >= 0 ? offset : bytes.length;
 }
 
 function cmdPushcheck(args) {
@@ -609,6 +624,8 @@ function cmdPushcheck(args) {
     }
     const code = scanProposedCommits(repo, commits, {
         limits: scanLimits(),
+        // Reviews showed when each commit was made; a push repeats nothing.
+        printReviews: false,
         rejectNote: (revision) =>
             `aimhooman: push of commit ${revision} was rejected before any objects were sent\n`,
     });
@@ -652,6 +669,9 @@ function cmdRefcheck(args) {
     // HEAD can name a ref outside refs/heads, and a commit made there moves
     // that ref alone. Read HEAD only for such a line, so a branch never pays.
     let headRef = null;
+    // What the same transaction writes to remote-tracking refs counts as
+    // fetched, as does FETCH_HEAD: a fetch into a local branch writes both.
+    const remoteTips = [];
     for (const line of input.split('\n').filter(Boolean)) {
         const match = /^(\S+) (\S+) (.+)$/.exec(line);
         if (!match) {
@@ -659,6 +679,10 @@ function cmdRefcheck(args) {
             return 30;
         }
         const [, oldObjectId, newObjectId, ref] = match;
+        if (ref.startsWith('refs/remotes/') && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(newObjectId)
+            && !/^0+$/.test(newObjectId)) {
+            remoteTips.push(newObjectId);
+        }
         if (ref !== 'HEAD' && !ref.startsWith('refs/heads/')) {
             headRef ??= repo ? symbolicHead(repo) : '';
             if (ref !== headRef) continue;
@@ -725,7 +749,10 @@ function cmdRefcheck(args) {
 
     let commits;
     try {
-        commits = resolveIntroduced(repo, updates, { firstBranchFromRemotes: true });
+        commits = resolveIntroduced(repo, updates, {
+            firstBranchFromRemotes: true,
+            fetchedTips: [...remoteTips, ...fetchHeadObjects(repo)],
+        });
     }
     catch (error) {
         console.error(`aimhooman: cannot resolve proposed commits: ${error.message}`);
@@ -734,6 +761,8 @@ function cmdRefcheck(args) {
     const code = scanProposedCommits(repo, commits, {
         limits: scanLimits(),
         afterPrecommit: true,
+        // A rebase replays commits whose reviews showed when they were made.
+        printReviews: !['rebase-merge', 'rebase-apply'].some((dir) => existsSync(join(repo.gitDir, dir))),
         rejectNote: (revision) =>
             `aimhooman: proposed commit ${revision} was rejected before refs changed\n`
             // The vetoed commit stays in the object store: the ref never

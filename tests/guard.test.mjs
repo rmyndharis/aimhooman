@@ -216,17 +216,29 @@ test('resolveIntroduced counts a merge made here and a commit with no history as
         assert.equal(authored(rootUpdate).get(root), true, 'an initial or orphan commit enters alone');
         assert.equal(authored({ ...mergeUpdate, forced: true }).get(merge), false, 'a forced move is not a commit made here');
 
-        // A fetch, a clone or a checkout of a fetched branch brings the same
-        // shapes, already held by the remote-tracking ref the fetch wrote.
+        // A local branch or tag proves nothing: a refused commit can be given one.
+        git(dir, ['update-ref', 'refs/heads/keep', merge]);
+        git(dir, ['update-ref', 'refs/tags/keep', root]);
+        assert.equal(authored(mergeUpdate).get(merge), true, 'a merge a local branch holds');
+        assert.equal(authored(rootUpdate).get(root), true, 'a root a tag holds');
+        // A fetch into a local branch writes the remote-tracking ref in the same
+        // transaction, and a fetch by URL writes FETCH_HEAD alone.
+        const fetched = (update, fetchedTips) => new Map(
+            resolveIntroduced(repo, [update], { includeStagedContexts: false, fetchedTips })
+                .map(([oid, , local]) => [oid, local]),
+        );
+        assert.equal(fetched(mergeUpdate, [merge]).get(merge), false, 'a merge fetched with it');
+        assert.equal(fetched(rootUpdate, [root]).get(root), false, 'a root fetched with it');
+        // A clone or a checkout of a fetched branch finds the remote-tracking ref.
         git(dir, ['update-ref', 'refs/remotes/origin/main', merge]);
         git(dir, ['update-ref', 'refs/remotes/origin/pages', root]);
         assert.equal(authored(mergeUpdate).get(merge), false, 'a fast-forward to a fetched merge');
         assert.equal(authored(rootUpdate).get(root), false, 'a branch made from a fetched root');
+        // One commit on the old tip counts whatever holds it.
         const lone = git(dir, ['commit-tree', tree, '-p', base, '-m', 'one more']);
         const one = { oldObjectId: base, newObjectId: lone, ref: branch };
-        assert.equal(authored(one).get(lone), true, 'one commit on the old tip, held by no ref');
         git(dir, ['update-ref', 'refs/remotes/origin/one', lone]);
-        assert.equal(authored(one).get(lone), false, 'a pull that fast-forwards one fetched commit');
+        assert.equal(fetched(one, [lone]).get(lone), true, 'one commit on the old tip');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

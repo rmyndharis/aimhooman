@@ -17,6 +17,7 @@ import {
     appendFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import {
     hookDiagnostics,
@@ -1704,10 +1705,11 @@ test('the final guard reads the message of a merge, an initial and an orphan com
     }
 });
 
-// A pull that fast-forwards one commit has the shape of a local commit, but
-// the fetch already wrote a remote-tracking ref to it.
-test('the final guard leaves one fetched commit to its author on a fast-forward pull', () => {
-    const base = mkdtempSync(join(tmpdir(), 'aim-ref-ff-pull-'));
+// The final guard keeps refusing a commit it refused once, whatever local ref
+// is pointed at it, while a merge a fetch writes straight into a local branch
+// is someone else's to word.
+test('a refused commit stays out through a local branch, and a fetched merge comes in', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-refused-'));
     const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
     try {
         isolatedGitConfig(base, () => {
@@ -1717,17 +1719,52 @@ test('the final guard leaves one fetched commit to its author on a fast-forward 
             git(clone, ['config', 'user.email', 'test@example.com']);
             git(clone, ['config', 'user.name', 'Test']);
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: clone });
-            git(upstream, ['commit', '-q', '--allow-empty', '-m', `teammate change\n\n${trailer}`]);
+            const before = git(clone, ['rev-parse', 'HEAD']);
 
-            const pull = spawnSync('git', ['pull', '-q', '--ff-only'], { cwd: clone, encoding: 'utf8' });
-            assert.equal(pull.status, 0, pull.stderr);
-            assert.equal(git(clone, ['rev-parse', 'HEAD']), git(upstream, ['rev-parse', 'HEAD']));
-
-            const local = spawnSync('git', ['commit', '--allow-empty', '--no-verify', '-m', `mine\n\n${trailer}`], {
+            const refused = spawnSync('git', ['commit', '--allow-empty', '--no-verify', '-m', `keep\n\n${trailer}`], {
                 cwd: clone, encoding: 'utf8',
             });
-            assert.notEqual(local.status, 0, 'a commit made here is still read');
-            assert.match(local.stderr, /attribution\.claude-coauthor/);
+            assert.notEqual(refused.status, 0);
+            const sha = /proposed commit ([0-9a-f]+)/.exec(refused.stderr)[1];
+            git(clone, ['branch', 'keep', sha]);
+            const merge = spawnSync('git', ['merge', '--ff-only', 'keep'], { cwd: clone, encoding: 'utf8' });
+            assert.notEqual(merge.status, 0, 'the refused commit reaches no branch by fast-forward');
+            assert.equal(git(clone, ['rev-parse', 'HEAD']), before);
+
+            const main = git(upstream, ['branch', '--show-current']);
+            git(upstream, ['checkout', '-q', '-b', 'side']);
+            git(upstream, ['commit', '-q', '--allow-empty', '-m', 'side work']);
+            git(upstream, ['checkout', '-q', main]);
+            git(upstream, ['merge', '-q', '--no-ff', 'side', '-m', `Merge pull request #7\n\n${trailer}`]);
+            git(clone, ['checkout', '-q', '-b', 'elsewhere']);
+            const fetch = spawnSync('git', ['fetch', '-q', 'origin', `${main}:${main}`], { cwd: clone, encoding: 'utf8' });
+            assert.equal(fetch.status, 0, fetch.stderr);
+            assert.equal(git(clone, ['rev-parse', main]), git(upstream, ['rev-parse', main]));
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// A shallow clone's tip has no parent in the clone to diff against. The clone
+// under global hooks still succeeds instead of stopping on an incomplete scan.
+test('a shallow clone succeeds under global hooks', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-shallow-clone-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const upstream = makeRepo(base);
+            for (const n of [1, 2]) {
+                writeFileSync(join(upstream, `f${n}.txt`), `${n}\n`);
+                git(upstream, ['add', `f${n}.txt`]);
+                git(upstream, ['commit', '-q', '-m', `c${n}`]);
+            }
+            const env = { ...process.env, HOME: join(base, 'home'), USERPROFILE: join(base, 'home') };
+            execFileSync(process.execPath, [CLI, 'init', '--global', '--yes'], { cwd: base, env });
+            const clone = spawnSync('git', ['clone', '-q', '--depth', '1', pathToFileURL(upstream).href, join(base, 'shallow')], {
+                cwd: base, env, encoding: 'utf8',
+            });
+            assert.equal(clone.status, 0, clone.stderr);
+            assert.equal(git(join(base, 'shallow'), ['rev-parse', 'HEAD']), git(upstream, ['rev-parse', 'HEAD']));
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -2448,6 +2485,10 @@ test('a chained pre-commit.com hook still runs the .legacy hook it moved aside',
             copyFileSync(join(hooks, 'pre-commit'), join(hooks, 'pre-commit.legacy'));
             installHooks(repo, CLI);
             assert.equal(existsSync(shim), false, 'no shim for a dispatcher');
+            // One edited after install (a git-lfs line appended) still names the slot.
+            appendFileSync(join(hooks, 'pre-commit.legacy'), 'git lfs pre-commit "$@"\n');
+            installHooks(repo, CLI);
+            assert.equal(existsSync(shim), false, 'no shim for an edited dispatcher');
             writeFileSync(join(hooks, 'pre-commit.legacy'), '#!/bin/sh\nexit 0\n');
             installHooks(repo, CLI);
             assert.equal(existsSync(shim), true);
@@ -2455,6 +2496,39 @@ test('a chained pre-commit.com hook still runs the .legacy hook it moved aside',
             uninstallHooks(repo);
             assert.equal(existsSync(shim), false, 'uninstall removes the shim');
             assert.match(readFileSync(join(hooks, 'pre-commit'), 'utf8'), /HERE=/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// pre-commit.com, installed after aimhooman, moves the dispatcher aside as
+// .legacy and keeps running it. Uninstall hands .legacy the hook that
+// dispatcher chained, so nothing of aimhooman keeps running.
+test('uninstall gives a dispatcher moved aside as .legacy back its chained hook', (t) => {
+    if (process.platform === 'win32') {
+        t.skip('runs POSIX hook scripts directly');
+        return;
+    }
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-legacy-uninstall-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            const original = '#!/bin/sh\necho original >> "$PWD/ran"\n';
+            writeFileSync(join(hooks, 'pre-commit'), original);
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+            installHooks(repo, CLI);
+            renameSync(join(hooks, 'pre-commit'), join(hooks, 'pre-commit.legacy'));
+            writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\n# pre-commit.com\n');
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+
+            const result = uninstallHooks(repo);
+            assert.ok(result.restored.includes('pre-commit.legacy'), JSON.stringify(result));
+            assert.equal(readFileSync(join(hooks, 'pre-commit.legacy'), 'utf8'), original);
+            assert.equal(readFileSync(join(hooks, 'pre-commit'), 'utf8'), '#!/bin/sh\n# pre-commit.com\n');
+            assert.deepEqual(remainingDispatchers(repo), []);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

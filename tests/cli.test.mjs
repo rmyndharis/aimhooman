@@ -539,6 +539,22 @@ test('commitmsg: nothing from the scissors line on is read as the message', () =
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// `git commit -F` keeps a scissors line typed into the message and what follows
+// it; Git cuts there only for -v, commit.verbose or commit.cleanup=scissors.
+test('commitmsg: a scissors line in -F text is read unless Git cuts there', () => {
+    const dir = makeRepo('strict');
+    try {
+        const msg = join(dir, 'MSG');
+        writeFileSync(msg, 'subj\n\n# ------------------------ >8 ------------------------\nCo-authored-by: Claude <noreply@anthropic.com>\n');
+        assert.equal(result('commitmsg', [msg], dir).status, 10);
+        execFileSync('git', ['config', 'commit.cleanup', 'scissors'], { cwd: dir });
+        assert.equal(result('commitmsg', [msg], dir).status, 0);
+        execFileSync('git', ['config', '--unset', 'commit.cleanup'], { cwd: dir });
+        execFileSync('git', ['config', 'commit.verbose', 'true'], { cwd: dir });
+        assert.equal(result('commitmsg', [msg], dir).status, 0);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('commitmsg: clean repairs the message above the scissors line and keeps the rest byte for byte', () => {
     const dir = makeRepo('clean');
     try {

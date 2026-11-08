@@ -22,6 +22,11 @@ export function patternsForRules(rules) {
         // .gitignore-style files are line based. Never let a local rule
         // turn one catalog value into extra unmanaged exclude lines.
         const lines = (values) => (values || []).filter((pattern) => !/[\r\n]/.test(pattern));
+        // Git applies a `!` line to the whole file, so an exception may only
+        // reach inside the rule's own directory (`dir/**`); a rule whose
+        // exception reaches further would re-include other rules' artifacts.
+        const scopes = lines(rule.match?.paths).filter((p) => p.endsWith('/**')).map((p) => p.slice(0, -2));
+        if (lines(rule.match?.except).some((e) => !scopes.some((scope) => e.startsWith(scope) && e !== scope))) continue;
         for (const pattern of lines(rule.match?.paths)) patterns.add(pattern);
         // An exception becomes a `!` line. Git re-includes nothing below an
         // excluded directory, so `dir/**` also re-includes `dir/` itself.

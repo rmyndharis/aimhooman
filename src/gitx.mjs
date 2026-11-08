@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
@@ -543,9 +543,11 @@ export function introducedCommits(repo, updates, { firstBranchFromRemotes = fals
             .split('\n')
             .filter(Boolean);
         // Nothing guards refs/remotes, so the tip's own change is checked even
-        // when a remote-tracking ref holds it, as a clone always was.
+        // when a remote-tracking ref holds it, as a clone always was. The tip a
+        // shallow clone cut its history at has no parent here to diff against,
+        // so that one is left to the history it came with.
         if (firstBranchFromRemotes && !gated.length && /^0+$/.test(oldObjectId)
-            && !resolved.includes(newObjectId)) {
+            && !resolved.includes(newObjectId) && !shallowBoundary(repo, newObjectId)) {
             resolved.push(newObjectId);
         }
         for (const commit of resolved) {
@@ -556,6 +558,15 @@ export function introducedCommits(repo, updates, { firstBranchFromRemotes = fals
         }
     }
     return commits;
+}
+
+// shallowBoundary reports whether a shallow clone cut its history at the commit.
+function shallowBoundary(repo, oid) {
+    try {
+        return readFileSync(join(repo.commonDir, 'shallow'), 'utf8').split(/\r?\n/).includes(oid);
+    } catch {
+        return false;
+    }
 }
 
 // objectExists reports whether the object store holds the given oid. Only a
@@ -595,12 +606,32 @@ export function symbolicHead(repo) {
     }
 }
 
-// unreferenced reports whether no ref reaches the commit. One Git has just
-// written is held by nothing until its transaction commits; one a fetch or a
-// clone brought in is held by the remote-tracking ref that fetch wrote.
-export function unreferenced(repo, oid) {
+// fetchedCommit reports whether the commit came from elsewhere: a
+// remote-tracking ref holds it, or one of tips does (the remote-tracking refs
+// the same transaction writes, FETCH_HEAD). A local branch or tag does not
+// count, since a commit the final guard refused can be given one.
+export function fetchedCommit(repo, oid, tips = []) {
     assertOid(oid);
-    return gitBuf(['rev-list', '-n', '1', oid, '--not', '--all'], repo.root).toString('utf8').trim() === oid;
+    const reached = (extra) => gitBuf(['rev-list', '-n', '1', oid, '--not', '--remotes', ...extra], repo.root)
+        .toString('utf8').trim() !== oid;
+    try {
+        return reached(tips);
+    } catch {
+        // A tip Git cannot walk (a pruned object, a tag of a tree) only
+        // narrows what counts as fetched.
+        return reached([]);
+    }
+}
+
+// fetchHeadObjects lists the object IDs FETCH_HEAD records, or none.
+export function fetchHeadObjects(repo) {
+    try {
+        return readFileSync(join(repo.gitDir, 'FETCH_HEAD'), 'utf8').split('\n')
+            .map((line) => /^([0-9a-f]{40}|[0-9a-f]{64})\t/.exec(line)?.[1])
+            .filter(Boolean);
+    } catch {
+        return [];
+    }
 }
 
 // gitConfig returns a git config value, or '' if unset.
