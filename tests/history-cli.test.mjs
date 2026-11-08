@@ -130,6 +130,38 @@ test('machine JSON is fully flushed before the CLI exits', () => {
     }
 });
 
+// The GitHub Action hands its profile input to a range check in a checkout that
+// never ran init. Clean and compliance are not ordered, so a profile no policy
+// names must fail with where the profile comes from, while strict and the
+// committed profile still scan.
+test('a range profile the policy does not name fails and says where profiles come from', () => {
+    const repo = repository();
+    try {
+        write(repo, 'README.md', 'base\n');
+        const base = addCommit(repo, ['README.md'], 'base');
+        write(repo, 'app.js', 'export const value = 1;\n');
+        const head = addCommit(repo, ['app.js'], 'feature');
+        const refused = cli(repo, ['check', '--range', `${base}...${head}`, '--profile', 'compliance']);
+        assert.equal(refused.status, 20, refused.stderr);
+        assert.match(refused.stderr, /cannot replace target profile "clean"/);
+        assert.match(refused.stderr, /comes from \.aimhooman\.json/);
+        const escalated = cli(repo, ['check', '--range', `${base}...${head}`, '--profile', 'strict']);
+        assert.equal(escalated.status, 0, escalated.stderr);
+
+        write(repo, '.aimhooman.json', POLICY('compliance'));
+        const adopted = addCommit(repo, ['.aimhooman.json'], 'adopt compliance');
+        write(repo, 'app.js', 'export const value = 2;\n');
+        const next = addCommit(repo, ['app.js'], 'next');
+        const committed = cli(repo, ['check', '--range', `${adopted}...${next}`, '--profile', 'compliance']);
+        assert.equal(committed.status, 0, committed.stderr);
+        const replaced = cli(repo, ['check', '--range', `${adopted}...${next}`, '--profile', 'clean']);
+        assert.equal(replaced.status, 20, replaced.stderr);
+        assert.match(replaced.stderr, /cannot replace target profile "compliance"/);
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('range scans retain forbidden paths and code markers that later disappear', () => {
     const repo = repository();
     try {

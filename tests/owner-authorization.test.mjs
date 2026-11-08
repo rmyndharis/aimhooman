@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
     authorizeProtectedPathPlan,
-    changedProtectedPaths,
     protectedPathAuthorizationPlan,
 } from '../scripts/authorize-owner-paths.mjs';
 import { openRepo } from '../src/gitx.mjs';
@@ -232,7 +231,7 @@ test('protected path discovery includes deletion-only ranges', () => {
         git(root, ['rm', '-q', 'AGENTS.md']);
         git(root, ['commit', '-q', '-m', 'delete instructions']);
         const head = git(root, ['rev-parse', 'HEAD']);
-        assert.deepEqual(changedProtectedPaths(base, head, root), ['AGENTS.md']);
+        assert.deepEqual(protectedPathAuthorizationPlan(base, head, root).paths, ['AGENTS.md']);
     } finally {
         rmSync(root, { recursive: true, force: true });
     }

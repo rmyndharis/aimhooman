@@ -23,7 +23,7 @@ export function assertPackageManifest(paths, sourceRoot) {
         'CODE_OF_CONDUCT.md', 'CONTRIBUTING.md', 'LICENSE', 'README.md', 'SECURITY.md',
     ]);
     const allowedPrefixes = [
-        'bin/', 'src/', 'rules/', 'hooks/', 'schemas/', 'docs/design/', 'docs/logo/',
+        'bin/', 'src/', 'rules/', 'hooks/', 'schemas/', 'docs/design/',
         '.claude-plugin/', '.codex-plugin/', '.cursor/', '.clinerules/', '.windsurf/',
         '.kiro/', '.agents/', '.gemini/', '.github/hooks/', 'skills/',
     ];

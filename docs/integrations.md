@@ -63,7 +63,22 @@ jobs:
 `fetch-depth: 0` is required. The range is triple-dot, so the scan starts at
 the merge base of the two commits, and a shallow checkout does not have that
 commit. The action installs aimhooman from npm and defaults to the `strict`
-profile; set `profile:` under `with:` to change that.
+profile.
+
+`profile:` under `with:` follows the same rule as `check --profile`: it can
+repeat the repository's own profile or raise it to `strict`, nothing else.
+`strict` works in any repository. `clean` works where `.aimhooman.json` is
+absent or says `clean`, and `compliance` only where the committed
+`.aimhooman.json` says `compliance`. Any other combination stops with exit 20
+and names the profile the repository uses.
+
+Under `strict`, a pull request that adds or changes an agent instruction file
+(`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`) or
+`.aimhooman.json` fails the check, and the action has no step that approves
+it. Under `clean` those changes are notices and the check passes; under
+`compliance` they exit 11 and fail it. aimhooman's own repository accepts them
+from its owner through CI scripts that ship with neither the action nor the
+npm package ([docs/policy.md](policy.md#owner-authorization-in-ci)).
 
 Pinning the action tag (`@v0.6.0`) pins only the action's steps, not the CLI:
 the action npm-installs aimhooman at run time, and the `version` input
@@ -72,8 +87,11 @@ defaults to `latest`. Set `version:` under `with:` (for example
 
 For `push` events, use `base: ${{ github.event.before }}` and
 `head: ${{ github.event.after }}`. On the first push to a branch `before` is
-all zeros; `aimhooman check --range` accepts an all-zero base and includes
-the root commit in the scan.
+all zeros. The action then scans from the branch's merge base with
+`origin/<default branch>` and passes when the branch adds no commits, so
+history the default branch already carries is not judged again. An orphan
+branch, and the first push of the default branch itself, scan from the root
+commit.
 
 CI is the enforcement tier that travels with the repository: local hooks do
 not govern another clone, and a laptop can skip its own hooks. The action

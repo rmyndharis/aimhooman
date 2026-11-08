@@ -1,66 +1,16 @@
 #!/usr/bin/env node
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
     authorizeProtectedPathPlan,
     protectedPathAuthorizationPlan,
 } from './authorize-owner-paths.mjs';
-import { verifyOwnerWorkflowRun } from './github-owner-authority.mjs';
-import { EMPTY_HISTORY_OID, resolveCommit } from '../src/history-scan.mjs';
-import { gitEnvironment } from '../src/git-environment.mjs';
+import { requiredEnvironment, verifyOwnerWorkflowRun } from './github-owner-authority.mjs';
+import { selectPushBase } from '../src/history-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(ROOT, 'bin/aimhooman.mjs');
-
-export function selectPushBase({ before, head, refName, defaultBranch, cwd = ROOT }) {
-    const repo = { root: cwd };
-    const resolvedHead = resolveCommit(repo, head);
-    if (!isZeroObjectId(before)) {
-        try {
-            return resolveCommit(repo, before);
-        } catch {
-            // A force-push can replace the ref with an unrelated root while the
-            // event's `before` object is no longer fetchable. Scanning from the
-            // empty-history sentinel covers every commit reachable from the new
-            // head instead of trusting an unavailable boundary.
-            return zeroObjectId(resolvedHead);
-        }
-    }
-
-    if (refName && defaultBranch && refName !== defaultBranch) {
-        try {
-            const defaultHead = resolveCommit(repo, `refs/remotes/origin/${defaultBranch}`);
-            const common = gitString(cwd, ['merge-base', defaultHead, resolvedHead]);
-            return common === resolvedHead ? null : common;
-        } catch {
-            // An orphan branch has no common commit. Its root history must be scanned.
-        }
-    }
-    return zeroObjectId(resolvedHead);
-}
-
-function gitString(cwd, args) {
-    return execFileSync('git', args, {
-        cwd,
-        env: gitEnvironment(),
-        encoding: 'utf8',
-    }).trim();
-}
-
-function isZeroObjectId(value) {
-    return typeof value === 'string' && /^(?:0{40}|0{64})$/.test(value);
-}
-
-function zeroObjectId(head) {
-    return head.length === 64 ? '0'.repeat(64) : EMPTY_HISTORY_OID;
-}
-
-function requiredEnvironment(name) {
-    const value = process.env[name];
-    if (!value) throw new Error(`${name} is required`);
-    return value;
-}
 
 async function main() {
     const context = requiredEnvironment('CI_HISTORY_CONTEXT');
@@ -73,6 +23,7 @@ async function main() {
             head,
             refName: process.env.REF_NAME || '',
             defaultBranch: process.env.DEFAULT_BRANCH || '',
+            cwd: ROOT,
         });
         if (!base) {
             console.log('aimhooman: pushed ref contains no commits outside the default branch');

@@ -95,10 +95,10 @@ export async function verifyOwnerWorkflowRun({
     authority = AIMHOOMAN_REPOSITORY_AUTHORITY,
     fetchImpl = fetch,
 } = {}) {
-    const repository = requiredEnvironment(env, 'GITHUB_REPOSITORY');
-    const token = requiredEnvironment(env, 'GITHUB_TOKEN');
-    const actor = requiredEnvironment(env, 'GITHUB_ACTOR');
-    const triggeringActor = requiredEnvironment(env, 'GITHUB_TRIGGERING_ACTOR');
+    const repository = requiredEnvironment('GITHUB_REPOSITORY', env);
+    const token = requiredEnvironment('GITHUB_TOKEN', env);
+    const actor = requiredEnvironment('GITHUB_ACTOR', env);
+    const triggeringActor = requiredEnvironment('GITHUB_TRIGGERING_ACTOR', env);
     const event = requiredText(expectedEvent, 'expected workflow event');
     const headSha = objectId(expectedHead, 'expected workflow head SHA');
     const refName = requiredText(expectedRef, 'expected workflow ref name');
@@ -110,30 +110,30 @@ export async function verifyOwnerWorkflowRun({
     exactLogin(actor, authority.ownerLogin, 'GITHUB_ACTOR');
     exactLogin(triggeringActor, authority.ownerLogin, 'GITHUB_TRIGGERING_ACTOR');
     exactInteger(
-        positiveInteger(requiredEnvironment(env, 'GITHUB_REPOSITORY_ID'), 'GITHUB_REPOSITORY_ID'),
+        positiveInteger(requiredEnvironment('GITHUB_REPOSITORY_ID', env), 'GITHUB_REPOSITORY_ID'),
         authority.repositoryId,
         'GITHUB_REPOSITORY_ID',
     );
     exactInteger(
-        positiveInteger(requiredEnvironment(env, 'GITHUB_REPOSITORY_OWNER_ID'), 'GITHUB_REPOSITORY_OWNER_ID'),
+        positiveInteger(requiredEnvironment('GITHUB_REPOSITORY_OWNER_ID', env), 'GITHUB_REPOSITORY_OWNER_ID'),
         authority.ownerId,
         'GITHUB_REPOSITORY_OWNER_ID',
     );
     exactInteger(
-        positiveInteger(requiredEnvironment(env, 'GITHUB_ACTOR_ID'), 'GITHUB_ACTOR_ID'),
+        positiveInteger(requiredEnvironment('GITHUB_ACTOR_ID', env), 'GITHUB_ACTOR_ID'),
         authority.ownerId,
         'GITHUB_ACTOR_ID',
     );
-    exactText(requiredEnvironment(env, 'GITHUB_EVENT_NAME'), event, 'GITHUB_EVENT_NAME');
+    exactText(requiredEnvironment('GITHUB_EVENT_NAME', env), event, 'GITHUB_EVENT_NAME');
 
-    const workflowRefPath = workflowPathFromRef(repository, requiredEnvironment(env, 'GITHUB_WORKFLOW_REF'));
+    const workflowRefPath = workflowPathFromRef(repository, requiredEnvironment('GITHUB_WORKFLOW_REF', env));
     exactText(workflowRefPath, workflowPath, 'GITHUB_WORKFLOW_REF path');
-    const workflowSha = objectId(requiredEnvironment(env, 'GITHUB_WORKFLOW_SHA'), 'GITHUB_WORKFLOW_SHA');
+    const workflowSha = objectId(requiredEnvironment('GITHUB_WORKFLOW_SHA', env), 'GITHUB_WORKFLOW_SHA');
     if (requireWorkflowAtHead) exactObjectId(workflowSha, headSha, 'GITHUB_WORKFLOW_SHA');
 
-    const runId = positiveInteger(requiredEnvironment(env, 'GITHUB_RUN_ID'), 'GITHUB_RUN_ID');
+    const runId = positiveInteger(requiredEnvironment('GITHUB_RUN_ID', env), 'GITHUB_RUN_ID');
     const runAttempt = positiveInteger(
-        requiredEnvironment(env, 'GITHUB_RUN_ATTEMPT'),
+        requiredEnvironment('GITHUB_RUN_ATTEMPT', env),
         'GITHUB_RUN_ATTEMPT',
     );
     const headers = githubHeaders(token);
@@ -192,7 +192,7 @@ async function fetchGitHubObject(url, headers, fetchImpl, label) {
     return objectValue(value, label);
 }
 
-function requiredEnvironment(env, name) {
+export function requiredEnvironment(name, env = process.env) {
     return requiredText(env?.[name], name);
 }
 

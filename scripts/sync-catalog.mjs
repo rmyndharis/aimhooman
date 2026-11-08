@@ -18,6 +18,7 @@ const CATALOG_START = '<!-- aimhooman:catalog-start -->';
 const CATALOG_END = '<!-- aimhooman:catalog-end -->';
 
 export function renderGitignore(rules) {
+    const patterns = patternsForRules(rules);
     return [
         '# AI tooling artifacts for .gitignore',
         '#',
@@ -33,7 +34,8 @@ export function renderGitignore(rules) {
         '# `npm run check` fails when this file is stale.',
         '',
         GITIGNORE_START,
-        ...patternsForRules(rules),
+        // In a .gitignore `**/x` also matches `x` at the root, so the twin is redundant.
+        ...patterns.filter((pattern) => !patterns.includes(`**/${pattern}`)),
         GITIGNORE_END,
         '',
     ].join('\n');

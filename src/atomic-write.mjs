@@ -196,12 +196,20 @@ function readCandidate(path, token) {
     return { ...candidate, path };
 }
 
+// Windows answers EPERM for a file another process deleted while a handle on it
+// was still open, until that handle closes. Candidates are deleted only by an
+// owner leaving the queue or by a contender that proved them dead, so on win32
+// that EPERM means gone, the same as ENOENT.
+function candidateGone(error) {
+    return error?.code === 'ENOENT' || (process.platform === 'win32' && error?.code === 'EPERM');
+}
+
 function removeDeadCandidate(candidate, staleMs) {
     let age;
     try {
         age = Date.now() - statSync(candidate.path).mtimeMs;
     } catch (error) {
-        if (error?.code === 'ENOENT') return true;
+        if (candidateGone(error)) return true;
         throw error;
     }
     if (age < staleMs || lockOwnerIsActive(candidate)) return false;
@@ -211,7 +219,7 @@ function removeDeadCandidate(candidate, staleMs) {
     try {
         unlinkSync(candidate.path);
     } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
+        if (!candidateGone(error)) throw error;
     }
     return true;
 }

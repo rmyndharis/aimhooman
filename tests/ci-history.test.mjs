@@ -4,8 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { changedProtectedPaths } from '../scripts/authorize-owner-paths.mjs';
-import { selectPushBase } from '../scripts/scan-ci-history.mjs';
+import { protectedPathAuthorizationPlan } from '../scripts/authorize-owner-paths.mjs';
+import { selectPushBase } from '../src/history-scan.mjs';
 
 function repository() {
     const root = mkdtempSync(join(tmpdir(), 'aim-ci-history-'));
@@ -34,8 +34,8 @@ test('protected path discovery follows introduced commits and includes deletion-
         git(root, ['commit', '-q', '-m', 'remove instructions']);
         const head = git(root, ['rev-parse', 'HEAD']);
 
-        assert.deepEqual(changedProtectedPaths(base, head, root), ['AGENTS.md']);
-        assert.deepEqual(changedProtectedPaths(added, head, root), ['AGENTS.md']);
+        assert.deepEqual(protectedPathAuthorizationPlan(base, head, root).paths, ['AGENTS.md']);
+        assert.deepEqual(protectedPathAuthorizationPlan(added, head, root).paths, ['AGENTS.md']);
     } finally {
         rmSync(root, { recursive: true, force: true });
     }
@@ -92,7 +92,9 @@ test('force push with an unreachable before object scans all reachable history',
 test('push workflow scans history; release workflow cuts a tag into a direct npm publish', () => {
     const root = join(import.meta.dirname, '..');
     const testsWorkflow = readFileSync(join(root, '.github/workflows/test.yml'), 'utf8');
-    const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+    // Windows checkouts convert the workflow to CRLF; the job split below reads lines.
+    const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8')
+        .replace(/\r\n/g, '\n');
 
     // The test workflow scans pushed/pulled history through the shared entry point.
     assert.match(testsWorkflow, /CI_HISTORY_CONTEXT:\s*push/);
@@ -109,12 +111,26 @@ test('push workflow scans history; release workflow cuts a tag into a direct npm
     // The release workflow cuts a version tag into a direct npm publish with
     // provenance, gated by the same verification the push workflow runs.
     assert.match(releaseWorkflow, /tags:\s*\["v\*"\]/);
-    assert.match(releaseWorkflow, /id-token:\s*write/);
     assert.match(releaseWorkflow, /node-version:\s*24/);
     assert.match(releaseWorkflow, /registry-url:\s*https:\/\/registry\.npmjs\.org/);
-    assert.match(releaseWorkflow, /npm ci --ignore-scripts/);
-    assert.match(releaseWorkflow, /run:\s*npm run verify/);
-    assert.match(releaseWorkflow, /npm publish --provenance/);
+    // Verify runs the dev packages with read access only. Publish alone may
+    // write, publishes the tarball verify tested, and refuses a tag that is
+    // not on main or does not name the package version.
+    const [top, verifyJob, publishJob] = releaseWorkflow.split(/\n {2}(?:verify|publish):\n/);
+    assert.ok(publishJob, 'release workflow has a verify job and then a publish job');
+    assert.doesNotMatch(top + verifyJob, /:\s*write/);
+    assert.match(verifyJob, /npm ci --ignore-scripts/);
+    assert.match(verifyJob, /AIMHOOMAN_ARTIFACT_DIR:[^\n]*\n\s*run:\s*npm run verify/);
+    assert.match(verifyJob, /actions\/upload-artifact@[0-9a-f]{40} /);
+    assert.match(publishJob, /needs:\s*verify\n/);
+    assert.match(publishJob, /contents:\s*write/);
+    assert.match(publishJob, /id-token:\s*write/);
+    assert.match(publishJob, /git fetch [^\n]*origin \+refs\/heads\/main:refs\/remotes\/origin\/main\n/);
+    assert.match(publishJob, /git merge-base --is-ancestor "\$GITHUB_SHA" origin\/main \|\|/);
+    assert.match(publishJob, /\[ "\$TAG" = "v\$VERSION" \] \|\|/);
+    assert.match(publishJob, /actions\/download-artifact@[0-9a-f]{40} /);
+    assert.match(publishJob, /npm publish "\$RUNNER_TEMP\/package\/[^"]+\.tgz" --provenance/);
+    assert.doesNotMatch(publishJob, /npm (?:ci|install|pack|run)\b/);
     // Trusted publishing, so no npm credential may reappear in the workflow:
     // the OIDC exchange is what authenticates, and a token added back beside it
     // would be a long-lived secret doing nothing but waiting to leak. This

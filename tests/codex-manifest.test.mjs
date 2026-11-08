@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateCodexManifest } from '../src/codex-manifest.mjs';
+import { validateCodexManifest } from '../scripts/codex-manifest.mjs';
 
 function fixture() {
     const root = mkdtempSync(join(tmpdir(), 'aim-manifest-'));

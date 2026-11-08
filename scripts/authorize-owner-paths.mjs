@@ -8,15 +8,12 @@ import { newEngine } from '../src/scan.mjs';
 import { commitChanges, historyRange } from '../src/history-scan.mjs';
 import {
     AIMHOOMAN_REPOSITORY_AUTHORITY,
+    requiredEnvironment,
     verifyOwnerWorkflowRun,
 } from './github-owner-authority.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(ROOT, 'bin/aimhooman.mjs');
-
-export function changedProtectedPaths(base, head, cwd = ROOT) {
-    return protectedPathAuthorizationPlan(base, head, cwd).paths;
-}
 
 export function protectedPathAuthorizationPlan(base, head, cwd = ROOT) {
     const repo = openRepo(cwd);
@@ -59,18 +56,6 @@ export function authorizeProtectedPathPlan(
         paths: [...plan.paths],
         migrations: plan.migrations.map((migration) => ({ ...migration })),
     };
-}
-
-export function authorizeProtectedPaths(
-    base,
-    head,
-    authority,
-    { context, event, refName, workflowPath, cwd = ROOT } = {},
-) {
-    const plan = protectedPathAuthorizationPlan(base, head, cwd);
-    return authorizeProtectedPathPlan(plan, authority, {
-        context, event, refName, workflowPath, cwd,
-    });
 }
 
 function protectedPathChanges(repo, history) {
@@ -254,12 +239,6 @@ async function main() {
         refName: requiredEnvironment('GITHUB_HEAD_REF'),
         workflowPath: '.github/workflows/test.yml',
     });
-}
-
-function requiredEnvironment(name) {
-    const value = process.env[name];
-    if (!value) throw new Error(`${name} is required`);
-    return value;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

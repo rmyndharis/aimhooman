@@ -4,8 +4,6 @@ import { join } from 'node:path';
 import { GitRevisionError, gitBuf, parseRawDiff } from './gitx.mjs';
 import { gitEnvironment, GIT_TIMEOUT_MS } from './git-environment.mjs';
 
-export const EMPTY_HISTORY_OID = '0'.repeat(40);
-
 // History scans stream whole-commit diffs and trees, which can outgrow gitx's
 // 64 MiB staged-view default, so every wrapper here widens maxBuffer.
 const HISTORY_MAX_BUFFER = 128 * 1024 * 1024;
@@ -203,6 +201,38 @@ export function historyRange(repo, value) {
         reversed,
         commits,
     };
+}
+
+// selectPushBase picks the base a push scan starts from. The first push of a
+// branch reports an all-zero `before`, and scanning from the root would judge
+// history the default branch already carries, so a branch starts at its merge
+// base with origin/<default branch>; null means it adds no commits. An orphan
+// branch and the default branch itself still scan from the root.
+export function selectPushBase({ before, head, refName, defaultBranch, cwd }) {
+    const repo = { root: cwd };
+    const resolvedHead = resolveCommit(repo, head);
+    if (!isZeroObjectId(before)) {
+        try {
+            return resolveCommit(repo, before);
+        } catch {
+            // A force-push can replace the ref with an unrelated root while the
+            // event's `before` object is no longer fetchable. Scanning from the
+            // empty-history sentinel covers every commit reachable from the new
+            // head instead of trusting an unavailable boundary.
+            return '0'.repeat(resolvedHead.length);
+        }
+    }
+
+    if (refName && defaultBranch && refName !== defaultBranch) {
+        try {
+            const defaultHead = resolveCommit(repo, `refs/remotes/origin/${defaultBranch}`);
+            const common = gitString(repo, ['merge-base', defaultHead, resolvedHead]);
+            return common === resolvedHead ? null : common;
+        } catch {
+            // An orphan branch has no common commit. Its root history must be scanned.
+        }
+    }
+    return '0'.repeat(resolvedHead.length);
 }
 
 function isShallowBoundary(repo, commit) {

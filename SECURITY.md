@@ -56,17 +56,21 @@ only the latest minor release will receive security fixes.
 - A committed `.aimhooman.json` provides the versioned team profile. Invalid
   project policy fails closed; per-clone allow/deny entries remain local and
   should be governed by team process where compliance requires it.
-- For protected-path changes (agent instruction files, `.aimhooman.json`), CI resolves
-  the repository and owner through the GitHub API and fetches the exact workflow-run
-  attempt. GitHub must attribute both the actor and triggering actor to the owner's
+- For protected-path changes (agent instruction files, `.aimhooman.json`), this
+  repository's CI resolves the repository and owner through the GitHub API and fetches
+  the exact workflow-run attempt. The scripts are not part of the npm package or the
+  GitHub Action. GitHub must attribute both the actor and triggering actor to the owner's
   login and numeric ID. The resulting decision is bound to the exact head, transition
   commit, path, blob, and regular-file mode (or deletion tombstone); a policy migration
   also binds its old and new objects. Changes not attributed to the owner fail closed.
   These checks verify GitHub actor attribution, not an interactive human action, and
   cannot defend against a compromised owner credential.
 - The release pipeline pins actions to immutable commit SHAs and publishes with npm
-  build provenance. Pushing a `v*` tag runs the workflow: it installs dependencies,
-  runs the test suite, then publishes through npm trusted publishing. The job
+  build provenance. Pushing a `v*` tag runs the workflow. A verify job with read-only
+  permissions installs the dev dependencies, runs `npm run verify`, and keeps the
+  tarball it tested. A publish job, the only one allowed to write, refuses a tag whose
+  commit is not on `main` or whose name is not `v` plus the `package.json` version,
+  then publishes that exact tarball through npm trusted publishing. The publish job
   exchanges its GitHub OIDC identity for a credential that lives only for that
   publish, so the repository stores no npm token: there is no long-lived secret to
   leak, expire, or rotate. npm verifies the exchange against a publisher registered
