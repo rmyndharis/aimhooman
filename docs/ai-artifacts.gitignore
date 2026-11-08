@@ -39,8 +39,12 @@
 **/.cursor/session*
 **/.playwright-mcp/**
 **/.remember/**
-**/.specstory/cursorcloud/**
-**/.specstory/history/**
+**/.specstory/**
 **/.superpowers/**
 **/CLAUDE.local.md
+!**/.specstory/.gitignore
+!**/.specstory/.project.json
+!**/.specstory/.what-is-this.md
+!**/.specstory/cli/
+!**/.specstory/cli/**
 # <<< aimhooman:catalog-end
