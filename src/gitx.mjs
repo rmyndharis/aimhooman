@@ -494,6 +494,15 @@ function gatedTips(repo, reviewing) {
         .map(([, oid]) => oid);
 }
 
+// The local branches whose history holds the commit.
+function branchesContaining(repo, oid) {
+    assertOid(oid);
+    return gitBuf(['for-each-ref', '--format=%(refname)', '--contains', oid, 'refs/heads/'], repo.root)
+        .toString('utf8')
+        .split('\n')
+        .filter(Boolean);
+}
+
 // introducedCommits returns each commit added by a proposed branch update.
 // Reachability through refs/heads/* is trusted because those commits passed this
 // same guard when their branch was written; every other namespace is not. Using
@@ -513,6 +522,16 @@ export function introducedCommits(repo, updates, { firstBranchFromRemotes = fals
     const commits = [];
     const seen = new Set();
     const reviewing = new Set(updates.map((update) => update?.ref).filter(Boolean));
+    // A push also names what it publishes, which must not vouch for itself:
+    // git push origin wip:other would otherwise measure wip against wip. A
+    // source that names no branch (wip~0, a commit id) rules out every branch
+    // that holds the commit.
+    for (const update of updates) {
+        if (typeof update?.source !== 'string') continue;
+        const branch = update.source === 'HEAD' ? symbolicHead(repo) : update.source;
+        if (branch.startsWith('refs/heads/')) reviewing.add(branch);
+        else for (const name of branchesContaining(repo, update.newObjectId)) reviewing.add(name);
+    }
     const gated = gatedTips(repo, reviewing);
     for (const update of updates) {
         const oldObjectId = update?.oldObjectId;
