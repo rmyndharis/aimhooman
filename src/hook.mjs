@@ -203,16 +203,15 @@ function hookPreToolUse(input) {
         );
     }
     // A setting already in a config file can hand Git a command that commits,
-    // moves refs or repoints the hooks behind an ordinary call such as git log.
-    if (/\bgit\b/i.test(executorCommand)) {
-        const key = configuredGitRisk(configListing(), process.cwd());
-        if (key) {
-            return emitDecision(
-                'deny',
-                `aimhooman cannot verify the command Git config ${key} runs: it commits, moves refs or changes the hooks path. `
-                + 'Remove or change that setting and retry.',
-            );
-        }
+    // moves refs or repoints the hooks behind an ordinary call such as git log,
+    // whatever spells that call (g''it log) or runs Git for it (npm version).
+    const configuredKey = configuredGitRisk(configListing(), process.cwd());
+    if (configuredKey) {
+        return emitDecision(
+            'deny',
+            `aimhooman cannot verify the command Git config ${configuredKey} runs: it commits, moves refs or changes the hooks path. `
+            + 'Remove or change that setting and retry.',
+        );
     }
     const parsed = resolveGitAliases(rawParsed);
     const { commit, noVerify, addPaths } = parsed;

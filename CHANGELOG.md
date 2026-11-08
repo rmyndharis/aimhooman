@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent guard reads a credential helper written as a shell function
   (`!f() { ...; }; f`) through the commands in its body, so a helper that
   pushes is refused and one that prints a token is not.
-- The agent guard refuses a Git call while a config file, an included one too,
+- The agent guard refuses a command while a config file, an included one too,
   sets a command that commits, moves refs or changes the hooks path, such as a
   `core.pager` that runs `git commit --no-verify`.
 - The agent guard refuses a commit after a command that names `.git/config`,
@@ -47,8 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused.
 - The agent guard refuses `git push --rece=` and `--ex=`, which Git takes as
   `--receive-pack` and `--exec`.
-- The agent guard reads a `$'...'` string the way the shell does, so an
-  escaped quote inside one (`$'\''`) no longer hides the command after it.
+- The agent guard reads a `$'...'` string the way the shell does: an escaped
+  quote (`$'\''`) no longer hides the command after it, and an escape that
+  spells a character (`$'\x67it'`) is decoded.
 - The agent guard reads the command in a `case` branch, so
   `case x in x) git push --no-verify origin main;; esac` is refused like the
   command on its own.
@@ -62,15 +63,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `refs/heads`. Run `aimhooman init` to update installed hooks.
 - The agent guard refuses a command word the shell can expand into Git:
   `git${IFS}push`, `/usr/bin/gi? push`, `{git,push}`, zsh's `=git`, a variable
-  the same line sets, or `$G` before `push`, `commit` or another subcommand
-  that commits.
+  the same line sets, a positional parameter, or `$G` before arguments that
+  skip the hooks, such as `push --no-verify`.
 - A glob that can match a file named like an option, such as `--no-ver*` or
   `-*`, counts as a possible `--no-verify`.
 - The agent guard refuses a line where `printf -v` sets a variable Git runs or
-  reads config from, such as `GIT_SSH_COMMAND`.
+  reads config from, such as `GIT_SSH_COMMAND`, or an array element, whose
+  subscript zsh evaluates.
 - The agent guard reads the Git command behind `sudo` and `doas`, with an
-  uncertain target, and a push or merge behind `su -c`, `xargs` and other
-  wrappers, so `sudo git push --no-verify` is refused.
+  uncertain target, and a push or merge behind `su -c`, `xargs`, `find -exec`
+  and other wrappers, including an `sh -c` they run, so
+  `sudo git push --no-verify` is refused.
 - Long command lines are decided in time proportional to their length, and
   each repository is read once per line; 12 KB of `sh -c` took 10 s and 500
   chained Git commands 4.8 s, past Copilot's 5-second hook timeout.
