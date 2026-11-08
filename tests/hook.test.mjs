@@ -3637,6 +3637,19 @@ test('expanded command words and wrappers are refused only where they can run Gi
                 'sudo git status',
                 '$TOOL push origin main',
                 '"$DOCKER" pull alpine:3',
+                // Another program's -c or -m is not Git's.
+                '$CC -c $CFLAGS main.c',
+                '$CC -c "$SRC" -o out.o',
+                "$PYTHON -c 'import sys; print(sys.argv[1])' x",
+                '$PYTHON scripts/check_hookspath.py --fix',
+                // A ? inside ${...} is no glob, and naming a variable is not setting it.
+                '"${PYTHON:?}" -m pytest',
+                'grep -r PYTHON . ; $PYTHON -m pytest',
+                // A plain value shows what runs.
+                'PY=.venv/bin/python; $PY -m pytest -q',
+                'G=git; $G status',
+                // A word under find is grep's pattern, not a command.
+                "find . -type f -name '*.md' -exec grep -l \"git push\" {} +",
             ]) {
                 assert.equal(
                     await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
@@ -3673,12 +3686,16 @@ test('configuredGitRisk names a setting whose command commits, moves refs or rep
         ['credential.https://github.com.helper', '!gh auth git-credential'],
         ['credential.helper', '!f() { echo username=x; echo "password=${GH_TOKEN}"; }; f'],
         ['user.name', 'git commit'],
+        // --no-verbose is not --no-verify, and a listing only reads.
+        ['core.pager', 'delta --no-verbose'],
+        ['pager.log', 'git notes list'],
     ]), process.cwd()), null);
     for (const [key, value] of [
         ['core.pager', 'git commit -qm x --no-verify'],
         ['filter.x.clean', "sh -c 'git push --no-verify origin main'"],
         ['credential.helper', '!f() { git push origin main; }; f'],
         ['core.fsmonitor', 'git config core.hooksPath /dev/null'],
+        ['core.fsmonitor', 'f() { "$@" -q; }; f git push --no-verify origin HEAD'],
     ]) {
         assert.equal(configuredGitRisk(listing([['core.pager', 'less'], [key, value]]), process.cwd()), key, value);
     }
@@ -3705,6 +3722,10 @@ test('Git commands configured in files and helper functions are read', async () 
         // Whatever spells the call: the setting runs under any Git command.
         const spelled = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command: "g''it log --oneline -1" } });
         assert.equal(spelled?.permissionDecision, 'deny');
+        // A line that shows no Git call is left alone, and so is the fix.
+        for (const command of ['ls', 'cat .git/config', 'git config --unset core.pager']) {
+            assert.equal(await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }), null, command);
+        }
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -3727,6 +3748,7 @@ test('Git hidden behind arguments, subscripts, escapes or wrappers is refused', 
                 "$'\\x67it' -c core.hooks$'\\x50'ath=/dev/null $'\\x63'ommit --allow-empty -qm x",
                 'find . -maxdepth 0 -exec sh -c "g\'\'it push --no-verify origin HEAD:main" \\;',
                 'G=git; $G push origin main',
+                'S=sudo; $S git push --no-verify origin main',
             ]) {
                 const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
                 assert.equal(out?.permissionDecision, 'deny', `${profile}: ${command}`);
@@ -3784,6 +3806,7 @@ test('large commands are decided in time proportional to their length', async ()
         `x ${'includeif.'.repeat(16000)}`,
         `x ${'a='.repeat(32000)}`,
         '$a b;'.repeat(8000),
+        `f() { :; }; f${' '.repeat(64000)}x`,
     ]) {
         const started = performance.now();
         parseGit(command);

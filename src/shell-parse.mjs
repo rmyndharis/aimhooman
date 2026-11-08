@@ -154,7 +154,8 @@ function calledFunctionBody(text) {
     const call = /^\s*(?:;\s*)?([A-Za-z_][A-Za-z0-9_]*)/.exec(text.slice(end + 1));
     if (!call || call[1] !== (head[1] ?? head[2])) return text;
     // Arguments would reach the body as "$@", words this check never reads.
-    return /^\s*;?\s*$/.test(text.slice(end + 1 + call[0].length)) ? text.slice(head[0].length, end) : text;
+    const after = text.slice(end + 1 + call[0].length).trim();
+    return after === '' || after === ';' ? text.slice(head[0].length, end) : text;
 }
 
 // The first setting in `git config --list -z` output whose command visibly
@@ -167,9 +168,10 @@ export function configuredGitRisk(listing, cwd) {
         if (at < 0) continue;
         const key = entry.slice(0, at);
         for (const payload of configCommands(`${key}=${entry.slice(at + 1)}`)) {
-            if (/\bhookspath\b|--no-ver/i.test(payload)) return key;
+            if (/\bhookspath\b/i.test(payload) || inOrder(payload, [/\bgit\b/, /--no-veri(?:fy?)?(?![\w-])/i])) return key;
             if (parseGit(payload, cwd).commands.some((candidate) => (
-                EXPANDED_GIT_VERBS.has(candidate.verb) || candidate.bypassHooks || candidate.hooksPathOverride
+                !gitReadOnlyRefCommand(candidate.verb, candidate.args || [])
+                && (EXPANDED_GIT_VERBS.has(candidate.verb) || candidate.bypassHooks || candidate.hooksPathOverride)
             ))) return key;
         }
     }
@@ -446,12 +448,14 @@ function parseGitLine(command, initialCwd) {
             } else if (INDIRECT_EXECUTORS.has(shellExecutable(g0)) && !dynamicName) {
                 // A wrapper such as find -exec, xargs or su -c can run a push or
                 // a merge as well as a commit. The command from its first Git or
-                // shell word, and each word that is a command line of its own,
-                // are read as Git at a target the wrapper may change. Only what
-                // they visibly run counts: a loop the wrapper's shell runs is no
-                // reason to refuse it.
+                // shell word, and a word it takes as a command line (su -c,
+                // watch), are read as Git at a target the wrapper may change.
+                // Only what they visibly run counts: a loop the wrapper's shell
+                // runs, or grep -l "git push" under find, is no reason to refuse.
                 const rest = toks.slice(1);
-                const texts = rest.filter((word) => /\s/.test(word));
+                const wholeLine = ['parallel', 'watch'].includes(shellExecutable(g0));
+                const texts = rest.filter((word, index) => /\s/.test(word)
+                    && (wholeLine || rest[index - 1] === '-c' || rest[index - 1] === '--command'));
                 const at = rest.findIndex((word) => isGitExecutable(word) || WRAPPED_SHELLS.has(shellExecutable(word)));
                 if (at >= 0) texts.unshift(rest.slice(at).map(quoteShellWord).join(' '));
                 for (const text of texts) {
@@ -1297,40 +1301,58 @@ const EXPANDED_GIT_VERBS = new Set([
 
 // Whether an expanded command word can be Git. A positional parameter carries
 // a whole command ($1 $2 after set -- git ..., "$@" in a function); a glob or a
-// brace expansion picks a name the line does not show; a word that names git,
-// or a variable this line can set, can be it; so can a word on its own. What
-// follows the word is read as Git's arguments and refused when it skips or
-// repoints the hooks. Anything else, such as ${PYTHON:-python3} -m pip install
-// or "$DOCKER" push, runs another program or runs Git with its hooks.
+// brace expansion picks a name the line does not show; so can a word that names
+// git, a variable the line sets from anything but a plain value, or a word on
+// its own. A plain value shows what runs, so the command is read as if written
+// out. Otherwise the arguments are read as Git's, and refused only when they
+// skip or repoint the hooks for a subcommand that moves refs: another program's
+// own -c or -m proves nothing. So ${PYTHON:-python3} -m pip install, $CC -c
+// main.c and "$DOCKER" push pass.
 // shortcut: a variable an earlier command exported in a persistent shell can
 // still hold Git with arguments that look harmless; the Git hooks and CI remain
 // the backstop there.
 function expandedWordMayRunGit(tokens, setNames, cwd) {
     const word = tokens[0];
+    const args = tokens.slice(1);
     if (/\$(?:[@*0-9]|\{[#!]?[@*0-9])/.test(word)) return true;
-    if (/[*?]/.test(word) || inOrder(word, [/\[/, /\]/]) || inOrder(word, [/\{/, /,|\.\./, /\}/])) return true;
+    // Inside ${...}, a ? or a comma belongs to the expansion: ${PYTHON:?}.
+    const plain = word.replace(/\$\{[^{}]*\}/g, '$');
+    if (/[*?]/.test(plain) || inOrder(plain, [/\[/, /\]/]) || inOrder(plain, [/\{/, /,|\.\./, /\}/])) return true;
     if (/(?:^|[^a-z])git(?![a-z])/i.test(word)) return true;
     for (const [, name] of word.matchAll(/\$\{?[#!]?([A-Za-z_][A-Za-z0-9_]*)/g)) {
-        if (setNames().has(name)) return true;
+        if (!setNames().has(name)) continue;
+        const value = setNames().get(name);
+        if (!value || (word !== `$${name}` && word !== `\${${name}}`)) return true;
+        const ran = parseGit([value, ...args].map(quoteShellWord).join(' '), cwd);
+        return Boolean(ran.unreadable) || ran.commands.some(isGuardedCandidate);
     }
-    if (tokens.length === 1) return true;
+    if (!args.length) return true;
     // Without an option, or a word that can become one, nothing skips a hook.
-    const args = tokens.slice(1);
     if (!args.some((token) => token.startsWith('-') || mayExpandToOption(token))) return false;
-    if (args.some((token) => /no-verify|hookspath|config-env/i.test(token))) return true;
-    const asGit = parseGit(['git', ...args].map(quoteShellWord).join(' '), cwd);
-    return asGit.noVerify || asGit.bypassHooks || asGit.commands.some((candidate) => (
-        candidate.noVerify || candidate.bypassHooks || candidate.hooksPathOverride
+    if (args.some((token, index) => (
+        (args[index - 1] === '-c' && /^core\.hookspath=/i.test(token)) || /^--config-env=core\.hookspath=/i.test(token)
+    ))) return true;
+    return parseGit(['git', ...args].map(quoteShellWord).join(' '), cwd).commands.some((candidate) => (
+        candidate.verb !== 'unknown' && isProtectedMutation(candidate)
+        && (candidate.noVerify || candidate.bypassHooks || candidate.hooksPathOverride)
     ));
 }
 
-// Names a line can set: every word not read as an expansion (G=..., read G,
-// for G in, export G), the target of printf -vG, and ${G=...} or ${G:=...}.
-// One pass over the line, whatever number of expanded words it has.
+// What a line sets, in one pass each: a plain NAME=value keeps its value, and
+// anything else that can set a name (read, for, printf -vNAME, ${NAME:=...}, a
+// value with an expansion, two different values) leaves null, an unknown.
 function namesSetIn(line) {
-    const names = new Set();
-    for (const [, prefix, name, assign] of line.matchAll(/(\$\{|\$|-v)?([A-Za-z_][A-Za-z0-9_]*)(:?=)?/g)) {
-        if (!prefix || prefix === '-v' || (prefix === '${' && assign)) names.add(name);
+    const names = new Map();
+    for (const [, name, raw] of line.matchAll(/(?:^|[\s;&|(){}])([A-Za-z_][A-Za-z0-9_]*)\+?=([^\s;&|()<>]*)/g)) {
+        const value = raw.replace(/^(["'])([^"'$`\\*?[\]{}]*)\1$/, '$2');
+        const plain = /^[^"'$`\\*?[\]{}]*$/.test(value) && (!names.has(name) || names.get(name) === value);
+        names.set(name, plain ? value : null);
+    }
+    for (const [, assigned, viaOption] of line.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):?=|-v[^\S\n]*([A-Za-z_][A-Za-z0-9_]*)/g)) {
+        names.set(assigned ?? viaOption, null);
+    }
+    for (const [, words] of line.matchAll(/\b(?:for|getopts|mapfile|read|readarray|select)\b([^;&|\n]*)/g)) {
+        for (const [name] of words.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) names.set(name, null);
     }
     return names;
 }
