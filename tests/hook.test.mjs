@@ -4399,6 +4399,81 @@ test('Git inside a substitution is refused only when it skips the hooks', async 
     }
 });
 
+// A pull request body, a branch name or a list of files from a substitution is
+// text. It was read, it runs nothing that moves a ref, and the program it feeds
+// takes it as data, so it does not make the line opaque. What it runs, a file
+// its output is written to, and a program that runs its arguments still do.
+test('a substitution that only supplies text does not make a line opaque', async () => {
+    const lines = (...parts) => parts.join('\n');
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-text-substitution-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'gh pr create --title t --body "$(cat /tmp/body.md)"',
+                lines('gh pr create --title t --body "$(cat <<\'EOF\'', "Never run git push --no-verify, it's a rule.", 'EOF', ')"'),
+                lines('gh issue comment 5 --body "$(cat <<\'EOF\'', 'a > b and `code` with $HOME', 'EOF', ')"'),
+                'ls $(git rev-parse --show-toplevel)',
+                'wc -l $(git ls-files)',
+                'grep -rn foo $(git ls-files)',
+                'kill $(pgrep -f node)',
+                'docker run -v $(pwd):/app node:22 npm test',
+                'cd $(git rev-parse --show-toplevel) && ls',
+                'echo "now $(date)"',
+                'ls $(dirname $(pwd))',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                // What the substitution runs.
+                'ls $(git push --no-verify origin wip)',
+                'ls $(git -c core.hooksPath=/dev/null commit -qm x)',
+                'cat $(echo git push --no-verify origin wip | sh)',
+                'ls $(rm -rf .git/hooks)',
+                'ls $(aimhooman allow x)',
+                'ls $(rm $(pwd)/x)',
+                lines('gh pr create --title t --body "$(cat <<EOF', '$(git push --no-verify origin wip)', 'EOF', ')"'),
+                // A path it builds for a program that writes, and a program that runs its arguments.
+                'echo x > $(git rev-parse --git-dir)/hooks/pre-commit',
+                'tee $(git rev-parse --git-dir)/hooks/pre-commit',
+                'rm -rf $(git rev-parse --git-dir)/hooks',
+                'xargs $(echo git) push --no-verify',
+                'env $(echo git) push --no-verify origin wip',
+                'find . -exec $(echo git) push --no-verify \;',
+                '$(echo git) push --no-verify origin wip',
+                // The rest of the line is read as it was.
+                'ls $(pwd) && git push --no-verify origin wip',
+                'gh pr create --title t --body "$(cat /tmp/b.md)" && git -c core.hooksPath=/dev/null commit -qm x',
+                lines('gh pr create --title t --body "$(cat /tmp/b.md)"', 'git push --no-verify origin wip'),
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test('parseGit sets aside a substitution that only supplies text', () => {
+    for (const command of ['ls $(pwd)', 'gh pr view 1 --json x --jq "$(cat q)"', 'kill $(pgrep node)']) {
+        const parsed = parseGit(command);
+        assert.equal(parsed.uncertainShell, false, command);
+        assert.equal(parsed.opaqueCommitHiding, false, command);
+    }
+    for (const command of [
+        'ls $(git push --no-verify origin wip)',
+        'echo x > $(pwd)/f',
+        'rm -rf $(pwd)/x',
+        'xargs $(echo git) status',
+        'ls $(echo a; echo b)',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, true, command);
+    }
+    // A Git command keeps what it had: its words can become an option.
+    assert.equal(parseGit('git commit -m "$(date)"').uncertainShell, true);
+    assert.equal(parseGit('git push origin "$(git rev-parse HEAD)"').uncertainShell, true);
+});
+
 test('an ANSI-C quote that decodes in full reads as plain text', () => {
     assert.equal(normalizeAnsiCQuotes("core.hooks$'\\x50'ath"), 'core.hooks"P"ath');
     assert.equal(normalizeAnsiCQuotes("$'a\\nb'"), '$"a\\\\nb"');

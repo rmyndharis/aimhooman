@@ -275,6 +275,16 @@ function parseGitLine(command, initialCwd, posix = true) {
     }
     uncertainShell = hasUncertainShellSyntax(cmd);
     const substitutions = substitutionSpans(cmd, posix);
+    const substitutionRuns = substitutions.map(({ inner }) => (inner === null ? null : parseGit(dropDataHeredocs(inner), initialCwd)));
+    // A substitution that was read, runs nothing that moves a ref or touches the
+    // hooks, and feeds a program that takes data, as gh pr create --body "$(cat
+    // file)" or kill $(pgrep node), only supplies text. It is set aside, like a
+    // variable, when the line is asked what else in it is uncertain; the checks
+    // that read the line one word at a time still see it.
+    const settled = settledSubstitutions(cmd, substitutions, substitutionRuns);
+    const looseCmd = settled.size
+        ? maskSubstitutions(cmd, substitutions.filter((_, index) => settled.has(index)), '$AIMHSUB')
+        : cmd;
     // An output redirect cannot hide a commit, and a nested shell read in full
     // hides nothing. The line stays uncertain for the checks around a commit, but
     // only the rest of what makes it uncertain can make it opaque. A redirect
@@ -292,16 +302,33 @@ function parseGitLine(command, initialCwd, posix = true) {
         controlFlow: false,
         programFilters: true,
     });
+    // The same three, for the line with the settled substitutions set aside. What
+    // the units go on to find marks both.
+    const loose = { uncertain: uncertainShell, redirectOnly, opaque: opaqueShell, sink: opaqueSink };
+    if (settled.size) {
+        loose.uncertain = hasUncertainShellSyntax(looseCmd);
+        loose.redirectOnly = loose.uncertain && !hasUnquotedPipe(looseCmd) && !hasUncertainShellSyntax(looseCmd, { payload: true });
+        loose.opaque = loose.uncertain && !loose.redirectOnly;
+        loose.sink = loose.opaque && hasUncertainShellSyntax(blankGroups(maskSubstitutions(looseCmd, substitutionSpans(looseCmd, posix))), {
+            payload: true,
+            safePipes: PIPE_SINKS_THAT_ONLY_STORE,
+            controlFlow: false,
+            programFilters: true,
+        });
+    }
     // Uncertain, and opaque to the checks that ask for any command at all, but
     // not a place for code to hide: a loop, a group or an env flag whose
     // commands are read like the rest.
     const markRead = () => {
         uncertainShell = true;
         opaqueShell = true;
+        loose.uncertain = true;
+        loose.opaque = true;
     };
     const markUncertain = () => {
         markRead();
         opaqueSink = true;
+        loose.sink = true;
     };
     let unreadable = payloadUnreadable(cmd);
     let setNames;
@@ -352,7 +379,7 @@ function parseGitLine(command, initialCwd, posix = true) {
     // against the rest of the line: a substitution that reads (git branch
     // --show-current) or runs Git with its hooks is no reason to refuse. One
     // that cannot be read to its end is unreadable.
-    for (const { inner, kind } of substitutions) {
+    for (const [index, { inner, kind }] of substitutions.entries()) {
         if (inner === null) {
             if (posix) {
                 markUncertain();
@@ -360,7 +387,7 @@ function parseGitLine(command, initialCwd, posix = true) {
             }
             continue;
         }
-        const ran = parseGit(dropDataHeredocs(inner), initialCwd);
+        const ran = substitutionRuns[index];
         mergeGitRun({ ...ran, unreadable: false, commands: ran.commands.filter(runsBeyondTheLine) }, initialCwd);
         // tee >(sh) writes text into a shell: the substitution that was read is
         // the program that runs it.
@@ -440,8 +467,11 @@ function parseGitLine(command, initialCwd, posix = true) {
             noVerify ||= parsed.noVerify;
             bypassHooks ||= parsed.bypassHooks || outerEnvironmentRisk.length > 0;
             uncertainShell = true;
+            loose.uncertain = true;
             opaqueShell ||= parsed.opaqueCommitHiding || Boolean(parsed.unreadable);
             opaqueSink ||= parsed.opaqueSink || Boolean(parsed.unreadable);
+            loose.opaque ||= parsed.opaqueCommitHiding || Boolean(parsed.unreadable);
+            loose.sink ||= parsed.opaqueSink || Boolean(parsed.unreadable);
             for (const path of parsed.addPaths) addPaths.push(path);
             for (const candidate of parsed.commands) commands.push({
                 ...candidate,
@@ -1019,15 +1049,15 @@ function parseGitLine(command, initialCwd, posix = true) {
     // feed a commit (subshells, substitution, script-feeds, code-executing or
     // unlisted pipe segments). A bare pipeline of known read-only commands
     // (gh ... | tail) cannot, so it is not treated as a potential commit.
-    const opaqueCommitHiding = (opaqueShell || (redirectOnly && (prefixHooksRisk || prefixIndexMutationRisk)))
-        && !benignReadOnlyPipeline(cmd);
+    const opaqueCommitHiding = (loose.opaque || (loose.redirectOnly && (prefixHooksRisk || prefixIndexMutationRisk)))
+        && !benignReadOnlyPipeline(looseCmd);
     return {
         commit,
         noVerify,
         bypassHooks,
-        uncertainShell,
+        uncertainShell: loose.uncertain,
         opaqueCommitHiding,
-        opaqueSink: opaqueCommitHiding && (opaqueSink || (redirectOnly && (prefixHooksRisk || prefixIndexMutationRisk))),
+        opaqueSink: opaqueCommitHiding && (loose.sink || (loose.redirectOnly && (prefixHooksRisk || prefixIndexMutationRisk))),
         stdinCode,
         classification,
         environmentRisk: unique(commands.flatMap((candidate) => candidate.environmentRisk || [])),
@@ -1287,15 +1317,53 @@ function blankGroups(text) {
 
 // The line with every substitution that was read replaced by a plain word, to
 // ask what else in it is opaque.
-function maskSubstitutions(text, spans) {
+function maskSubstitutions(text, spans, word = 'X') {
     let out = '';
     let at = 0;
     for (const span of spans) {
         if (span.inner === null || span.start < at) continue;
-        out += `${text.slice(at, span.start)}X`;
+        out += `${text.slice(at, span.start)}${word}`;
         at = span.end;
     }
     return out + text.slice(at);
+}
+
+// Whether what a substitution ran leaves the line as it was: nothing beyond a
+// read-only Git command or a note the guard follows up, and no touch of the
+// hooks.
+function readsOnly(run) {
+    return !run.opaqueCommitHiding && !run.prefixHooksRisk
+        && run.commands.every((candidate) => NOTE_VERBS.has(candidate.verb)
+            || (candidate.verb !== 'unknown' && gitReadOnlyRefCommand(candidate.verb, candidate.args || [])));
+}
+
+// Whether a unit hands its words to a program that takes them as data, and
+// writes no file of its own: a redirect can name a path the substitution builds.
+function feedsData(unitText) {
+    const words = unwrapShellControl(stripCommandGrouping(unwrapShellControl(shellWords(unitText.trim())).tokens)).tokens;
+    let at = 0;
+    while (at < words.length && isAssignment(words[at])) at += 1;
+    const program = words[at];
+    return Boolean(program) && !/[$`(]/.test(program) && DATA_ARGUMENT_PROGRAMS.has(shellExecutable(program))
+        && redirectTargets(unitText).every((target) => target === '/dev/null');
+}
+
+// The indexes of the substitutions that only supply text. A substitution that
+// no unit holds whole, because it spans a separator, is not one; nor is any in
+// a line with more substitutions or units than a command line has.
+function settledSubstitutions(cmd, spans, runs) {
+    const settled = new Set();
+    if (!spans.length || spans.length > 64) return settled;
+    const units = shellUnits(cmd);
+    if (units.length > 2000) return settled;
+    for (const [index, span] of spans.entries()) {
+        const run = runs[index];
+        if (span.kind !== 'command' || !run || !readsOnly(run)) continue;
+        const text = cmd.slice(span.start, span.end);
+        const holders = units.filter((unit) => unit.text.includes(text));
+        if (holders.length && holders.every((unit) => feedsData(unit.text))) settled.add(index);
+    }
+    return settled;
 }
 
 // A heredoc body is data to the command that reads it, not a command line:
@@ -1401,13 +1469,21 @@ function dropDataHeredocs(text) {
         } else if (char === '<' && text[i + 1] === '<') {
             const operator = heredocOperator(text, i);
             if (operator) {
-                if (!operator.hereString) pending.push(operator);
+                if (!operator.hereString) pending.push({ ...operator, start: i });
                 i = operator.end - 1;
             }
         } else if (char === '\n') {
             if (pending.length) {
                 const data = dataReaderLine(text.slice(lineStart, i));
                 let at = i + 1;
+                // A reader that only prints its body is left alone on its line: the
+                // operator goes with the body and the terminator.
+                if (data) {
+                    for (const operator of pending) {
+                        out += text.slice(copied, operator.start);
+                        copied = operator.end;
+                    }
+                }
                 out += text.slice(copied, at);
                 for (const operator of pending.splice(0)) {
                     const body = heredocBody(text, at, operator);
@@ -1417,7 +1493,6 @@ function dropDataHeredocs(text) {
                                 if (span.inner !== null) out += `$(${span.inner})\n`;
                             }
                         }
-                        out += text.slice(body.end, body.after);
                     } else {
                         out += text.slice(at, body.after);
                     }
@@ -3557,6 +3632,18 @@ const NON_EXECUTING_COMMANDS = new Set([
 const REMOTE_COMMAND_DRIVERS = new Set([
     'colima', 'docker', 'kubectl', 'lima', 'limactl', 'mosh', 'multipass', 'nerdctl', 'podman',
     'ssh', 'vagrant',
+]);
+
+// Programs whose arguments are data, never a path they write: the readers that
+// change nothing in the files they name, the programs that act on another
+// machine or a container, gh, and a few that print, signal or open what they are
+// given. Git is not here: its words can be an option that skips a hook.
+const DATA_ARGUMENT_PROGRAMS = new Set([
+    ...FILE_READERS,
+    ...REMOTE_COMMAND_DRIVERS,
+    'basename', 'date', 'dirname', 'gh', 'hostname', 'id', 'kill', 'killall', 'open', 'pgrep',
+    'pkill', 'printenv', 'readlink', 'realpath', 'seq', 'sleep', 'type', 'uname', 'uptime',
+    'which', 'whereis', 'whoami',
 ]);
 
 // These wrappers can evaluate command text, change cwd, or enter another

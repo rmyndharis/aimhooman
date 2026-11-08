@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A word holding a value in a push, as in `git push origin "$BRANCH"`, passes except on strict; a line that spells `--no-verify` stays refused.
 - A pager in a stored Git setting or in `GIT_PAGER` is no longer read as a pipeline.
 - Listings with an expanded pattern, `arr[0]=x`, `$GIT status` and `./$SCRIPT` are no longer refused.
+- A substitution that only supplies text to `gh`, `ls`, `cat`, `grep`, `kill`, `docker`, `cd` and the like, as in `gh pr create --body "$(cat <<'EOF' ...)"`, no longer makes the line refused on any profile.
 - Git behind `find -execdir`, `parallel` or `submodule foreach` is refused only when it skips the hooks.
 - A comment that names `git push --no-verify`, and a `{ }` group of read-only Git commands, are no longer refused.
 - Long chains of `env`, `nice`, `sudo` or assignments are decided quickly, and very large commands no longer crash the parser.
