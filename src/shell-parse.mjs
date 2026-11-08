@@ -1732,8 +1732,9 @@ function aimhoomanInvocation(tokens, { adjacent = false } = {}) {
         while (at < tokens.length && (tokens[at].startsWith('-') || ['dlx', 'exec', 'run', 'x'].includes(tokens[at]))) at += 1;
         if (!namesAimhooman(tokens[at])) return null;
     }
-    let args = tokens.slice(at + 1);
-    while (namesAimhooman(args[0])) args = args.slice(1);
+    let first = at + 1;
+    while (namesAimhooman(tokens[first])) first += 1;
+    const args = tokens.slice(first);
     const subcommand = (adjacent ? args[0] : args.find((arg) => !arg.startsWith('-'))) ?? '';
     const option = args.findIndex((arg) => arg === '--profile' || arg.startsWith('--profile='));
     const profile = option < 0 ? null

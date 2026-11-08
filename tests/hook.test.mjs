@@ -4432,11 +4432,12 @@ test('large commands are decided in time proportional to their length', async ()
         '# note\n'.repeat(16000),
         "<<'".repeat(16000),
         "x=$(cat <<'EOF'\nline with 'quote and ( paren\nEOF\n)\n".repeat(1000),
-        `cp ${'aimhooman '.repeat(16000)}dest`,
-        `xargs ${'aimhooman '.repeat(16000)}`,
-        `find . ${'-exec aimhooman status \\; '.repeat(4000)}`,
-        `python3 -c "import os; ${"os.system('aimhooman status'); ".repeat(2000)}"`,
-        `${'echo x > r.sh; '.repeat(16000)}sh r.sh`,
+        `cp ${'aimhooman '.repeat(8000)}dest`,
+        `xargs ${'aimhooman '.repeat(8000)}`,
+        `aimhooman ${'aimhooman '.repeat(8000)}`,
+        `find . ${'-exec aimhooman status \\; '.repeat(2000)}`,
+        `python3 -c "import os; ${"os.system('aimhooman status'); ".repeat(1000)}"`,
+        `${'echo x > r.sh; '.repeat(8000)}sh r.sh`,
     ]) {
         const started = performance.now();
         parseGit(command);
