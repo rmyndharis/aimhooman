@@ -141,8 +141,10 @@ By participating, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md
 
 ## Releases
 
-Releases publish to npm automatically when a `v*` tag is pushed. The workflow
-installs dependencies, runs the test suite, and publishes with npm build provenance.
+Releases publish to npm automatically when a `v*` tag is pushed. A read-only job
+installs dependencies and runs `npm run verify`; a second job publishes the tarball
+it tested, with npm build provenance, once the tag's commit is on `main` and the tag
+is `v` plus the `package.json` version.
 To cut a release, bump the version (keep `package.json`, `.claude-plugin/plugin.json`,
 `.codex-plugin/plugin.json`, and `.claude-plugin/marketplace.json` in sync), add the
 `## [version]` CHANGELOG entry and the matching README version badge, then:

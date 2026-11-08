@@ -62,10 +62,19 @@ test('sync:catalog --check fails when an artifact is stale or missing', () => {
     });
 });
 
-test('gitignore artifact lists exactly the rule-derived patterns', () => {
+test('gitignore artifact lists each rule-derived pattern once', () => {
     const text = readLf(join(ROOT, 'docs/ai-artifacts.gitignore'));
     const lines = managedLines(text, '# >>> aimhooman:catalog-start', '# <<< aimhooman:catalog-end');
-    assert.deepEqual(lines, patternsForRules(loadRules()));
+    const patterns = patternsForRules(loadRules());
+    // In a .gitignore `**/x` also matches `x` at the root: the twin adds nothing,
+    // but every rule pattern must still be covered by one of the two.
+    for (const pattern of patterns) {
+        assert.ok(lines.includes(`**/${pattern}`) || lines.includes(pattern), `${pattern} is not covered`);
+    }
+    for (const line of lines) {
+        assert.ok(patterns.includes(line), `${line} is not a rule pattern`);
+        assert.equal(lines.includes(`**/${line}`), false, `${line} is listed twice`);
+    }
 });
 
 test('catalog table covers every built-in rule', () => {

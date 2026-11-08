@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertPackageManifest } from './package-manifest.mjs';
 
 const root = join(import.meta.dirname, '..');
-const retainedArtifactDir = process.env.AIMHOOMAN_ARTIFACT_DIR || '';
-const temporary = retainedArtifactDir || mkdtempSync(join(tmpdir(), 'aimhooman-verify-'));
+// The release workflow sets this to publish exactly the tarball verified here.
+const artifactDir = process.env.AIMHOOMAN_ARTIFACT_DIR || '';
+const temporary = mkdtempSync(join(tmpdir(), 'aimhooman-verify-'));
 const npmCli = process.env.npm_execpath;
 
 function run(command, args, options = {}) {
@@ -29,10 +30,6 @@ function runNpm(args, options = {}) {
 }
 
 try {
-    if (retainedArtifactDir) {
-        mkdirSync(temporary, { recursive: true });
-        rmSync(join(temporary, 'artifact.json'), { force: true });
-    }
     runNpm(['run', 'check']);
     runNpm(['run', 'check:static']);
     runNpm(['run', 'test:coverage']);
@@ -48,7 +45,6 @@ try {
         'bin/aimhooman.mjs', 'GEMINI.md', '.gemini/settings.json',
         '.agents/rules/aimhooman.md',
         'schemas/scan-report.schema.json', 'docs/hosts.json',
-        'docs/logo/aimhooman-logo.png', 'docs/logo/aimhooman.png',
     ]) {
         if (!paths.includes(required)) throw new Error(`packed artifact is missing ${required}`);
     }
@@ -107,16 +103,10 @@ try {
     git(['commit', '-q', '-m', 'exercise installed hooks']);
     run(process.execPath, [installedCli, 'status'], { cwd: repository, env: environment });
     run(process.execPath, [installedCli, 'doctor'], { cwd: repository, env: environment });
-    if (retainedArtifactDir) {
-        const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-        writeFileSync(join(temporary, 'artifact.json'), JSON.stringify({
-            schema_version: 1,
-            name: packageJson.name,
-            version: packageJson.version,
-            filename: packed.filename,
-            integrity,
-        }, null, 2) + '\n');
+    if (artifactDir) {
+        mkdirSync(artifactDir, { recursive: true });
+        copyFileSync(tarball, join(artifactDir, packed.filename));
     }
 } finally {
-    if (!retainedArtifactDir) rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true });
 }

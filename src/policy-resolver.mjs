@@ -15,11 +15,16 @@ class PolicyTargetError extends Error {
 
 export class PolicyProfileError extends Error {
     constructor(requested, required, invalid = false) {
+        // Clean and compliance are not ordered, so one replaces the other rather
+        // than lowering it, and only the policy can switch between them.
+        const lowering = required === 'strict';
         super(invalid
             ? `explicit profile "${requested}" must be clean, strict, or compliance`
             : (
-                `explicit profile "${requested}" cannot lower target profile "${required}"; ` +
-                'it may only match the target or escalate it to strict'
+                `explicit profile "${requested}" cannot ${lowering ? 'lower' : 'replace'} ` +
+                `target profile "${required}"; it may only match the target or escalate it to strict` +
+                (lowering ? '' : '. The target profile comes from .aimhooman.json, ' +
+                    'or from init --profile when none is committed')
             ));
         this.name = 'PolicyProfileError';
         this.requested = requested;

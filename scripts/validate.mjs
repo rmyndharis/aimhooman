@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRules } from '../src/rules.mjs';
 import { loadProjectPolicy } from '../src/state.mjs';
-import { validateCodexManifest } from '../src/codex-manifest.mjs';
+import { validateCodexManifest } from './codex-manifest.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 

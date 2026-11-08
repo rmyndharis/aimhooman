@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent guard reads the command in a `case` branch, so
   `case x in x) git push --no-verify origin main;; esac` is refused like the
   command on its own.
+- The release workflow verifies with read-only permissions and publishes the
+  tarball it verified, only for a tag on `main` that names the `package.json`
+  version.
 
 ### Fixed
 
@@ -99,6 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over the dispatcher after the original was chained.
 - `init` refuses, instead of rewriting it, a dispatcher edited after install,
   such as one with a `git lfs` line appended.
+- The GitHub Action scans a new branch from its merge base with the default
+  branch, not from the root commit, and passes when the branch adds nothing.
+- On Windows, taking a lock no longer fails with `EPERM` when another process
+  deleted a lock file it still holds open.
+- `check --profile` names where the repository's profile comes from when it
+  refuses to swap `clean` and `compliance`.
 
 ### Changed
 
@@ -110,6 +119,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace rules and workflows from it.
 - A chained bash hook sees the backup path as `$0`, so pre-commit.com no longer
   finds a `.legacy` hook it moved aside before aimhooman was installed.
+- The npm package no longer ships the logos or the Codex manifest validator,
+  which only this repository uses.
+- `docs/ai-artifacts.gitignore` drops root patterns that a `**/` twin already
+  covers.
 
 ## [0.6.0] - 2026-08-12
 

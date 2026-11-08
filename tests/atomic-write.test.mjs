@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import {
+import fs, {
     existsSync,
     mkdirSync,
     mkdtempSync,
@@ -11,6 +11,7 @@ import {
     rmSync,
     writeFileSync,
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicWrite, precedes, withLock } from '../src/atomic-write.mjs';
@@ -258,6 +259,63 @@ test('a lock held by an unidentifiable owner fails closed and names the queue to
         });
     } finally {
         rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// The lock reads its queue through node:fs and takes no injected calls there, so
+// fail one call on one path at the module level and let every other call through.
+function failingFsCall(name, path, code, fn) {
+    const original = fs[name];
+    fs[name] = (target, ...rest) => {
+        if (target === path) throw Object.assign(new Error(`${code}: ${name} ${target}`), { code });
+        return original(target, ...rest);
+    };
+    syncBuiltinESMExports();
+    try {
+        return fn();
+    } finally {
+        fs[name] = original;
+        syncBuiltinESMExports();
+    }
+}
+
+// Windows answers EPERM for a candidate another process deleted while a handle
+// on it was still open, on stat and unlink alike. A contender scanning the queue
+// at that moment must read it as gone; off Windows EPERM is a real permission
+// error and still fails the lock.
+test('a lock candidate being deleted on Windows reads as gone, not as a failure', () => {
+    for (const call of ['statSync', 'unlinkSync']) {
+        const dir = mkdtempSync(join(tmpdir(), 'aim-lock-delete-pending-'));
+        const lock = join(dir, 'state.lock');
+        const queue = `${lock}.queue`;
+        const token = '12345678-1234-4123-8123-123456789abc';
+        const candidate = join(queue, `${token}.json`);
+        const options = { retries: 3, staleMs: 0, retryDelayMs: 1 };
+        try {
+            mkdirSync(queue, { recursive: true });
+            // No process has this PID: Windows PIDs are multiples of four and it
+            // is above pid_max on Linux and macOS, so the owner reads as dead.
+            writeFileSync(candidate, JSON.stringify({
+                version: 1,
+                pid: 2147483646,
+                token,
+                processIdentity: null,
+                choosing: false,
+                ticket: 1,
+            }));
+            assert.equal(
+                failingFsCall(call, candidate, 'EPERM', () => onWin32(() => withLock(lock, () => 'acquired', options))),
+                'acquired',
+                call,
+            );
+            assert.throws(
+                () => failingFsCall(call, candidate, 'EPERM', () => onPosix(() => withLock(lock, () => 'acquired', options))),
+                (error) => error.code === 'EPERM',
+                call,
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     }
 });
 

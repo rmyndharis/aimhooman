@@ -1,8 +1,8 @@
 # Team policy and overrides
 
 aimhooman's per-clone defaults serve a solo developer. This page covers the
-team layer: a versioned policy file, owner-authorized changes to protected
-paths in CI, local overrides, and local rule packs.
+team layer: a versioned policy file, local overrides, and local rule packs,
+plus how this repository's own CI authorizes changes to protected paths.
 
 ## Versioned team policy
 
@@ -32,11 +32,19 @@ outside the engine and clears only through a bound `policy-review` acknowledgmen
 
 ### Owner authorization in CI
 
-For a protected-path change, CI verifies the pinned repository and owner login plus
-numeric IDs through the GitHub API, then inspects the exact workflow-run attempt.
-GitHub must attribute both `actor` and `triggering_actor`, including their numeric IDs,
-to that owner. CI then binds the authorization to the exact head, transition commit,
-path, resulting blob and regular-file mode, or deletion tombstone. A strict-policy
+This is how aimhooman's own repository accepts changes to protected paths (agent
+instruction files and `.aimhooman.json`) in CI. The scripts that do it pin this
+repository and its owner, and they ship with neither the npm package nor the GitHub
+Action. In any other repository nothing approves these changes in CI: a `strict` range
+check fails on them, and `clean` reports them as notices
+([docs/integrations.md](integrations.md#github-actions)).
+
+For a protected-path change, this repository's CI verifies the pinned repository and
+owner login plus numeric IDs through the GitHub API, then inspects the exact
+workflow-run attempt. GitHub must attribute both `actor` and `triggering_actor`,
+including their numeric IDs, to that owner. CI then binds the authorization to the
+exact head, transition commit, path, resulting blob and regular-file mode, or
+deletion tombstone. A strict-policy
 migration also binds its old and new policy objects. A different attempt, commit, path
 result, mode, or policy transition needs fresh authorization. A change not attributed to
 the owner fails closed. This is owner authorization verified through GitHub attribution,

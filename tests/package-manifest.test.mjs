@@ -21,7 +21,7 @@ function filesBelow(directory, prefix) {
 }
 
 function requiredFiles() {
-    const runtime = ['bin', 'src', 'rules', 'hooks', 'schemas', 'docs/design', 'docs/logo']
+    const runtime = ['bin', 'src', 'rules', 'hooks', 'schemas', 'docs/design']
         .flatMap((directory) => filesBelow(join(root, directory), directory));
     const registry = JSON.parse(readFileSync(join(root, 'docs/hosts.json'), 'utf8'));
     const adapters = registry.hosts.flatMap((host) => [
@@ -107,6 +107,8 @@ test('package manifest allows a public PEM certificate but rejects private-key P
 test('package manifest rejects paths outside the public package contract', () => {
     for (const path of [
         '.github/workflows/release.yml',
+        // The README logo renders from the repository; the package does not carry it.
+        'docs/logo/aimhooman-logo.png',
         '/src/absolute.mjs',
         'src/../secret.txt',
         'src\\ambiguous.mjs',
