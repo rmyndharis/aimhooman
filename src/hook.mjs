@@ -25,6 +25,7 @@ import {
     gitIndexMutationRisk,
     gitReadOnlyRefCommand,
     gitRunPayload,
+    hasGitCandidate,
     hasUnquotedPipe,
     hookSkipOptions,
     inspectCommitOptions,
@@ -162,12 +163,15 @@ function hookPreToolUse(input) {
     // A POSIX shell reads $'...' with escapes; every check below sees the line
     // with the same quote boundaries the shell does.
     const executorCommand = nonPosixExecutor(executor.name) ? rawCommand : normalizeAnsiCQuotes(rawCommand);
-    const rawParsed = parseGit(executorCommand);
+    // # starts a comment and a backtick a substitution in the POSIX shells; in
+    // PowerShell a backtick escapes the character after it, and cmd has neither.
+    const rawParsed = parseGit(executorCommand, undefined, { posix: !nonPosixExecutor(executor.name) });
     if (nonPosixExecutor(executor.name)) {
         rawParsed.uncertainShell = true;
         // The benign-pipeline classifier is POSIX-only; never exempt a non-POSIX
         // shell line (pwsh/fish/cmd/nu) from opaque-commit-hiding treatment.
         rawParsed.opaqueCommitHiding = true;
+        rawParsed.opaqueSink = true;
     }
     // What this guard enforces is the user's to change, not the command's it
     // guards: a write into .git/aimhooman, an exception, an uninstall or a
@@ -179,18 +183,8 @@ function hookPreToolUse(input) {
         );
     }
     for (const admin of rawParsed.commands.filter((candidate) => candidate.verb === 'aimhooman')) {
-        if (admin.subcommand === 'init') {
-            const current = currentProfile(admin.cwd);
-            if (current === null || admin.profile === 'strict' || admin.profile === current) continue;
-            return emitDecision(
-                'deny',
-                `aimhooman init --profile ${admin.profile} would change this repository's profile from ${current}; ask the user to run it.`,
-            );
-        }
-        return emitDecision(
-            'deny',
-            `aimhooman ${admin.subcommand} changes what this guard enforces; ask the user to run it.`,
-        );
+        const refusal = adminRefusal(admin, false);
+        if (refusal) return emitDecision('deny', refusal);
     }
     const configCommand = rawParsed.commands.find((candidate) => candidate.runsConfigCommand);
     if (configCommand) {
@@ -316,8 +310,12 @@ function hookPreToolUse(input) {
     // pipeline of read-only commands (git log | head) cannot hide one, which
     // is what opaqueCommitHiding leaves out. This only needs to catch what the
     // per-command loop below cannot reach: it visits commands that move refs, so
-    // a git add or git status beside the opaque part leaves it unvisited.
-    if (profile === 'strict' && parsed.opaqueCommitHiding && !movesRefs) {
+    // a git add or git status beside a pipe into a shell leaves that unvisited.
+    // A line with no Git command at all is refused for any opaque part; one with
+    // some is refused for a part that can run what was not read, not for a
+    // substitution that was.
+    if (profile === 'strict' && parsed.opaqueCommitHiding
+        && (!hasGitCandidate(parsed.commands) || (parsed.opaqueSink && !movesRefs))) {
         return emitDecision(
             'deny',
             'aimhooman cannot safely verify this command under the strict profile; ' +
@@ -585,7 +583,7 @@ function hookPreToolUse(input) {
     // which is the reason to refuse rather than a reason to let it past. A git
     // add beside it moves no ref, so it does not make the rest modelled.
     const opaqueCommitRisk = parsed.opaqueCommitHiding
-        && !movesRefs
+        && (!hasGitCandidate(parsed.commands) || (parsed.opaqueSink && !movesRefs))
         && parsed.prefixRisk;
     const prefixBypass = commitPrefixRisk || opaqueCommitRisk;
     const aliasBypass = parsed.commands.some((candidate) => (
@@ -864,11 +862,25 @@ function scriptThatBypasses(commands) {
         for (const text of scriptTexts(script)) {
             if (parseGit(text, script.cwd).commands.some((candidate) => (
                 candidate.noVerify || candidate.bypassHooks || candidate.hooksPathOverride
-                || candidate.verb === 'aimhooman' || candidate.verb === 'aimhooman-state'
+                || candidate.verb === 'aimhooman-state'
+                || (candidate.verb === 'aimhooman' && adminRefusal(candidate, true))
             ))) return script.label;
         }
     }
     return null;
+}
+
+// Why an agent may not run this aimhooman command, or null. init may keep the
+// profile or raise it to strict. A script that sets the profile from a variable
+// is not judged: what it holds is not in the file.
+function adminRefusal(admin, inScript) {
+    if (admin.subcommand !== 'init') {
+        return `aimhooman ${admin.subcommand} changes what this guard enforces; ask the user to run it.`;
+    }
+    if (inScript && /[$`]/.test(admin.profile ?? '')) return null;
+    const current = currentProfile(admin.cwd);
+    if (current === null || admin.profile === 'strict' || admin.profile === current) return null;
+    return `aimhooman init --profile ${admin.profile} would change this repository's profile from ${current}; ask the user to run it.`;
 }
 
 function scriptTexts(script) {

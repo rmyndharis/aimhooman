@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { parseGit, asObject, shellPathIsAmbiguous } from '../src/hook.mjs';
 import { defaultPatterns, inspectExclude } from '../src/exclude.mjs';
-import { configuredGitRisk, normalizeAnsiCQuotes } from '../src/shell-parse.mjs';
+import { configuredGitRisk, normalizeAnsiCQuotes, stripShellComments } from '../src/shell-parse.mjs';
 
 const CLI = join(process.cwd(), 'bin/aimhooman.mjs');
 
@@ -3954,12 +3954,29 @@ test('a hook path spelled another way before a commit is refused on clean', asyn
             "find .git -name 'pre-*' -delete && git commit -qm x",
             'cp evil.cfg ~/.gitconfig && git commit -qm x',
             "git config core.hooks$'\\x50'ath /dev/null && git commit -qm x",
+            'rm -rf .git/* && git commit -qm x',
+            'rm -rf .git && git commit -qm x',
+            'mv .git .git.bak && git commit -qm x',
+            'cat evil.cfg >> ~/.gitconfig',
+            'cat evil.cfg >> .git//config',
         ]) {
             assert.equal((await decide(command))?.permissionDecision, 'deny', command);
         }
+        // Reading .git, or naming it to leave it out, is not taking the hooks away.
         for (const command of [
             'npm run build && git commit -qm x',
             'rm -rf "$OUT" && git commit -qm "fix core.hooksPath detection"',
+            'ls -la .git && git commit -qm x',
+            'cat ~/.gitconfig && git commit -qm x',
+            'grep -r foo --exclude-dir=.git . && git commit -qm x',
+            'find . -name .git -type d && git commit -qm x',
+            'rsync -a --exclude=.git src/ dst/ && git commit -qm x',
+            'tar --exclude=.git -czf out.tgz . && git commit -qm x',
+            'cp ~/.gitconfig ~/.gitconfig.bak && git commit -qm x',
+            'H=build; rm -rf $H && git commit -qm x',
+            'rm -f .git/index.lock && git commit -qm x',
+            'rm -rf .git/refs/heads/* && git commit -qm x',
+            'cd .git && ls hooks',
         ]) {
             assert.equal(await decide(command), null, command);
         }
@@ -3996,8 +4013,26 @@ test('aimhooman commands that loosen the policy and writes to its state are refu
                 'aimhooman status',
                 'cat .git/aimhooman/config.json',
                 'ls .git/aimhooman',
+                // The name in prose or a path is not the command.
+                'git commit -m "docs: state lives in .git/aimhooman"',
+                'git commit -m "docs: run aimhooman allow to add an exception"',
+                'echo run aimhooman allow',
+                'cd aimhooman && git status',
+                'cat aimhooman.md',
+                'grep -rn "aimhooman allow" docs',
             ]) {
                 assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                './node_modules/.bin/aimhooman allow x',
+                'npx --package=@rmyndharis/aimhooman aimhooman allow x',
+                'npm exec aimhooman -- allow x',
+                'bash -c "aimhooman allow x"',
+                'env FOO=1 aimhooman uninstall',
+                'sudo aimhooman uninstall',
+                'git add .git/aimhooman/config.json',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
             }
         } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -4033,6 +4068,198 @@ test('a script the command runs is read for Git that skips the hooks', async () 
             }
             writeFileSync(join(dir, 'Makefile'), 'leak:\n\tgit -c core.hooksPath=/dev/null commit -qm leak\n');
             assert.equal((await decide('make -s leak'))?.permissionDecision, 'deny', profile);
+
+            // What a script holds of aimhooman is judged like the command: init may
+            // keep the profile, and one that sets it from a variable is not judged.
+            const lowered = profile === 'strict' ? 'clean' : 'compliance';
+            writeFileSync(join(dir, 'setup.sh'), '#!/bin/sh\naimhooman init --profile "$PROFILE"\n', { mode: 0o755 });
+            writeFileSync(join(dir, 'plain.sh'), '#!/bin/sh\naimhooman init\naimhooman status\n', { mode: 0o755 });
+            writeFileSync(join(dir, 'allow.sh'), '#!/bin/sh\naimhooman allow CLAUDE.local.md\n', { mode: 0o755 });
+            writeFileSync(join(dir, 'lower.sh'), `#!/bin/sh\naimhooman init --profile ${lowered}\n`, { mode: 0o755 });
+            for (const command of ['./setup.sh', './plain.sh', 'bash setup.sh']) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of ['./allow.sh', './lower.sh']) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            // A script run beside a substitution is still a line the strict
+            // profile cannot read, as it was before scripts were read.
+            for (const command of ['npm test $(date)', './ok.sh $(date)', '(npm test)']) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// A pipe, a group, a loop or a substitution beside a Git command is refused only
+// when it can run what was not read: a pipe into a shell or an interpreter, a
+// script fed to one, awk that starts a program, sed with an e flag. A text
+// filter, a tee, a group and a loop, whose commands are read, are not.
+test('a pipe, group or loop beside Git is refused only when it can run unread code', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-sinks-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'node --test x.mjs 2>&1 | grep -E "^ok|^not ok" | head; git stash list | head -2; git diff --stat',
+                'git status --short | head -2 && { git status --porcelain=v2; git rev-parse HEAD; git stash list; } > /tmp/out.txt',
+                "git stash list; git ls-remote --heads origin | awk '{print $2}' | sed 's#refs/heads/##' | tr '\\n' ' '",
+                'git worktree list | cut -c1-130; for a in x y; do echo "$a: $(git -C "$a" status --short | wc -l)"; done',
+                "git add -A && ls | awk 'NR>1{print $1,$2}' | sort -u",
+                'git add -A && git diff --cached | sed -n 1,5p',
+                'git add -A && (npm test)',
+                'git add -A && npm test | tail -5',
+                'git add -A && echo x | tee out.txt',
+                'npm test 2>&1 | tee log.txt && git add .',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                "git add -A && echo x | awk '{system($0)}'",
+                "git add -A && echo x | awk '{print | \"sh\"}'",
+                'git add -A && echo x | awk -f -',
+                "git add -A && echo x | sed 's/^/ /e'",
+                "git add -A && echo x | sed '1e echo hi'",
+                'git add -A && echo x | sed -f script.sed',
+                'git add -A && echo x | sh',
+                'git add -A && cat script | python3',
+                'git add -A && echo x | node',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// A shell ends a comment at the newline, whatever quotes it holds. The splitters
+// track quotes on their own, so "# don't hurry" made the line after it read as
+// inside a quote: the command on it was never seen, on every profile.
+test('a comment does not hide the command after it, and a command in one does not run', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-comments-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                "# don't hurry\\ngit push --no-verify origin wip",
+                "# we can't wait\\ngit -c core.hooksPath=/dev/null commit -qm x",
+                "ls # note\\ngit push --no-verify origin wip",
+                'echo "a # b"; git push --no-verify origin wip',
+                'echo $#; git push --no-verify origin wip',
+                'echo a#b; git push --no-verify origin wip',
+                "echo 'it'\"'\"'s' # c\\ngit push --no-verify origin wip",
+                "echo $'x\\' #y' ; git push --no-verify origin wip",
+            ]) {
+                const real = command.replaceAll('\\n', '\n');
+                assert.equal((await decide(real))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git push origin main # --no-verify',
+                "git push origin main  # don't skip hooks",
+                "git status # it's fine\\ngit log -1",
+                '# run `git push --no-verify`\\ngit status',
+                'git push origin main;#--no-verify',
+                'git log --format=%h#%s -1',
+                'echo ${#PATH}',
+                'curl https://example.com/page#frag -o out.html',
+                "sed 's/#//' file",
+            ]) {
+                const real = command.replaceAll('\\n', '\n');
+                assert.equal(await decide(real), null, `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+    assert.equal(stripShellComments('git status # a'), 'git status ');
+    assert.equal(stripShellComments("# don't\\ngit push".replaceAll('\\n', '\n')), '\ngit push');
+    assert.equal(stripShellComments('echo "#a" \'#b\' \\#c d#e $#'), 'echo "#a" \'#b\' \\#c d#e $#');
+});
+
+// git commit -m "$(cat <<'EOF' ... EOF)" is how a message is written, and the
+// body is data: a line of it that says "run git push --no-verify" is not a
+// command, whatever it names. What the body can run stays read: an unquoted
+// delimiter expands $(...) in it, and a body piped into a shell is a script.
+test('a commit message written with a heredoc may name what is refused, and cannot run it', async () => {
+    const message = (...body) => ["git commit -m \"$(cat <<'EOF'", ...body, 'EOF', ')"'].join('\n');
+    const dir = makeHookRepo('clean', 'aim-hook-heredoc-');
+    try {
+        const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+        for (const command of [
+            message('fix: x', '', 'Never run git push --no-verify from a script.'),
+            message('docs: hooks', '', 'git push --no-verify skips pre-push, which is why it is refused.'),
+            message('docs: x', '', 'Use git -c core.hooksPath=/dev/null only when told to.'),
+            message('feat: keep refused commits in .git/aimhooman', '', 'Run aimhooman allow to add an exception.'),
+            message("It doesn't matter (really)", 'and a stray ) here', 'and "quotes" and `ticks`'),
+            message('unbalanced ( paren', "and 'single", 'git push --no-verify mentioned'),
+            message('quoted body', '$(git push --no-verify origin x) is text here'),
+            message('chore: scripts', 'make sure the build passes', 'npm test passes now'),
+            ["git commit -m \"$(cat <<-EOF", '\tindented git push --no-verify', '\tEOF', ')"'].join('\n'),
+            ["git commit -m \"$(cat <<EOF", 'subject', '$(date)', 'EOF', ')"'].join('\n'),
+            ["git commit -m \"$(cat <<'EOF' | fold -w 72", 'long git push --no-verify', 'EOF', ')"'].join('\n'),
+            `${message('x')} && git status`,
+        ]) {
+            assert.equal(await decide(command), null, command);
+        }
+        for (const command of [
+            ["git commit -m \"$(cat <<EOF", 'subject', '$(git push --no-verify origin wip)', 'EOF', ')"'].join('\n'),
+            ["echo \"$(cat <<'EOF'", 'body', 'EOF', 'git push --no-verify origin wip', ')"'].join('\n'),
+            ["git commit -m \"$(cat <<'EOF' | sh", 'git push --no-verify origin wip', 'EOF', ')"'].join('\n'),
+            `${message('x')} && git push --no-verify origin wip`,
+            ['x=$((1<<2))', 'echo $(git push --no-verify origin wip)'].join('\n'),
+            'echo $(git push --no-verify origin wip',
+        ]) {
+            assert.equal((await decide(command))?.permissionDecision, 'deny', command);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// Git run inside $(...) counts when it skips or repoints the hooks; one that
+// reads, or runs its hooks, is an ordinary command line.
+test('Git inside a substitution is refused only when it skips the hooks', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-substitution-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            if (profile === 'clean') {
+                for (const command of [
+                    'echo $(git push origin main)',
+                    'echo $(git commit -m x)',
+                    'echo $(git checkout main)',
+                    'git log --oneline $(git merge-base HEAD origin/main)..HEAD',
+                ]) {
+                    assert.equal(await decide(command), null, command);
+                }
+            }
+            for (const command of [
+                'echo $(git push --no-verify origin wip)',
+                'echo `git -c core.hooksPath=/dev/null commit -qm x`',
+                'cat <(git push --no-verify origin wip)',
+                'git add -A && echo x | sh',
+                'git add -A && echo x | bash',
+                'git add -A && cat script | python3',
+                'git add -A && echo x | node',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            // Strict does not refuse a git add only because it reads a
+            // substitution it understood, and a pipe into a text filter or tee
+            // hides nothing, as before.
+            for (const command of [
+                'git add $(git ls-files -m)',
+                'git add -A && npm test | tail -5',
+                'git add -A && echo x | tee out.txt',
+                'npm test 2>&1 | tee log.txt && git add .',
+                'git add . && git status | head',
+                'git add -A && git diff --cached | wc -l',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -4066,6 +4293,12 @@ test('large commands are decided in time proportional to their length', async ()
         `x ${'a='.repeat(32000)}`,
         '$a b;'.repeat(8000),
         `f() { :; }; f${' '.repeat(64000)}x`,
+        '( '.repeat(16000),
+        '$(a) '.repeat(4000),
+        '$('.repeat(16000),
+        '# note\n'.repeat(16000),
+        "<<'".repeat(16000),
+        "x=$(cat <<'EOF'\nline with 'quote and ( paren\nEOF\n)\n".repeat(1000),
     ]) {
         const started = performance.now();
         parseGit(command);
