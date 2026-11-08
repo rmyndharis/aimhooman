@@ -584,6 +584,25 @@ export function refObjectId(repo, ref) {
     return null;
 }
 
+// symbolicHead names the ref HEAD points to, or '' while HEAD is detached or
+// cannot be read yet (a clone writes its remote-tracking refs first). Nothing
+// commits through a HEAD Git cannot read.
+export function symbolicHead(repo) {
+    try {
+        return gitStr(['symbolic-ref', '-q', 'HEAD'], repo.root);
+    } catch {
+        return '';
+    }
+}
+
+// unreferenced reports whether no ref reaches the commit. One Git has just
+// written is held by nothing until its transaction commits; one a fetch or a
+// clone brought in is held by the remote-tracking ref that fetch wrote.
+export function unreferenced(repo, oid) {
+    assertOid(oid);
+    return gitBuf(['rev-list', '-n', '1', oid, '--not', '--all'], repo.root).toString('utf8').trim() === oid;
+}
+
 // gitConfig returns a git config value, or '' if unset.
 export function gitConfig(root, key) {
     try {

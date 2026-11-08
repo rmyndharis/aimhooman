@@ -35,11 +35,12 @@ import {
     readStagedPath,
     refObjectId,
     stagedTreeSha,
+    symbolicHead,
     withIndexFromTree,
 } from '../src/gitx.mjs';
 import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, saveConfig, saveOverrides } from '../src/state.mjs';
 import { applyExclude, inspectExclude, managedPatterns, patternsForRules, removeExclude } from '../src/exclude.mjs';
-import { MANAGED_HOOKS, effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
+import { MANAGED_HOOKS, effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, isGlobalHooksDir, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
 import { engineForPolicy, resolveStagedPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
@@ -230,9 +231,9 @@ function restoreSnapshot(snapshot) {
     chmodSync(snapshot.path, snapshot.mode);
 }
 
-function gitConfigAtScope(root, scope, key) {
+function gitConfigAtScope(root, scope, key, flags = []) {
     try {
-        return execFileSync('git', ['config', scope, '--get', key], {
+        return execFileSync('git', ['config', scope, ...flags, '--get', key], {
             cwd: root,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
@@ -241,6 +242,12 @@ function gitConfigAtScope(root, scope, key) {
     } catch {
         return '';
     }
+}
+
+// The global core.hooksPath as Git applies it: ~ expanded and include.path
+// followed, neither of which a plain --global read does.
+function globalHooksPath() {
+    return gitConfigAtScope(process.cwd(), '--global', 'core.hooksPath', ['--includes', '--type=path']);
 }
 
 function gitVersion() {
@@ -642,6 +649,9 @@ function cmdRefcheck(args) {
         return 30;
     }
     const updates = [];
+    // HEAD can name a ref outside refs/heads, and a commit made there moves
+    // that ref alone. Read HEAD only for such a line, so a branch never pays.
+    let headRef = null;
     for (const line of input.split('\n').filter(Boolean)) {
         const match = /^(\S+) (\S+) (.+)$/.exec(line);
         if (!match) {
@@ -649,7 +659,10 @@ function cmdRefcheck(args) {
             return 30;
         }
         const [, oldObjectId, newObjectId, ref] = match;
-        if (ref !== 'HEAD' && !ref.startsWith('refs/heads/')) continue;
+        if (ref !== 'HEAD' && !ref.startsWith('refs/heads/')) {
+            headRef ??= repo ? symbolicHead(repo) : '';
+            if (ref !== headRef) continue;
+        }
         if (ref === 'HEAD' && newObjectId.startsWith('ref:')) continue;
         if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oldObjectId)
             || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(newObjectId)) {
@@ -720,6 +733,7 @@ function cmdRefcheck(args) {
     }
     const code = scanProposedCommits(repo, commits, {
         limits: scanLimits(),
+        afterPrecommit: true,
         rejectNote: (revision) =>
             `aimhooman: proposed commit ${revision} was rejected before refs changed\n`
             // The vetoed commit stays in the object store: the ref never
@@ -835,13 +849,16 @@ function cmdInit(args) {
         }
         return withLock(join(globalHooksDir(), 'lifecycle.lock'), () => {
             const aimDir = globalHooksDir();
+            // The raw value is what a rollback writes back; the applied one is
+            // what decides whether the hooks path is already ours.
             let existing = '';
             try {
                 existing = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
             } catch { /* unset */ }
-            if (existing && existing !== aimDir) {
+            const applied = globalHooksPath();
+            if (applied && !isGlobalHooksDir(applied)) {
                 console.error(
-                    `aimhooman: core.hooksPath is already set to '${existing}'; refusing to overwrite. ` +
+                    `aimhooman: core.hooksPath is already set to '${applied}'; refusing to overwrite. ` +
                     'Unset it (git config --global --unset core.hooksPath) or choose a different setup.'
                 );
                 return 20;
@@ -1675,7 +1692,7 @@ function cmdDoctor(args) {
     const incompleteHooks = hooks.filter((hook) => !hook.managed || !hook.executable || !hook.reachable);
     if (incompleteHooks.length) console.log(`x hooks incomplete (${incompleteHooks.map((hook) => hook.name).join(', ')}; run: aimhooman init)`);
     for (const hook of hooks) {
-        if (!hook.managed || !hook.executable || !hook.reachable) {
+        if (!hook.managed || !hook.executable || !hook.reachable || hook.stale) {
             console.log(`x ${hook.name} hook: ${hook.reason || 'not active'} (${hook.path})`);
             ok = false;
         } else {
@@ -1756,33 +1773,29 @@ function cmdUninstall(args) {
     });
     if (options.global) {
         return withLock(join(globalHooksDir(), 'lifecycle.lock'), () => {
-            const aimDir = globalHooksDir();
-            const readGlobalHooksPath = () => {
-                try {
-                    return execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS }).trim();
-                } catch { return ''; }
-            };
-            const current = readGlobalHooksPath();
+            const current = globalHooksPath();
+            const ours = isGlobalHooksDir(current);
             let unsetAttempted = false;
-            if (current === aimDir) {
+            if (ours) {
                 unsetAttempted = true;
                 try {
                     execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { stdio: ['ignore', 'ignore', 'ignore'], timeout: GIT_TIMEOUT_MS });
                 } catch { /* may have failed; re-verify below */ }
-                // A read-only or locked ~/.gitconfig can make --unset fail silently.
-                // Do not remove the dispatchers while core.hooksPath still resolves to
+                // A read-only or locked ~/.gitconfig can make --unset fail silently,
+                // and a value from an included file is not there to unset. Do not
+                // remove the dispatchers while core.hooksPath still resolves to
                 // them, or every repository inheriting this setting would run zero
                 // hooks with no warning. Preserve the working dispatchers until the
                 // config can be cleaned.
-                if (readGlobalHooksPath() === aimDir) {
-                    console.error('aimhooman: could not unset global core.hooksPath (read-only or locked ~/.gitconfig); leaving dispatchers in place.');
-                    console.error('  Fix the config permissions and run `aimhooman uninstall --global` again.');
+                if (isGlobalHooksDir(globalHooksPath())) {
+                    console.error('aimhooman: could not unset global core.hooksPath (read-only or locked ~/.gitconfig, or set in an included file); leaving dispatchers in place.');
+                    console.error('  Remove the setting and run `aimhooman uninstall --global` again.');
                     return 30;
                 }
             }
             const rep = uninstallGlobalHooks();
             console.log('aimhooman: global hooks uninstalled');
-            if (current && current !== aimDir) {
+            if (current && !ours) {
                 console.log(`  core.hooksPath kept at "${current}" (not owned by aimhooman)`);
             } else {
                 console.log(`  core.hooksPath ${unsetAttempted ? 'unset' : 'was already unset'}`);
@@ -1877,15 +1890,7 @@ function cmdUninstall(args) {
         // Surface when a global core.hooksPath still enforces aimhooman, so a local
         // uninstall cannot be mistaken for full removal. Foreign hooksPath values
         // are left to the generic "not modified" warning emitted above.
-        const aimDir = globalHooksDir();
-        let globalHooksPath = '';
-        try {
-            globalHooksPath = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], {
-                encoding: 'utf8',
-                timeout: GIT_TIMEOUT_MS,
-            }).trim();
-        } catch { /* unset */ }
-        if (globalHooksPath === aimDir) {
+        if (isGlobalHooksDir(globalHooksPath())) {
             console.log('aimhooman: global Git guard is still active');
             console.log('  eligible non-bare repositories that inherit core.hooksPath are still guarded.');
             console.log('  run `aimhooman uninstall --global` to remove it.');

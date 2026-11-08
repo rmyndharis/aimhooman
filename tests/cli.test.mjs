@@ -1852,6 +1852,50 @@ test('local uninstall warns when an inherited global core.hooksPath remains acti
     }
 });
 
+test('global install and uninstall read core.hooksPath the way Git applies it', () => {
+    // Dotfiles spell the global hooks path as ~/..., with a trailing slash, or
+    // set it from an included file. Compared as raw text, init --global refused
+    // its own directory, and uninstall --global removed the dispatchers while
+    // the setting still sent every repository to them.
+    const dir = mkdtempSync(join(tmpdir(), 'aim-glb-spelling-'));
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    const home = mkdtempSync(join(tmpdir(), 'aim-home-'));
+    const env = globalFixtureEnv(home);
+    const cli = (args) => spawnSync('node', [CLI, ...args], { cwd: dir, env, encoding: 'utf8' });
+    const setting = () => spawnSync('git', ['config', '--get', 'core.hooksPath'], { cwd: dir, env, encoding: 'utf8' }).stdout.trim();
+    const dispatcher = join(home, '.aimhooman', 'hooks', 'pre-commit');
+    try {
+        for (const spelling of ['~/.aimhooman/hooks', `${join(home, '.aimhooman', 'hooks')}/`]) {
+            execFileSync('git', ['config', '--global', 'core.hooksPath', spelling], { env });
+            const installed = cli(['init', '--global', '--yes']);
+            assert.equal(installed.status, 0, installed.stderr);
+            execFileSync('git', ['config', '--global', 'core.hooksPath', spelling], { env });
+            assert.match(cli(['uninstall']).stdout, /global Git guard is still active/);
+            const removed = cli(['uninstall', '--global']);
+            assert.equal(removed.status, 0, removed.stderr);
+            assert.equal(setting(), '', `${spelling} must not outlive the dispatchers`);
+            assert.equal(existsSync(dispatcher), false);
+        }
+
+        // A value from an included file is not this command's to unset, so the
+        // dispatchers it names stay; a foreign one there is still refused.
+        const included = join(home, 'hooks.gitconfig');
+        execFileSync('git', ['config', '--global', 'include.path', included], { env });
+        writeFileSync(included, '[core]\n\thooksPath = /some/husky/dir\n');
+        assert.equal(cli(['init', '--global', '--yes']).status, 20);
+        writeFileSync(included, '[core]\n\thooksPath = ~/.aimhooman/hooks\n');
+        assert.equal(cli(['init', '--global', '--yes']).status, 0);
+        execFileSync('git', ['config', '--global', '--unset', 'core.hooksPath'], { env });
+        const kept = cli(['uninstall', '--global']);
+        assert.equal(kept.status, 30, kept.stdout);
+        assert.match(kept.stderr, /leaving dispatchers in place/);
+        assert.equal(existsSync(dispatcher), true);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+    }
+});
+
 test('uninstall never reports success while its own dispatchers remain', () => {
     // The rule this locks: after uninstall exits 0, nothing aimhooman installed
     // is left on disk. A refusal that only produced a warning used to be printed

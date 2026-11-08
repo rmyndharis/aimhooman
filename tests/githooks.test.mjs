@@ -405,6 +405,41 @@ test('a renamed repository still owns the dispatchers inside its own .git', () =
     }
 });
 
+test('doctor reports dispatchers a moved repository left on its old path until init re-pins them', () => {
+    // The guard keeps running after a move, but the chained hook and the
+    // compile cache it names are still under the old path, so the user's own
+    // hook silently stops.
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-moved-stale-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\necho "user hook ran"\n', { mode: 0o755 });
+            execFileSync(process.execPath, [CLI, 'init'], { cwd: root });
+            const moved = join(base, 'moved');
+            renameSync(root, moved);
+
+            assert.ok(hookDiagnostics(openRepo(moved)).every((hook) => hook.stale), 'every dispatcher names the old path');
+            assert.deepEqual(installedHooks(openRepo(moved)), MANAGED_NAMES, 'a stale dispatcher still guards');
+            const doctor = spawnSync(process.execPath, [CLI, 'doctor'], { cwd: moved, encoding: 'utf8' });
+            assert.equal(doctor.status, 20, doctor.stdout);
+            assert.match(doctor.stdout, /^x pre-commit hook: .*run: aimhooman init/m);
+
+            execFileSync(process.execPath, [CLI, 'init'], { cwd: moved });
+            assert.ok(hookDiagnostics(openRepo(moved)).every((hook) => !hook.stale));
+            const healthy = spawnSync(process.execPath, [CLI, 'doctor'], { cwd: moved, encoding: 'utf8' });
+            assert.equal(healthy.status, 0, healthy.stdout);
+            writeFileSync(join(moved, 'README.md'), 'changed\n');
+            git(moved, ['add', 'README.md']);
+            const commit = spawnSync('git', ['commit', '-q', '-m', 'after the move'], { cwd: moved, encoding: 'utf8' });
+            assert.equal(commit.status, 0, commit.stderr);
+            assert.match(commit.stderr, /user hook ran/, 'the chained hook runs again');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('a tracked hooks directory is treated as shared and never modified', () => {
     // husky and the vanilla .githooks pattern commit their hook scripts. Writing
     // a dispatcher into one stages this machine's absolute CLI, Node, and PATH
@@ -587,19 +622,20 @@ test('generated dispatchers use builtin ref capture and accept safe Git updates'
             // committed/aborted short-circuit before the Node spawn, so an ordinary
             // commit does not pay a cold start for a phase refcheck only no-ops.
             assert.match(referenceHook, /case "\$1" in committed\|aborted\) exit 0 ;; esac/);
-            // A prepared transaction that moves neither a branch nor HEAD
-            // (ORIG_HEAD, tags, remote-tracking refs) carries nothing refcheck
+            // A preparing phase, like a prepared transaction that moves
+            // neither a branch nor HEAD to a commit (ORIG_HEAD, tags,
+            // remote-tracking refs, a symbolic HEAD), carries nothing refcheck
             // scans, so it exits before the Node spawn too — but only after a
             // presence check proves the guard dispatchers were not wiped
             // mid-operation, keeping the tamper evidence the CLI check gave.
-            assert.match(referenceHook, /case "\$1" in prepared\)/);
-            assert.match(referenceHook, /case "\$AIMHOOMAN_REF_UPDATES" in/);
-            assert.match(referenceHook, /\*refs\/heads\/\*\|\*" HEAD"\*\) ;;/);
+            assert.match(referenceHook, /preparing\) AIMHOOMAN_SCAN= ;;/);
+            assert.match(referenceHook, /\*" ref:"\*" HEAD"\) ;;\n\s+\*refs\/heads\/\*\|\*" HEAD"\) AIMHOOMAN_SCAN=1 ;;/);
             assert.match(referenceHook, /for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction/);
             // The presence loop's dirname must run under the pinned PATH like
             // the commit-msg filter does: a GUI client's minimal PATH would
             // otherwise fail the substitution and read as wiped guards.
-            assert.match(referenceHook, /\[ -x "\$\(PATH="\$AIMHOOMAN_PATH" dirname "\$0"\)\/\$AIMHOOMAN_GUARD" \]/);
+            assert.match(referenceHook, /AIMHOOMAN_HOOKS=\$\(PATH="\$AIMHOOMAN_PATH" dirname "\$0"\)\n/);
+            assert.match(referenceHook, /\[ -x "\$AIMHOOMAN_HOOKS\/\$AIMHOOMAN_GUARD" \]/);
             // The dispatcher exports a V8 compile cache rooted in per-install
             // state, so repeated hook spawns skip module recompilation and
             // --purge-state removes the cache along with the rest of the state.
@@ -651,12 +687,10 @@ test('a branch-free reference transaction still notices wiped dispatchers', () =
             assert.equal(benign.status, 0, benign.stderr);
 
             // A hook manager wipes a dispatcher; the next branch-free
-            // transaction must stop and say why. Which layer answers first
-            // depends on the Git version: Git >=2.54 fires the preparing
-            // phase, where refcheck's own integrity check responds ("final
-            // Git guards changed"); older Git reaches the dispatcher's
-            // presence check in prepared ("required Git guards changed").
-            // Both stop the operation and name the missing dispatcher.
+            // transaction must stop and say why. The dispatcher's presence
+            // check answers in preparing on Git >=2.54 and in prepared on
+            // older Git; either way it stops the operation and names the
+            // missing dispatcher.
             rmSync(join(hooks, 'commit-msg'));
             const wiped = spawnSync('git', ['tag', 'v1'], { cwd: root, encoding: 'utf8' });
             assert.notEqual(wiped.status, 0, wiped.stdout + wiped.stderr);
@@ -1605,6 +1639,164 @@ test('reference transaction ignores attribution on imported commits but still sc
             assert.notEqual(local.status, 0, local.stderr);
             assert.equal(git(root, ['rev-parse', 'HEAD']), localBefore);
             assert.match(local.stderr, /attribution\.claude-coauthor|rejected before refs changed/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// --no-verify skips commit-msg, so the final guard is what reads the message of
+// a commit made here. A merge, an initial and an orphan commit are made here as
+// much as a plain one; a clone of a history whose only commit is a root is not.
+test('the final guard reads the message of a merge, an initial and an orphan commit made here', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-local-message-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    try {
+        isolatedGitConfig(base, () => {
+            const root = join(base, 'repo');
+            mkdirSync(root);
+            git(root, ['init', '-q']);
+            git(root, ['config', 'user.email', 'test@example.com']);
+            git(root, ['config', 'user.name', 'Test']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: root });
+            const run = (args) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+
+            writeFileSync(join(root, 'README.md'), 'initial\n');
+            git(root, ['add', 'README.md']);
+            const initial = run(['commit', '--no-verify', '-m', `initial\n\n${trailer}`]);
+            assert.notEqual(initial.status, 0, 'an initial commit is made here');
+            assert.match(initial.stderr, /attribution\.claude-coauthor/);
+            git(root, ['commit', '-q', '-m', 'initial']);
+            const main = git(root, ['branch', '--show-current']);
+
+            git(root, ['checkout', '-q', '-b', 'feature']);
+            writeFileSync(join(root, 'feature.txt'), 'feature\n');
+            git(root, ['add', 'feature.txt']);
+            git(root, ['commit', '-q', '-m', 'feature work']);
+            git(root, ['checkout', '-q', main]);
+            const before = git(root, ['rev-parse', 'HEAD']);
+            const merge = run(['merge', '--no-ff', '--no-verify', '-m', `merge feature\n\n${trailer}`, 'feature']);
+            assert.notEqual(merge.status, 0, 'a local merge is made here');
+            assert.match(merge.stderr, /attribution\.claude-coauthor/);
+            assert.equal(git(root, ['rev-parse', 'HEAD']), before);
+            run(['merge', '--abort']);
+
+            git(root, ['checkout', '-q', '--orphan', 'pages']);
+            const orphan = run(['commit', '--no-verify', '-m', `pages\n\n${trailer}`]);
+            assert.notEqual(orphan.status, 0, 'an orphan root is made here');
+            assert.match(orphan.stderr, /attribution\.claude-coauthor/);
+
+            // The same trailer on a cloned root is someone else's to edit.
+            const upstream = join(base, 'upstream');
+            mkdirSync(upstream);
+            git(upstream, ['init', '-q']);
+            writeFileSync(join(upstream, 'README.md'), 'upstream\n');
+            git(upstream, ['add', 'README.md']);
+            git(upstream, ['-c', 'user.email=up@example.com', '-c', 'user.name=Up', 'commit', '-q', '-m', `upstream\n\n${trailer}`]);
+            const env = { ...process.env, HOME: join(base, 'home'), USERPROFILE: join(base, 'home') };
+            execFileSync(process.execPath, [CLI, 'init', '--global', '--yes'], { cwd: base, env });
+            const clone = spawnSync('git', ['clone', '-q', upstream, join(base, 'clone')], { cwd: base, env, encoding: 'utf8' });
+            assert.equal(clone.status, 0, clone.stderr);
+            assert.equal(git(join(base, 'clone'), ['rev-parse', 'HEAD']), git(upstream, ['rev-parse', 'HEAD']));
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// A pull that fast-forwards one commit has the shape of a local commit, but
+// the fetch already wrote a remote-tracking ref to it.
+test('the final guard leaves one fetched commit to its author on a fast-forward pull', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-ff-pull-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    try {
+        isolatedGitConfig(base, () => {
+            const upstream = makeRepo(base);
+            const clone = join(base, 'clone');
+            git(base, ['clone', '-q', upstream, clone]);
+            git(clone, ['config', 'user.email', 'test@example.com']);
+            git(clone, ['config', 'user.name', 'Test']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: clone });
+            git(upstream, ['commit', '-q', '--allow-empty', '-m', `teammate change\n\n${trailer}`]);
+
+            const pull = spawnSync('git', ['pull', '-q', '--ff-only'], { cwd: clone, encoding: 'utf8' });
+            assert.equal(pull.status, 0, pull.stderr);
+            assert.equal(git(clone, ['rev-parse', 'HEAD']), git(upstream, ['rev-parse', 'HEAD']));
+
+            const local = spawnSync('git', ['commit', '--allow-empty', '--no-verify', '-m', `mine\n\n${trailer}`], {
+                cwd: clone, encoding: 'utf8',
+            });
+            assert.notEqual(local.status, 0, 'a commit made here is still read');
+            assert.match(local.stderr, /attribution\.claude-coauthor/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// `git symbolic-ref HEAD refs/wip/x` points HEAD outside refs/heads. A commit
+// there moves refs/wip/x alone, and the prepared phase never names HEAD.
+test('the final guard scans a commit made while HEAD names a ref outside refs/heads', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-symbolic-head-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const main = git(root, ['branch', '--show-current']);
+            execFileSync(process.execPath, [CLI, 'init'], { cwd: root });
+            const before = git(root, ['rev-parse', 'HEAD']);
+            git(root, ['update-ref', 'refs/wip/x', 'HEAD']);
+            git(root, ['symbolic-ref', 'HEAD', 'refs/wip/x']);
+            mkdirSync(join(root, '.claude'));
+            writeFileSync(join(root, '.claude', 'settings.local.json'), '{}\n');
+            git(root, ['add', '-f', '.claude/settings.local.json']);
+            const commit = spawnSync('git', ['commit', '--no-verify', '-m', 'wip'], { cwd: root, encoding: 'utf8' });
+            assert.notEqual(commit.status, 0, commit.stderr);
+            assert.match(commit.stderr, /claude\.local-settings/);
+            assert.equal(git(root, ['rev-parse', 'refs/wip/x']), before);
+
+            const artifact = git(root, ['commit-tree', git(root, ['write-tree']), '-p', before, '-m', 'wip']);
+            const direct = refcheckPrepared(root, `${before} ${artifact} refs/wip/x\n`);
+            assert.equal(direct.status, 10, direct.stderr);
+            git(root, ['symbolic-ref', 'HEAD', `refs/heads/${main}`]);
+            const elsewhere = refcheckPrepared(root, `${before} ${artifact} refs/wip/x\n`);
+            assert.equal(elsewhere.status, 0, 'a ref HEAD does not name is no branch to guard');
+            git(root, ['checkout', '-q', '--detach']);
+            const detached = refcheckPrepared(root, `${before} ${artifact} refs/wip/x\n`);
+            assert.equal(detached.status, 0, 'a detached HEAD names no ref');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// Only the prepared phase of a transaction that moves a branch or a detached
+// HEAD has anything to scan. The preparing phase, a branch switch (a symbolic
+// HEAD line) and a tag are answered by the dispatcher's presence check.
+test('a reference transaction starts Node only for the prepared phase of a branch move', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-spawns-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            git(root, ['branch', 'other']);
+            const log = join(base, 'spawns.log');
+            const wrapper = join(base, 'logging-cli.mjs');
+            writeFileSync(wrapper, [
+                "import { appendFileSync } from 'node:fs';",
+                `appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');`,
+                `await import(${JSON.stringify(new URL('../bin/aimhooman.mjs', import.meta.url).href)});`,
+            ].join('\n'));
+            installHooks(openRepo(root), wrapper);
+            const refchecks = (args) => {
+                writeFileSync(log, '');
+                const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+                assert.equal(result.status, 0, result.stderr);
+                return readFileSync(log, 'utf8').split('\n').filter((line) => line.startsWith('refcheck'));
+            };
+            assert.deepEqual(refchecks(['checkout', '-q', 'other']), []);
+            assert.deepEqual(refchecks(['tag', 'v1']), []);
+            writeFileSync(join(root, 'README.md'), 'changed\n');
+            git(root, ['add', 'README.md']);
+            assert.deepEqual(refchecks(['commit', '-q', '-m', 'change']), ['refcheck prepared']);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

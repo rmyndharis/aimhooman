@@ -13,6 +13,7 @@ import {
     stagedPaths,
     stagedRenameSources,
     stagedTreeSha,
+    unreferenced,
     unstagePaths,
 } from './gitx.mjs';
 import { installedHooks } from './githooks.mjs';
@@ -182,8 +183,8 @@ export function resolveIntroduced(repo, updates, { includeStagedContexts = true,
     const contextsByCommit = new Map();
     // A commit's message belongs to whoever wrote it. Attribution and marker
     // rules police the text a local developer can edit, so they are scoped
-    // to commits authored here: an update that introduces exactly one new
-    // commit on top of a non-zero old tip (a plain commit, an --amend, or a
+    // to commits authored here (see authoredHere for the shapes: an initial,
+    // orphan or plain commit, an --amend, a merge made here such as a
     // local --no-ff merge of an already-gated branch). Anything else — a new
     // branch pulled in by `gh pr checkout` or `git fetch`, a merge of fetched
     // history — imports other people's commit text the developer cannot
@@ -192,10 +193,7 @@ export function resolveIntroduced(repo, updates, { includeStagedContexts = true,
     for (const update of updates) {
         const introduced = introducedCommits(repo, [update], { firstBranchFromRemotes });
         // A forced move onto a fetched commit is not a commit made here.
-        if (!/^0+$/.test(update.oldObjectId)
-            && !update.forced
-            && introduced.length === 1
-            && introduced[0] === update.newObjectId) {
+        if (!update.forced && authoredHere(repo, update, introduced)) {
             localAuthorTips.add(update.newObjectId);
         }
         for (const revision of introduced) {
@@ -229,12 +227,32 @@ export function resolveIntroduced(repo, updates, { includeStagedContexts = true,
     ]);
 }
 
+// authoredHere decides whether an update's new tip was written in this clone:
+// one new commit on top of a non-zero old tip (a plain commit, an --amend), a
+// merge on top of the old tip, or a commit with no parent that starts a branch
+// (an initial or orphan commit). Every shape also arrives by fetch, a pull that
+// fast-forwards one commit included, so each counts only while no ref reaches
+// the tip, which a fetched one always has. The commits a merge brings in keep
+// their own standing.
+function authoredHere(repo, { oldObjectId, newObjectId }, introduced) {
+    if (!introduced.includes(newObjectId)) return false;
+    const created = /^0+$/.test(oldObjectId);
+    let shaped = !created && introduced.length === 1;
+    if (!shaped) {
+        const { parents } = commitParents(repo, newObjectId);
+        shaped = created ? !parents.length : parents.length > 1 && parents[0] === oldObjectId;
+    }
+    return shaped && unreferenced(repo, newObjectId);
+}
+
 // scanProposedCommits scans each introduced commit and returns the first
 // non-zero verdict. rejectNote(revision) supplies the caller-specific veto
 // line(s) printed after the findings; callers without a note pass null. The
 // scan budget comes from the caller: it is CLI environment input, parsed and
-// validated at the surface.
-export function scanProposedCommits(repo, commits, { rejectNote, limits = {} }) {
+// validated at the surface. afterPrecommit marks the final guard of a commit,
+// whose tree pre-commit may already have reported.
+export function scanProposedCommits(repo, commits, { rejectNote, limits = {}, afterPrecommit = false }) {
+    const reviews = [];
     for (const [revision, reviewContexts, authoredLocally] of commits) {
         let scan;
         try {
@@ -272,20 +290,34 @@ export function scanProposedCommits(repo, commits, { rejectNote, limits = {} }) 
             if (rejectNote) process.stderr.write(rejectNote(revision));
             return code;
         }
+        // What is left is advisory reviews, and they are still named. pre-commit
+        // prints them, but a commit made with --no-verify or by cherry-pick never
+        // ran it. Commits brought in from elsewhere are not the developer's to
+        // review, and a tree pre-commit passed was reported there already.
+        if (authoredLocally && scan.findings.length
+            && !(afterPrecommit && precommitCleanMatches(repo, commitTree(repo, revision), scan.profile))) {
+            reviews.push(...scan.findings);
+        }
         if (!scan.complete) {
             // The commit's tree is the staged tree pre-commit already warned
             // about, so this is usually the duplicate the once-guard swallows.
-            // rev-parse runs only on this rare path.
-            let treeSha = null;
-            try {
-                treeSha = execFileSync('git', ['rev-parse', `${revision}^{tree}`], {
-                    cwd: repo.root,
-                    encoding: 'utf8',
-                    timeout: GIT_TIMEOUT_MS,
-                }).trim();
-            } catch { /* warn without dedup */ }
-            warnIncompleteOnce(repo, treeSha, scan);
+            warnIncompleteOnce(repo, commitTree(repo, revision), scan);
         }
     }
+    if (reviews.length) process.stderr.write(human(reviews, tone()));
     return 0;
+}
+
+// commitTree reads a commit's tree for the notice dedup above, or null when
+// Git cannot say; the notice then prints. It runs only on those rare paths.
+function commitTree(repo, revision) {
+    try {
+        return execFileSync('git', ['rev-parse', `${revision}^{tree}`], {
+            cwd: repo.root,
+            encoding: 'utf8',
+            timeout: GIT_TIMEOUT_MS,
+        }).trim();
+    } catch {
+        return null;
+    }
 }
