@@ -12,8 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent guard reads the commands Git runs for `rebase --exec`,
   `submodule foreach` and `bisect run`, and refuses a commit, push or other
   guarded Git command inside them.
-- The agent guard refuses a Git alias that expands to `rebase --exec`,
-  `submodule foreach` or `bisect run`.
+- The agent guard refuses a Git alias whose expansion makes Git run a command,
+  such as `rebase --exec` or `submodule foreach`.
+- The agent guard reads the commands Git runs for `difftool -x`,
+  `--upload-pack`, `archive --exec` and `grep -O`, and refuses a guarded Git
+  command inside them.
+- The agent guard reads command-valued config (`-c diff.external`,
+  `core.sshCommand`, `core.fsmonitor`, `credential.helper` and the like),
+  variables such as `GIT_EXTERNAL_DIFF` and `GIT_SSH_COMMAND`, `ext::` URLs and
+  values stored with `git config` the same way.
+- A credential helper written as a shell function on the command line is
+  refused, since the guard cannot read it.
 - The agent guard refuses a commit after a command that names `.git/config`,
   which can repoint the hooks.
 - The agent guard refuses a commit after `echo` or `printf` writes into the

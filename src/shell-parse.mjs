@@ -6,9 +6,67 @@
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 
+// Each nested payload (sh -c, rebase --exec, a command-valued variable) is
+// parsed again. Real commands nest a few levels; past this many the line is
+// refused rather than read, before deep nesting exhausts the stack.
+const MAX_PARSE_DEPTH = 16;
+let parseDepth = 0;
+
 // parseGit inspects a shell command line for staged-path, commit, policy-transition,
 // and branch/reference operations that need an agent-side guard decision.
 export function parseGit(cmd, initialCwd = process.cwd()) {
+    if (parseDepth >= MAX_PARSE_DEPTH) {
+        return {
+            commit: false,
+            noVerify: false,
+            bypassHooks: false,
+            uncertainShell: true,
+            opaqueCommitHiding: true,
+            classification: 'uncertain',
+            environmentRisk: [],
+            prefixRisk: true,
+            prefixHooksRisk: true,
+            unreadable: true,
+            addPaths: [],
+            commands: [unreadableCommand(initialCwd)],
+        };
+    }
+    parseDepth += 1;
+    try {
+        return parseGitLine(cmd, initialCwd);
+    } finally {
+        parseDepth -= 1;
+    }
+}
+
+// A command the parser cannot read, refused wherever it appears.
+function unreadableCommand(cwd) {
+    return {
+        verb: 'unknown',
+        subcommand: '',
+        args: [],
+        cwd,
+        environmentRisk: [],
+        prefixRisk: true,
+        policyTransitionRisk: true,
+        targetUncertain: true,
+        classification: 'unknown',
+    };
+}
+
+// eval, source or . where a command starts runs text the parser never sees.
+const SOURCED_COMMAND = /(?:^|[\n;&|(])\s*(?:eval|source|\.)\s/;
+
+// A payload the parser cannot read in full: substitution, a subshell, brace
+// group or function, control flow, an input redirect, a background job, a
+// pipe into anything but a read-only command, or a sourced file. Output
+// redirects are read like any other word, and a nested sh -c is judged by its
+// own parse.
+function payloadUnreadable(text) {
+    return SOURCED_COMMAND.test(text) || hasUncertainShellSyntax(text, { payload: true });
+}
+
+function parseGitLine(cmd, initialCwd) {
     let commit = false;
     let noVerify = false;
     let bypassHooks = false;
@@ -31,6 +89,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         };
     }
     uncertainShell = hasUncertainShellSyntax(cmd);
+    let unreadable = payloadUnreadable(cmd);
     let shellCwd = initialCwd;
     const directoryStack = [];
     let subshellDepth = 0;
@@ -43,6 +102,19 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
     let prefixIndexMutationRisk = false;
     let prefixHooksRisk = false;
     let policyTransitionRisk = false;
+    // What Git runs for the line (an --exec, a command-valued config key or
+    // environment variable) is read as a sh -c payload is. Git picks where it
+    // runs, so a guarded Git command in it has no known target. Only what it
+    // can do to Git counts against the rest of the line; a pager or a test
+    // run does not, and neither does a read-only listing such as git branch.
+    const mergeGitRun = (ran, cwd) => {
+        commands.push(...ran.commands
+            .filter((candidate) => !gitReadOnlyRefCommand(candidate.verb, candidate.args || []))
+            .map((candidate) => ({ ...candidate, targetUncertain: true })));
+        if (ran.unreadable) commands.push(unreadableCommand(cwd));
+        prefixRisk ||= ran.prefixHooksRisk;
+        prefixHooksRisk ||= ran.prefixHooksRisk;
+    };
     for (const unit of shellUnits(cmd)) {
         const precedingOperator = previousOperator;
         previousOperator = unit.operator;
@@ -56,7 +128,13 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         const control = unwrapShellControl(shellWords(unit.text.trim()));
         const words = control.tokens;
         uncertainShell ||= control.uncertain;
-        if (updatePersistentEnvironment(words, persistentEnvironmentRisk)) continue;
+        if (updatePersistentEnvironment(words, persistentEnvironmentRisk)) {
+            // An exported GIT_SSH_COMMAND runs under the Git commands after it.
+            const exported = environmentCommands(words.filter(isAssignment));
+            const text = exported.join('\n');
+            if (exported.length) mergeGitRun(parseGit(text, shellCwd), shellCwd);
+            continue;
+        }
         const unwrapped = unwrapCommand(words, shellCwd);
         const toks = dashedGitInvocation(unwrapped.tokens) ?? unwrapped.tokens;
         uncertainShell ||= unwrapped.uncertain;
@@ -100,6 +178,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                     || candidate.pathDialectUncertain,
             })));
             sawAdd ||= parsed.addPaths.length > 0;
+            unreadable ||= parsed.unreadable;
             // What the nested shell runs is a prefix to every command after it.
             prefixRisk ||= parsed.prefixRisk;
             prefixHooksRisk ||= parsed.prefixHooksRisk;
@@ -287,6 +366,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         let aliasResolutionRisk = !canResolveGitAlias(g0);
         let inlineAliasRisk = false;
         let unknownGlobalOption = false;
+        const configRuns = [];
         while (i < toks.length && toks[i].startsWith('-')) {
             const option = toks[i];
             if (option === '-C' && toks[i + 1]) {
@@ -309,6 +389,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
                 }
+                configRuns.push(...configCommands(toks[i + 1]));
                 i += 2;
             } else if (option.startsWith('-c') && option.length > 2) {
                 if (hookAffectingConfig(option.slice(2))) commandBypass = true;
@@ -317,8 +398,12 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                     aliasResolutionRisk = true;
                     inlineAliasRisk = true;
                 }
+                configRuns.push(...configCommands(option.slice(2)));
                 i += 1;
             } else if (option === '--config-env' && toks[i + 1]) {
+                // A command-valued key read from the environment is a command
+                // this check cannot see.
+                unknownGlobalOption ||= commandConfigKey(toks[i + 1].split('=', 1)[0]);
                 if (hookAffectingConfig(toks[i + 1])) commandBypass = true;
                 if (hooksPathOverrideConfig(toks[i + 1])) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(toks[i + 1])) {
@@ -327,6 +412,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
                 }
                 i += 2;
             } else if (option.startsWith('--config-env=')) {
+                unknownGlobalOption ||= commandConfigKey(option.slice('--config-env='.length).split('=', 1)[0]);
                 if (hookAffectingConfig(option.slice('--config-env='.length))) commandBypass = true;
                 if (hooksPathOverrideConfig(option.slice('--config-env='.length))) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(option.slice('--config-env='.length))) {
@@ -403,10 +489,14 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         // shell command. The current staged snapshot is therefore not the index
         // the commit will use, even when no literal `git add` appeared.
         if (gitIndexMutationRisk(verb, verbArgs)) sawAdd = true;
-        // Git runs this through a shell, so it is read as one. What it does to
-        // the hooks lands before Git's own remaining ref updates.
-        const gitRun = gitRunPayload(verb, verbArgs);
-        const ran = gitRun === null ? null : parseGit(gitRun, cwd);
+        // If what Git runs for this command touches the hooks, it does so
+        // before Git's own remaining ref updates.
+        const gitRun = [
+            gitRunPayload(verb, verbArgs),
+            ...configRuns,
+            ...environmentCommands(unwrapped.assignments),
+        ].filter((text) => text !== null);
+        const ran = gitRun.length ? parseGit(gitRun.join('\n'), cwd) : null;
         if (ran?.prefixHooksRisk) {
             prefixRisk = true;
             prefixHooksRisk = true;
@@ -530,13 +620,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             });
             policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         }
-        if (ran) {
-            // Git picks where it runs (each submodule, the top of the
-            // worktree), so a guarded command in it has no known target.
-            commands.push(...ran.commands.map((candidate) => ({ ...candidate, targetUncertain: true })));
-            uncertainShell ||= ran.opaqueCommitHiding;
-            prefixRisk ||= ran.prefixRisk;
-        }
+        if (ran) mergeGitRun(ran, cwd);
     }
     const indirectCommits = [
         ...pipedShellCommitInvocations(cmd, initialCwd),
@@ -589,6 +673,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         environmentRisk: unique(commands.flatMap((candidate) => candidate.environmentRisk || [])),
         prefixRisk,
         prefixHooksRisk,
+        unreadable,
         addPaths,
         commands,
     };
@@ -1201,35 +1286,138 @@ function nestedShellPayload(tokens) {
     return null;
 }
 
-// The shell text Git itself runs for `rebase --exec`, `submodule foreach` and
-// `bisect run`, or null. rebase takes -x/--exec (any unique prefix, --ex), also
-// bundled as -ix or -xCMD, and may repeat it. foreach and bisect run take the
-// rest of the line: Git hands the first word to the shell and the others to it
-// as arguments.
-export function gitRunPayload(verb, args) {
-    if (verb === 'rebase') {
-        const commands = [];
-        for (let i = 0; i < args.length; i += 1) {
-            const arg = args[i];
-            if (arg === '--') break;
-            const long = /^--ex(?:ec?)?(?:=([\s\S]*))?$/.exec(arg);
-            const short = /^-[^-]/.test(arg) && arg.includes('x');
-            if (!long && !short) continue;
-            const attached = long ? long[1] : arg.slice(arg.indexOf('x') + 1);
-            const value = attached || args[(i += 1)];
-            if (value !== undefined) commands.push(value);
-        }
-        return commands.length ? commands.join('\n') : null;
+// Options whose value Git runs through a shell, as [short letter, long name,
+// shortest prefix Git accepts, value must be attached]. difftool keeps unknown
+// options for diff and so takes no abbreviation. A fetch from a local path
+// starts its --upload-pack itself, as archive does its --exec, and grep -O
+// opens the matching files with the command it is given.
+const GIT_RUN_OPTIONS = {
+    rebase: [['x', '--exec', 4]],
+    difftool: [['x', '--extcmd', 8]],
+    fetch: [['', '--upload-pack', 3]],
+    pull: [['', '--upload-pack', 3]],
+    'ls-remote': [['', '--upload-pack', 3], ['', '--exec', 5]],
+    clone: [['u', '--upload-pack', 3]],
+    archive: [['', '--exec', 3]],
+    grep: [['O', '--open-files-in-pager', 4, true]],
+};
+
+// Values of an option written -xVALUE, -x VALUE, bundled as -ix VALUE,
+// --name=VALUE or --name VALUE.
+function optionValues(args, [short, long, shortest, attachedOnly = false]) {
+    const values = [];
+    for (let i = 0; i < args.length; i += 1) {
+        const arg = args[i];
+        if (arg === '--') break;
+        let value;
+        if (arg.startsWith('--')) {
+            const at = arg.indexOf('=');
+            const name = at < 0 ? arg : arg.slice(0, at);
+            if (name.length < shortest || !long.startsWith(name)) continue;
+            value = at >= 0 ? arg.slice(at + 1) : attachedOnly ? undefined : args[(i += 1)];
+        } else if (short && /^-[^-]/.test(arg) && arg.includes(short)) {
+            value = arg.slice(arg.indexOf(short) + 1) || (attachedOnly ? undefined : args[(i += 1)]);
+        } else continue;
+        if (value !== undefined) values.push(value);
     }
-    let words;
+    return values;
+}
+
+// The shell text Git itself runs for this command line, or null: the options
+// above, the rest of `submodule foreach` and `bisect run` (Git hands the first
+// word to the shell and the others to it as arguments), what `git config`
+// stores under a command-valued key, and the command of an ext:: URL.
+export function gitRunPayload(verb, args) {
+    const runs = URL_VERBS.has(verb)
+        ? args.filter((arg) => arg.startsWith('ext::')).flatMap(extCommands)
+        : [];
+    for (const spec of GIT_RUN_OPTIONS[verb] ?? []) runs.push(...optionValues(args, spec));
+    if (verb === 'clone') runs.push(...optionValues(args, ['c', '--config', 3]).flatMap(configCommands));
+    if (verb === 'config') {
+        const at = args.findIndex(commandConfigKey);
+        if (at >= 0 && args[at + 1] !== undefined) runs.push(helperCommand(args[at + 1]));
+    }
+    let words = [];
     if (verb === 'bisect' && args[0] === 'run') words = args.slice(1);
     else if (verb === 'submodule') {
         const at = args.findIndex((arg) => !arg.startsWith('-'));
-        if (args[at] !== 'foreach') return null;
-        words = args.slice(at + 1);
+        if (args[at] === 'foreach') words = args.slice(at + 1);
         while (words[0]?.startsWith('-')) words = words.slice(1);
-    } else return null;
-    return words.length ? [words[0], ...words.slice(1).map(quoteShellWord)].join(' ') : null;
+    }
+    if (words.length) runs.push([words[0], ...words.slice(1).map(quoteShellWord)].join(' '));
+    return runs.length ? runs.join('\n') : null;
+}
+
+// Config keys whose value Git runs as a command: pagers and editors, external
+// diff, textconv and diff filters, ssh, proxy and askpass programs, filter,
+// merge and credential helpers, signing programs, diff and merge tools,
+// trailer commands, upload-pack and receive-pack, sendemail, browser and man
+// commands, the IMAP tunnel and submodule update commands.
+const COMMAND_CONFIG_KEYS = [
+    /^core\.(?:pager|editor|sshcommand|askpass|gitproxy|fsmonitor|alternaterefscommand)$/,
+    /^(?:sequence\.editor|diff\.external|interactive\.difffilter|imap\.tunnel|instaweb\.httpd)$/,
+    /^(?:uploadpack\.packobjectshook|gpg\.ssh\.defaultkeycommand)$/,
+    /^pager\..+$/,
+    /^diff\..+\.(?:command|textconv)$/,
+    /^(?:diff|merge)tool\..+\.(?:cmd|path)$/,
+    /^merge\..+\.driver$/,
+    /^filter\..+\.(?:clean|smudge|process)$/,
+    /^credential(?:\..+)?\.helper$/,
+    /^gpg(?:\..+)?\.program$/,
+    /^trailer\..+\.(?:cmd|command)$/,
+    /^remote\..+\.(?:uploadpack|receivepack)$/,
+    /^sendemail\.(?:sendmail|to|cc|header)cmd$/,
+    /^(?:browser|man)\..+\.(?:cmd|path)$/,
+    /^submodule\..+\.update$/,
+    /^tar\..+\.command$/,
+];
+
+function commandConfigKey(key) {
+    const name = String(key).toLowerCase();
+    return COMMAND_CONFIG_KEYS.some((pattern) => pattern.test(name));
+}
+
+// Verbs that take a remote URL, where ext:: names a command.
+const URL_VERBS = new Set(['archive', 'clone', 'config', 'fetch', 'ls-remote', 'pull', 'push', 'remote', 'submodule']);
+
+// A helper value that starts with ! is a shell snippet (credential.helper,
+// submodule.<name>.update); without it the rest is read the same way.
+function helperCommand(value) {
+    return String(value).replace(/^\s*!/, '');
+}
+
+// Whatever follows ext:: is a command Git runs to reach the remote.
+function extCommands(text) {
+    const at = String(text).indexOf('ext::');
+    return at < 0 ? [] : [String(text).slice(at + 'ext::'.length)];
+}
+
+// The commands a key=value setting hands Git to run.
+function configCommands(setting) {
+    const text = String(setting);
+    const at = text.indexOf('=');
+    const value = at >= 0 && commandConfigKey(text.slice(0, at)) ? [helperCommand(text.slice(at + 1))] : [];
+    return [...value, ...extCommands(text)];
+}
+
+// Variables whose value Git runs as a command, and config passed through the
+// environment. <unset> and <declared> stand for values the line never shows.
+const COMMAND_ENVIRONMENT = new Set([
+    'EDITOR', 'GIT_ASKPASS', 'GIT_EDITOR', 'GIT_EXTERNAL_DIFF', 'GIT_PAGER', 'GIT_PROXY_COMMAND',
+    'GIT_SEQUENCE_EDITOR', 'GIT_SSH', 'GIT_SSH_COMMAND', 'PAGER', 'SSH_ASKPASS', 'VISUAL',
+]);
+
+function environmentCommands(assignments) {
+    return assignments.flatMap((assignment) => {
+        const at = assignment.indexOf('=');
+        const name = assignment.slice(0, at).toUpperCase();
+        const value = assignment.slice(at + 1);
+        if (/^<(?:unset|declared)>$/.test(value)) return [];
+        if (COMMAND_ENVIRONMENT.has(name)) return [value];
+        if (/^GIT_CONFIG_VALUE_\d+$/.test(name)) return [value, ...extCommands(value)];
+        if (name === 'GIT_CONFIG_PARAMETERS') return shellWords(value).flatMap(configCommands);
+        return [];
+    });
 }
 
 function nestedShellStartupTargetUncertain(tokens) {
@@ -1265,7 +1453,7 @@ function nestedShellArgumentCommitInvocation(tokens, payload, initialCwd) {
 // cwd/execution scope in ways a non-executing parser cannot prove. A commit in
 // such a command is denied by the agent guard and can be retried as a direct
 // Git command, while ordinary `a && b`/`a || b` chains remain supported.
-function hasUncertainShellSyntax(command) {
+function hasUncertainShellSyntax(command, { payload = false } = {}) {
     let quote = '';
     let escaped = false;
     for (let i = 0; i < command.length; i++) {
@@ -1300,6 +1488,11 @@ function hasUncertainShellSyntax(command) {
             if (isBraceGroupToken(command, i)) return true;
             continue;
         }
+        if (payload && char === '>' && command[i + 1] !== '(') continue;
+        if (payload && char === '&' && (command[i - 1] === '>' || command[i + 1] === '>')) continue;
+        if (payload && char === '|' && (command[i - 1] === '|' || command[i + 1] === '|')) continue;
+        if (payload && char === '|' && command[i + 1] !== '|'
+            && SAFE_PIPE_EXECUTABLES.has(shellExecutable(shellWords(command.slice(i + 1))[0] ?? ''))) continue;
         if (char === '`' || char === '(' || char === ')' || char === '<' || char === '>') return true;
         if (char === '|' && command[i + 1] !== '|') return true;
         if (char === '&' && command[i + 1] !== '&' && command[i - 1] !== '&') return true;

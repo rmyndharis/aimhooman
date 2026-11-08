@@ -1578,6 +1578,59 @@ test('commands Git runs for the agent are read like a sh -c payload', async () =
     }
 });
 
+test('commands Git takes from options, config and the environment are read before they run', async () => {
+    const hidden = 'git -c core.hooksPath=/dev/null commit -am x';
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-git-config-run-${profile}-`);
+        try {
+            for (const command of [
+                `git difftool -y -x '${hidden}' HEAD`,
+                `git fetch --upload-pack='${hidden} #' .`,
+                `git -c diff.external='${hidden} #' diff`,
+                `git -c core.fsmonitor='${hidden} #' status`,
+                "git -c credential.helper='!git commit --no-verify --allow-empty -m x' fetch origin",
+                "git submodule foreach 'echo Z2l0IGNvbW1pdA== | base64 -d | sh'",
+                "git rebase -x 'npm test; . ./env.sh' HEAD~1",
+                "git rebase -x 'f() { git push --no-verify origin main; }; f' HEAD~1",
+                "git submodule foreach 'echo Z2l0 | base64 -d | env sh'",
+                "git ls-remote --exec='git push --no-verify origin main #' .",
+                "git -c tar.x.command='git push --no-verify origin main #' archive --format=x HEAD",
+                "git config remote.origin.url 'ext::sh -c \"git push --no-verify origin main\"'",
+                "git -c credential.helper='!f() { git push --no-verify origin main; }; f' fetch origin",
+                'GIT_PAGER='.repeat(2000) + `cat ${hidden}`,
+                `git -c protocol.ext.allow=always ls-remote 'ext::sh -c "${hidden}"'`,
+                `GIT_EXTERNAL_DIFF='${hidden} #' git diff`,
+                `export GIT_SSH_COMMAND='${hidden} #'; git fetch origin`,
+                `GIT_EDITOR='${hidden} #' git config --edit`,
+                `git config diff.external '${hidden} #'`,
+                'git --config-env=core.sshCommand=SSH_COMMAND fetch origin',
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git -c core.pager=cat log',
+                'GIT_PAGER=cat git log -3 && git push origin main',
+                "git difftool -y -x 'diff -u' HEAD",
+                "GIT_SSH_COMMAND='ssh -i ~/.ssh/id_deploy' git fetch origin",
+                'git config core.pager less',
+                'git submodule foreach git branch',
+                "git bisect run sh -c 'make || exit 125; ./run-tests'",
+                "git rebase -x 'npm test > /dev/null' HEAD~1",
+                "git commit -m 'ext::git push origin main'",
+                "git rebase -x 'make -C . test' HEAD~1",
+                "git submodule foreach 'grep -rn eval src'",
+                "git rebase -x 'cargo test 2>&1 | tail -5' HEAD~2",
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
 test('inline and external Git commands cannot hide future index or hook mutation', async () => {
     for (const profile of ['clean', 'compliance']) {
         const dir = makeHookRepo(profile, `aim-hook-unproved-alias-${profile}-`);
