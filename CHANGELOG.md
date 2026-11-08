@@ -5,7 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.1] - 2026-11-08
+## [0.7.1] - 2026-11-09
+
+### Security
+
+- A `#` comment is cut before the line is read, so an apostrophe in `# don't hurry` no longer hides the command on the next line from the agent guard.
+- The agent guard reads Git inside `( )` and `{ }` groups, `$( )` and `<( )` substitutions, and after programs that run another, such as `caffeinate`, `arch` or `xcrun`.
+- Git that skips or repoints the hooks is refused inside `python -c`, `node -e`, `perl -e`, `ruby -e`, `awk` and `make --eval` code.
+- A makefile, `package.json` script or shell script that a command runs is read, and refused when its Git skips or repoints the hooks.
+- A harmless Git command such as `git add` beside a pipe into a shell no longer lets that pipe through.
+- `-c hook.<name>.command`, `-c protocol.ext.allow` and `-c protocol.allow` are refused for every Git command, and a stored config hook stops Git commands until it is removed.
+- Hook and config paths count however they are spelled: `.git//hooks`, `.git/./hooks`, `.git/[h]ooks`, the `.git` directory, a global gitconfig, or a path after `cd .git`.
+- An agent can no longer run `aimhooman allow`, `review`, `policy-review`, `uninstall`, `override remove` or `reset`, or `init` to a profile other than strict or the current one, nor change files in `.git/aimhooman`.
 
 ### Fixed
 
@@ -15,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A pager in a stored Git setting or in `GIT_PAGER` is no longer read as a pipeline.
 - Listings with an expanded pattern, `arr[0]=x`, `$GIT status` and `./$SCRIPT` are no longer refused.
 - Git behind `find -execdir`, `parallel` or `submodule foreach` is refused only when it skips the hooks.
+- A comment that names `git push --no-verify`, and a `{ }` group of read-only Git commands, are no longer refused.
 - Long chains of `env`, `nice`, `sudo` or assignments are decided quickly, and very large commands no longer crash the parser.
 - A commit the final ref guard refused stays refused under another committer identity, and no branch can be started on it.
 - With `log.showSignature` set, a signed commit made here is no longer read as someone else's.

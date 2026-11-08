@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from './git-environment.mjs';
 import { newEngineWithDiagnostics } from './scan.mjs';
@@ -25,6 +25,7 @@ import {
     gitIndexMutationRisk,
     gitReadOnlyRefCommand,
     gitRunPayload,
+    hasGitCandidate,
     hasUnquotedPipe,
     hookSkipOptions,
     inspectCommitOptions,
@@ -162,12 +163,42 @@ function hookPreToolUse(input) {
     // A POSIX shell reads $'...' with escapes; every check below sees the line
     // with the same quote boundaries the shell does.
     const executorCommand = nonPosixExecutor(executor.name) ? rawCommand : normalizeAnsiCQuotes(rawCommand);
-    const rawParsed = parseGit(executorCommand);
+    // # starts a comment and a backtick a substitution in the POSIX shells; in
+    // PowerShell a backtick escapes the character after it, and cmd has neither.
+    const rawParsed = parseGit(executorCommand, undefined, { posix: !nonPosixExecutor(executor.name) });
     if (nonPosixExecutor(executor.name)) {
         rawParsed.uncertainShell = true;
         // The benign-pipeline classifier is POSIX-only; never exempt a non-POSIX
         // shell line (pwsh/fish/cmd/nu) from opaque-commit-hiding treatment.
         rawParsed.opaqueCommitHiding = true;
+        rawParsed.opaqueSink = true;
+    }
+    // What this guard enforces is the user's to change, not the command's it
+    // guards: a write into .git/aimhooman, an exception, an uninstall or a
+    // weaker profile would let that command decide what passes.
+    if (rawParsed.commands.some((candidate) => candidate.verb === 'aimhooman-state')) {
+        return emitDecision(
+            'deny',
+            'aimhooman keeps its profile, overrides and refused commits in .git/aimhooman; a command may read them, not change them. Ask the user to make that change.',
+        );
+    }
+    for (const admin of rawParsed.commands.filter((candidate) => candidate.verb === 'aimhooman')) {
+        const refusal = adminRefusal(admin, false);
+        if (refusal) return emitDecision('deny', refusal);
+    }
+    const configCommand = rawParsed.commands.find((candidate) => candidate.runsConfigCommand);
+    if (configCommand) {
+        return emitDecision(
+            'deny',
+            `aimhooman cannot verify the command Git runs for ${configCommand.runsConfigCommand}: it runs outside the managed hooks and can change them. Run the Git command without that setting.`,
+        );
+    }
+    const script = scriptThatBypasses(rawParsed.commands);
+    if (script) {
+        return emitDecision(
+            'deny',
+            `aimhooman cannot let ${script} run: the Git it runs skips or repoints the hooks, or changes aimhooman's policy. Run what you need from it directly.`,
+        );
     }
     if (executorTargetSyntaxUncertain(executor.name, executorCommand, rawParsed)
         && (rawParsed.addPaths.length > 0 || rawParsed.commands.some(isProtectedMutation))) {
@@ -224,6 +255,11 @@ function hookPreToolUse(input) {
     const bypassHooks = parsed.bypassHooks;
     const protectedMutation = parsed.commands.some(isProtectedMutation);
     if (!commit && !protectedMutation && addPaths.length === 0 && !parsed.uncertainShell) return 0;
+    // The loop below visits what moves refs and passes over a listing such as
+    // git branch, so only those leave nothing hidden unvisited.
+    const movesRefs = parsed.commands.some((candidate) => (
+        isProtectedMutation(candidate) && !gitReadOnlyRefCommand(candidate.verb, candidate.args || [])
+    ));
     if (parsed.commands.some((candidate) => (
         isGuardedCandidate(candidate) && candidate.pathDialectUncertain
     ))) {
@@ -272,10 +308,14 @@ function hookPreToolUse(input) {
     // wrapper) is denied under strict even when no commit was recognized,
     // because a hidden commit + --no-verify could not be safely excluded. A
     // pipeline of read-only commands (git log | head) cannot hide one, which
-    // is what opaqueCommitHiding leaves out. This only needs to catch commands
-    // the per-command loop below cannot reach (empty commands); when commands
-    // are present, that loop emits the more specific denial reason.
-    if (profile === 'strict' && parsed.opaqueCommitHiding && parsed.commands.length === 0) {
+    // is what opaqueCommitHiding leaves out. This only needs to catch what the
+    // per-command loop below cannot reach: it visits commands that move refs, so
+    // a git add or git status beside a pipe into a shell leaves that unvisited.
+    // A line with no Git command at all is refused for any opaque part; one with
+    // some is refused for a part that can run what was not read, not for a
+    // substitution that was.
+    if (profile === 'strict' && parsed.opaqueCommitHiding
+        && (!hasGitCandidate(parsed.commands) || (parsed.opaqueSink && !movesRefs))) {
         return emitDecision(
             'deny',
             'aimhooman cannot safely verify this command under the strict profile; ' +
@@ -540,9 +580,10 @@ function hookPreToolUse(input) {
     ));
     // Nothing here was modelled, yet the shape can still hide a commit — a pipe
     // into a shell, a fed script. There is no argv to read a --no-verify out of,
-    // which is the reason to refuse rather than a reason to let it past.
+    // which is the reason to refuse rather than a reason to let it past. A git
+    // add beside it moves no ref, so it does not make the rest modelled.
     const opaqueCommitRisk = parsed.opaqueCommitHiding
-        && parsed.commands.length === 0
+        && (!hasGitCandidate(parsed.commands) || (parsed.opaqueSink && !movesRefs))
         && parsed.prefixRisk;
     const prefixBypass = commitPrefixRisk || opaqueCommitRisk;
     const aliasBypass = parsed.commands.some((candidate) => (
@@ -812,10 +853,75 @@ function unknownExecutorShape(input, executorName) {
     );
 }
 
+// The label of a script the line runs whose own commands skip or repoint the
+// hooks, or loosen aimhooman's policy, or null. The file is read here, one
+// level deep: what the script runs in turn is not followed.
+const SCRIPT_BYTES = 256 * 1024;
+function scriptThatBypasses(commands) {
+    for (const script of commands.filter((candidate) => candidate.verb === 'script')) {
+        for (const text of scriptTexts(script)) {
+            if (parseGit(text, script.cwd).commands.some((candidate) => (
+                candidate.noVerify || candidate.bypassHooks || candidate.hooksPathOverride
+                || candidate.verb === 'aimhooman-state'
+                || (candidate.verb === 'aimhooman' && adminRefusal(candidate, true))
+            ))) return script.label;
+        }
+    }
+    return null;
+}
+
+// Why an agent may not run this aimhooman command, or null. init may keep the
+// profile or raise it to strict. A script that sets the profile from a variable
+// is not judged: what it holds is not in the file.
+function adminRefusal(admin, inScript) {
+    if (admin.subcommand !== 'init') {
+        return `aimhooman ${admin.subcommand} changes what this guard enforces; ask the user to run it.`;
+    }
+    if (inScript && /[$`]/.test(admin.profile ?? '')) return null;
+    const current = currentProfile(admin.cwd);
+    if (current === null || admin.profile === 'strict' || admin.profile === current) return null;
+    return `aimhooman init --profile ${admin.profile} would change this repository's profile from ${current}; ask the user to run it.`;
+}
+
+function scriptTexts(script) {
+    const read = (path) => {
+        try {
+            const full = resolve(script.cwd, path);
+            return statSync(full).size <= SCRIPT_BYTES ? readFileSync(full, 'utf8') : null;
+        } catch {
+            return null;
+        }
+    };
+    if (script.kind === 'package') {
+        let scripts;
+        try {
+            scripts = JSON.parse(read('package.json') ?? '{}').scripts ?? {};
+        } catch {
+            return [];
+        }
+        return [`pre${script.name}`, script.name, `post${script.name}`]
+            .map((key) => scripts[key])
+            .filter((value) => typeof value === 'string');
+    }
+    // A file run by its path is shell text when its #! names a shell or it has none.
+    return script.paths.map(read).filter((text) => text !== null && (!script.shebang || !text.startsWith('#!')
+        || /^#!\s*(?:\S*\/)?(?:env\s+(?:-\S+\s+)*)?(?:ash|bash|dash|ksh|mksh|sh|zsh)\b/.test(text)));
+}
+
+// The profile aimhooman enforces where it is installed at cwd, or null where it
+// is not yet: a first init there takes nothing away.
+function currentProfile(cwd) {
+    try {
+        const repo = openRepo(cwd);
+        return installedHooks(repo).length ? enforcementPolicy(repo).profile : null;
+    } catch {
+        return null;
+    }
+}
+
 // Every setting Git reads here, includes followed, or nothing when Git cannot
-// say; the guarded commands keep their own checks either way.
-// shortcut: reads the hook's own directory only, so a git -C target elsewhere
-// keeps its settings unread; read each target if that case shows up.
+// say; the guarded commands keep their own checks either way. Only the hook's
+// own directory is read, so a git -C target elsewhere keeps its settings unread.
 function configListing() {
     try {
         return execFileSync('git', ['config', '--list', '-z'], {
