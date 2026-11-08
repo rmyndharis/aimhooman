@@ -19,6 +19,7 @@ import {
     GIT_REF_MUTATION_COMMANDS,
     SAFE_NON_COMMIT_GIT,
     commandMayTouchHooks,
+    configuredGitRisk,
     gitCommandMayBypassRefGuard,
     gitConfigMayMutate,
     gitIndexMutationRisk,
@@ -200,6 +201,18 @@ function hookPreToolUse(input) {
             'deny',
             UNCERTAIN_TARGET_REASON,
         );
+    }
+    // A setting already in a config file can hand Git a command that commits,
+    // moves refs or repoints the hooks behind an ordinary call such as git log.
+    if (/\bgit\b/i.test(executorCommand)) {
+        const key = configuredGitRisk(configListing(), process.cwd());
+        if (key) {
+            return emitDecision(
+                'deny',
+                `aimhooman cannot verify the command Git config ${key} runs: it commits, moves refs or changes the hooks path. `
+                + 'Remove or change that setting and retry.',
+            );
+        }
     }
     const parsed = resolveGitAliases(rawParsed);
     const { commit, noVerify, addPaths } = parsed;
@@ -784,6 +797,22 @@ function unknownExecutorShape(input, executorName) {
         'deny',
         `aimhooman cannot inspect the ${executorName} command payload in this strict repository; retry with a direct shell command.`
     );
+}
+
+// Every setting Git reads here, includes followed, or nothing when Git cannot
+// say; the guarded commands keep their own checks either way.
+// shortcut: reads the hook's own directory only, so a git -C target elsewhere
+// keeps its settings unread; read each target if that case shows up.
+function configListing() {
+    try {
+        return execFileSync('git', ['config', '--list', '-z'], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: GIT_TIMEOUT_MS,
+        });
+    } catch {
+        return '';
+    }
 }
 
 function configuredPushReceiver(repo) {
