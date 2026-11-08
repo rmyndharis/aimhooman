@@ -58,8 +58,8 @@ only the latest minor release will receive security fixes.
   should be governed by team process where compliance requires it.
 - For protected-path changes (agent instruction files, `.aimhooman.json`), this
   repository's CI resolves the repository and owner through the GitHub API and fetches
-  the exact workflow-run attempt. The scripts are not part of the npm package or the
-  GitHub Action. GitHub must attribute both the actor and triggering actor to the owner's
+  the exact workflow-run attempt. The npm package does not carry the scripts and the
+  GitHub Action never runs them. GitHub must attribute both the actor and triggering actor to the owner's
   login and numeric ID. The resulting decision is bound to the exact head, transition
   commit, path, blob, and regular-file mode (or deletion tombstone); a policy migration
   also binds its old and new objects. Changes not attributed to the owner fail closed.

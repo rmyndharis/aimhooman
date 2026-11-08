@@ -77,8 +77,8 @@ Under `strict`, a pull request that adds or changes an agent instruction file
 `.aimhooman.json` fails the check, and the action has no step that approves
 it. Under `clean` those changes are notices and the check passes; under
 `compliance` they exit 11 and fail it. aimhooman's own repository accepts them
-from its owner through CI scripts that ship with neither the action nor the
-npm package ([docs/policy.md](policy.md#owner-authorization-in-ci)).
+from its owner through CI scripts that the npm package does not carry and the
+action never runs ([docs/policy.md](policy.md#owner-authorization-in-ci)).
 
 Pinning the action tag (`@v0.6.0`) pins only the action's steps, not the CLI:
 the action npm-installs aimhooman at run time, and the `version` input
@@ -90,8 +90,9 @@ For `push` events, use `base: ${{ github.event.before }}` and
 all zeros. The action then scans from the branch's merge base with
 `origin/<default branch>` and passes when the branch adds no commits, so
 history the default branch already carries is not judged again. An orphan
-branch, and the first push of the default branch itself, scan from the root
-commit.
+branch, the first push of the default branch itself, and a push whose
+`before` a force-push left unreachable scan from the root commit, so check
+out with `fetch-depth: 0`.
 
 CI is the enforcement tier that travels with the repository: local hooks do
 not govern another clone, and a laptop can skip its own hooks. The action
