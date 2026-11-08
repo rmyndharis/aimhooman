@@ -555,6 +555,25 @@ test('commitmsg: a scissors line in -F text is read unless Git cuts there', () =
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Without an editor Git keeps the line, whatever commit.cleanup says, and a
+// diff line typed below it proves nothing.
+test('commit -F keeps a scissors line, so what follows it is still repaired', () => {
+    const dir = makeRepo('clean');
+    try {
+        const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+        for (const [name, body, config] of [
+            ['scissors', '', ['-c', 'commit.cleanup=scissors']],
+            ['typed-diff', 'diff --git a/x b/x\n', []],
+        ]) {
+            const msg = join(dir, `${name}.msg`);
+            writeFileSync(msg, `subject\n\n# ------------------------ >8 ------------------------\n${body}${trailer}\n`);
+            const out = spawnSync('git', [...config, 'commit', '-q', '--allow-empty', '-F', msg], { cwd: dir, encoding: 'utf8' });
+            assert.equal(out.status, 0, `${name}: ${out.stderr}`);
+            assert.doesNotMatch(execFileSync('git', ['log', '-1', '--format=%B'], { cwd: dir, encoding: 'utf8' }), /Co-authored-by/, name);
+        }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('commitmsg: clean repairs the message above the scissors line and keeps the rest byte for byte', () => {
     const dir = makeRepo('clean');
     try {

@@ -1718,6 +1718,19 @@ test('a review that never passed pre-commit is named once, at the final ref guar
         assert.equal(picked.status, 0, picked.stderr);
         assert.match(picked.stderr, /^REVIEW +generic\.agent-instructions[^\n]*\n\s+GEMINI\.md/m);
 
+        // A fast-forward onto a branch that already holds the commit repeats nothing.
+        git(repo, ['checkout', '-q', '-b', 'held']);
+        const heldFile = 'held.txt';
+        writeFileSync(join(repo.root, heldFile), 'held\n');
+        git(repo, ['add', heldFile]);
+        writeFileSync(join(repo.root, 'AGENTS.md'), '# Agent instructions, edited\n');
+        git(repo, ['add', 'AGENTS.md']);
+        git(repo, ['commit', '-q', '--no-verify', '-m', 'Edit agent instructions']);
+        git(repo, ['checkout', '-q', main]);
+        const forward = gitRun(['merge', '-q', '--ff-only', 'held']);
+        assert.equal(forward.status, 0, forward.stderr);
+        assert.equal(reviews(forward).length, 0, forward.stderr);
+
         git(repo, ['checkout', '-q', '-b', 'later', 'HEAD~1']);
         git(repo, ['commit', '-q', '--allow-empty', '-m', 'later work']);
         git(repo, ['checkout', '-q', main]);

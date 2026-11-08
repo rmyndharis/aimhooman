@@ -623,6 +623,25 @@ export function fetchedCommit(repo, oid, tips = []) {
     }
 }
 
+// committedElsewhere reports whether someone else committed it: the address Git
+// would commit with here differs from the commit's. Without a local identity
+// nothing can be told apart.
+export function committedElsewhere(repo, oid) {
+    assertOid(oid);
+    try {
+        const local = /<([^<>]*)>/.exec(gitStr(['var', 'GIT_COMMITTER_IDENT'], repo.root))?.[1].toLowerCase();
+        return Boolean(local) && gitStr(['log', '-1', '--format=%ce', oid], repo.root).toLowerCase() !== local;
+    } catch {
+        return false;
+    }
+}
+
+// onLocalBranch reports whether a branch already holds the commit.
+export function onLocalBranch(repo, oid) {
+    assertOid(oid);
+    return gitBuf(['rev-list', '-n', '1', oid, '--not', '--branches'], repo.root).toString('utf8').trim() !== oid;
+}
+
 // fetchHeadObjects lists the object IDs FETCH_HEAD records, or none.
 export function fetchHeadObjects(repo) {
     try {
