@@ -197,8 +197,8 @@ function scanCommit(repo, options) {
     // A parent whose policy cannot be read might have been strict. It floors
     // like a strict one, which keeps an unreadable file from switching strict
     // enforcement off, and its object ID binds the review that can clear it.
-    // The floor guards a change of the policy file: a commit that carries the
-    // parent's file forward unchanged downgrades nothing.
+    // A commit that carries the parent's file forward unchanged is still
+    // scanned under that floor; it only has no downgrade to answer for.
     const floorParents = parentPolicies.filter((parent) => isVersionedStrict(parent) || parent.unparseable);
     const policyMigrationContexts = options.policyMigrationContexts ?? (head ? [{
         head,
@@ -214,7 +214,7 @@ function scanCommit(repo, options) {
         })
     ));
     const changed = floorParents.some((parent) => parent.policy_object_id !== rawPolicy.policy_object_id);
-    const floor = changed && !acknowledged && !isVersionedStrict(rawPolicy)
+    const floor = floorParents.length > 0 && !acknowledged && !isVersionedStrict(rawPolicy)
         ? 'parent-strict-floor'
         : null;
     const policy = effectivePolicy(
@@ -254,7 +254,7 @@ function scanCommit(repo, options) {
         accumulator.markIncomplete('shallow-repository');
     }
 
-    if (floor && !isVersionedStrict(rawPolicy)) {
+    if (floor && changed) {
         accumulator.add([protectedPolicyFinding(rawPolicy, policy, snapshot, {
             oldObjectId: floorParents[0]?.policy_object_id ?? null,
             transition: snapshot.commit,
