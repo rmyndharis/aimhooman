@@ -1684,6 +1684,20 @@ test('compliance keeps a review a notice through the final ref guard', () => {
     }
 });
 
+test('a plain init keeps the profile this clone chose', () => {
+    // The refusals that find a hook missing say to run aimhooman init; doing
+    // so must not reset a strict repository to clean.
+    const repo = createRepo('strict');
+    try {
+        const again = run(repo, ['init']);
+        assert.equal(again.status, 0, again.stderr);
+        const config = JSON.parse(readFileSync(join(repo.root, '.git', 'aimhooman', 'config.json'), 'utf8'));
+        assert.equal(config.profile, 'strict');
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('a message changed without hooks has its own review named', () => {
     // pre-commit named the tree's review for the first commit, not the new
     // message an --amend --no-verify gives it.

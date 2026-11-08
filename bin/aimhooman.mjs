@@ -587,10 +587,11 @@ function cmdPushcheck(args) {
         console.error(`aimhooman: cannot read pre-push input: ${error.message}`);
         return 30;
     }
-    // pre-push lines: <local ref> <local oid> <remote ref> <remote oid>. The
-    // local ref name is irrelevant (Git passes it as typed when it names no
-    // ref, so `main@{1 minute ago}` arrives with its spaces); what matters is
-    // which objects are about to be published. Deletions (zero local oid)
+    // pre-push lines: <local ref> <local oid> <remote ref> <remote oid>. What
+    // matters is which objects are about to be published; the local ref only
+    // keeps the branch they come from from vouching for them. Git passes it as
+    // typed when it names no ref, so `main@{1 minute ago}` arrives with its
+    // spaces, and that names no branch. Deletions (zero local oid)
     // carry nothing and were already filtered by the dispatcher, but
     // belt-and-braces here since pushcheck can be driven directly.
     const updates = [];
@@ -600,14 +601,14 @@ function cmdPushcheck(args) {
             console.error('aimhooman: malformed pre-push input; push stopped');
             return 30;
         }
-        const [, , localOid, remoteRef, remoteOid] = match;
+        const [, localRef, localOid, remoteRef, remoteOid] = match;
         if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(localOid)
             || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(remoteOid)) {
             console.error('aimhooman: malformed object ID in pre-push input; push stopped');
             return 30;
         }
         if (/^0+$/.test(localOid)) continue;
-        updates.push({ oldObjectId: remoteOid, newObjectId: localOid, ref: remoteRef });
+        updates.push({ oldObjectId: remoteOid, newObjectId: localOid, ref: remoteRef, source: localRef });
     }
     if (!updates.length) return 0;
     const repo = tryRepo();
@@ -982,6 +983,14 @@ function cmdInit(args) {
                 return 20;
             }
             profile = projectPolicy.profile;
+        } else if (!profileExplicit) {
+            // Re-running init repairs the hooks, as the refusals that ask for it
+            // say. It keeps the profile this clone chose instead of resetting a
+            // strict repository to clean.
+            try {
+                const saved = loadConfig(repo.stateDir).profile;
+                if ([...PROFILES].includes(saved)) profile = saved;
+            } catch { /* no usable saved profile: the default stands */ }
         }
         let eng;
         try {

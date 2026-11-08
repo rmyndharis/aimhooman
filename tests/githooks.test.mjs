@@ -1708,6 +1708,39 @@ test('the final guard reads the message of a merge, an initial and an orphan com
 // The final guard keeps refusing a commit it refused once, whatever local ref
 // is pointed at it, while a merge a fetch writes straight into a local branch
 // is someone else's to word.
+// pre-push measures a new remote branch against the local branches that have
+// passed the guard. The branch being pushed is not one of them, whatever name
+// it goes out under: a branch made before aimhooman was installed vouched for
+// its own artifact.
+test('a branch pushed under a new name is scanned', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-push-renamed-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const remote = join(base, 'remote.git');
+            git(base, ['init', '-q', '--bare', remote]);
+            git(root, ['remote', 'add', 'origin', remote]);
+            const main = git(root, ['branch', '--show-current']);
+            git(root, ['push', '-q', 'origin', main]);
+            git(root, ['switch', '-q', '-c', 'wip']);
+            writeFileSync(join(root, 'CLAUDE.local.md'), 'notes\n');
+            git(root, ['add', 'CLAUDE.local.md']);
+            git(root, ['commit', '-q', '-m', 'wip']);
+            git(root, ['switch', '-q', main]);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+            const push = (spec) => spawnSync('git', ['push', '-q', 'origin', spec], { cwd: root, encoding: 'utf8' });
+            for (const spec of ['wip:refs/heads/other', 'wip~0:refs/heads/copy']) {
+                assert.notEqual(push(spec).status, 0, spec);
+            }
+            const release = push(`${main}:refs/heads/release`);
+            assert.equal(release.status, 0, release.stderr);
+            assert.equal(git(remote, ['branch', '--list', 'other', 'copy']), '');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test('a refused commit reaches no branch, and a fetched merge comes in', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-ref-refused-'));
     const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';

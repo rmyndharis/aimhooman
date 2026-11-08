@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advisory reviews are named for `git am` and for a message changed with `--amend --no-verify`, and no longer for a commit a fetch brought in.
 - `aimhooman init` after `pre-commit install` keeps both hooks running instead of failing.
 - A hook that mentions pre-commit's header is no longer taken for its script, and a removed `.legacy` hook no longer fails every commit once `aimhooman init` rewrites the shim.
+- A branch pushed under another name (`git push origin wip:other`, `HEAD:other`, `wip~0:other`) is scanned like the branch itself.
+- A plain `aimhooman init` keeps the profile the clone already uses instead of resetting it to `clean`.
 
 ## [0.7.0] - 2026-11-08
 
