@@ -1684,6 +1684,25 @@ test('compliance keeps a review a notice through the final ref guard', () => {
     }
 });
 
+test('a message changed without hooks has its own review named', () => {
+    // pre-commit named the tree's review for the first commit, not the new
+    // message an --amend --no-verify gives it.
+    const repo = createRepo('clean');
+    const gitRun = (args) => spawnSync('git', args, { cwd: repo.root, env: repo.env, encoding: 'utf8' });
+    const bot = 'Co-authored-by: helper[bot] <helper[bot]@users.noreply.github.com>';
+    try {
+        writeFileSync(join(repo.root, 'AGENTS.md'), '# Agent instructions\n');
+        git(repo, ['add', 'AGENTS.md']);
+        const plain = gitRun(['commit', '-q', '-m', 'Add agent instructions']);
+        assert.equal(plain.status, 0, plain.stderr);
+        const amended = gitRun(['commit', '-q', '--amend', '--no-verify', '-m', `Add agent instructions\n\n${bot}`]);
+        assert.equal(amended.status, 0, amended.stderr);
+        assert.match(amended.stderr, /^REVIEW +attribution\.bot-coauthor/m);
+    } finally {
+        cleanup(repo);
+    }
+});
+
 test('a review that never passed pre-commit is named once, at the final ref guard', () => {
     // pre-commit is the hook that prints a review, and --no-verify or a
     // cherry-pick never runs it. The final guard lets the commit through on
@@ -1717,6 +1736,18 @@ test('a review that never passed pre-commit is named once, at the final ref guar
         const picked = gitRun(['cherry-pick', 'side']);
         assert.equal(picked.status, 0, picked.stderr);
         assert.match(picked.stderr, /^REVIEW +generic\.agent-instructions[^\n]*\n\s+GEMINI\.md/m);
+
+        // Nor does git am.
+        git(repo, ['checkout', '-q', '-b', 'mailed']);
+        writeFileSync(join(repo.root, 'AGENTS.md'), '# Agent instructions, mailed\n');
+        git(repo, ['add', 'AGENTS.md']);
+        git(repo, ['commit', '-q', '--no-verify', '-m', 'Mail agent instructions']);
+        const patch = git(repo, ['format-patch', '-1', '--stdout']);
+        git(repo, ['checkout', '-q', main]);
+        git(repo, ['branch', '-q', '-D', 'mailed']);
+        const mailed = spawnSync('git', ['am', '-q'], { cwd: repo.root, env: repo.env, encoding: 'utf8', input: `${patch}\n` });
+        assert.equal(mailed.status, 0, mailed.stderr);
+        assert.match(mailed.stderr, /^REVIEW +generic\.agent-instructions[^\n]*\n\s+AGENTS\.md/m);
 
         // A fast-forward onto a branch that already holds the commit repeats nothing.
         git(repo, ['checkout', '-q', '-b', 'held']);

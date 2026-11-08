@@ -1708,7 +1708,7 @@ test('the final guard reads the message of a merge, an initial and an orphan com
 // The final guard keeps refusing a commit it refused once, whatever local ref
 // is pointed at it, while a merge a fetch writes straight into a local branch
 // is someone else's to word.
-test('a refused commit stays out through a local branch, and a fetched merge comes in', () => {
+test('a refused commit reaches no branch, and a fetched merge comes in', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-ref-refused-'));
     const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
     try {
@@ -1726,7 +1726,9 @@ test('a refused commit stays out through a local branch, and a fetched merge com
             });
             assert.notEqual(refused.status, 0);
             const sha = /proposed commit ([0-9a-f]+)/.exec(refused.stderr)[1];
-            git(clone, ['branch', 'keep', sha]);
+            const branch = spawnSync('git', ['branch', 'keep', sha], { cwd: clone, encoding: 'utf8' });
+            assert.notEqual(branch.status, 0, 'the refused commit starts no branch');
+            git(clone, ['tag', 'keep', sha]);
             const merge = spawnSync('git', ['merge', '--ff-only', 'keep'], { cwd: clone, encoding: 'utf8' });
             assert.notEqual(merge.status, 0, 'the refused commit reaches no branch by fast-forward');
             assert.equal(git(clone, ['rev-parse', 'HEAD']), before);
@@ -1787,6 +1789,98 @@ test('someone else\'s fetched commit comes in and a refused one made here stays 
             git(clone, ['update-ref', 'refs/remotes/origin/kept', sha]);
             const smuggled = run(['merge', '--ff-only', 'origin/kept']);
             assert.notEqual(smuggled.status, 0, 'a remote-tracking ref does not make it fetched');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// The guard keeps a list of what it refused. Committing under another address,
+// or a pull from the repository itself that leaves the commit in FETCH_HEAD,
+// only changes who seems to have made it.
+test('a refused commit or merge stays out under another identity', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-other-identity-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+            const run = (args) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+            const refusedSha = (result) => {
+                assert.notEqual(result.status, 0, result.stderr);
+                return /proposed commit ([0-9a-f]+)/.exec(result.stderr)[1];
+            };
+            const before = git(root, ['rev-parse', 'HEAD']);
+            const commit = refusedSha(run(['commit', '--allow-empty', '--no-verify', '-m', `mine\n\n${trailer}`]));
+            for (const args of [
+                ['-c', 'user.email=other@example.com', 'pull', '-q', '--ff-only', '.', commit],
+                ['-c', 'user.email=other@example.com', 'merge', '-q', '--ff-only', commit],
+            ]) {
+                assert.notEqual(run(args).status, 0, args.join(' '));
+                assert.equal(git(root, ['rev-parse', 'HEAD']), before, args.join(' '));
+            }
+
+            const main = git(root, ['branch', '--show-current']);
+            git(root, ['checkout', '-q', '-b', 'side']);
+            git(root, ['commit', '-q', '--allow-empty', '-m', 'side work']);
+            git(root, ['checkout', '-q', main]);
+            git(root, ['commit', '-q', '--allow-empty', '-m', 'main work']);
+            const tip = git(root, ['rev-parse', 'HEAD']);
+            const merge = refusedSha(run(['merge', '--no-ff', '--no-verify', '-m', `Merge side\n\n${trailer}`, 'side']));
+            git(root, ['merge', '--abort']);
+            assert.notEqual(run(['-c', 'user.email=other@example.com', 'merge', '-q', '--ff-only', merge]).status, 0);
+            assert.equal(git(root, ['rev-parse', 'HEAD']), tip);
+
+            // An empty ref file, as a crash can leave, is no reason to refuse.
+            writeFileSync(join(root, '.git', 'refs', 'heads', 'broken'), '');
+            writeFileSync(join(root, 'AGENTS.md'), '# Agent instructions\n');
+            git(root, ['add', 'AGENTS.md']);
+            const reviewed = run(['commit', '-q', '--no-verify', '-m', 'Add agent instructions']);
+            assert.equal(reviewed.status, 0, reviewed.stderr);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// log.showSignature prints the check of a signed commit before the format asked
+// for, which made every signed commit read as someone else's.
+test('a signed merge made here is read as made here', (t) => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-signed-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const key = join(base, 'key');
+            const made = spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', '', '-f', key], { encoding: 'utf8' });
+            if (made.status !== 0) {
+                t.skip('needs ssh-keygen');
+                return;
+            }
+            writeFileSync(join(base, 'allowed'), `test@example.com ${readFileSync(`${key}.pub`, 'utf8')}`);
+            for (const [name, value] of [
+                ['gpg.format', 'ssh'],
+                ['user.signingkey', key],
+                ['commit.gpgsign', 'true'],
+                ['gpg.ssh.allowedSignersFile', join(base, 'allowed')],
+                ['log.showSignature', 'true'],
+            ]) git(root, ['config', name, value]);
+            const main = git(root, ['branch', '--show-current']);
+            git(root, ['checkout', '-q', '-b', 'side']);
+            const signed = spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'side work'], { cwd: root, encoding: 'utf8' });
+            if (signed.status !== 0) {
+                t.skip(`this Git cannot sign with SSH: ${signed.stderr.trim()}`);
+                return;
+            }
+            git(root, ['checkout', '-q', main]);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+            git(root, ['commit', '-q', '--allow-empty', '-m', 'main work']);
+            const tip = git(root, ['rev-parse', 'HEAD']);
+            const merge = spawnSync('git', ['merge', '--no-ff', '--no-verify', '-m', `Merge side\n\n${trailer}`, 'side'], {
+                cwd: root, encoding: 'utf8',
+            });
+            assert.notEqual(merge.status, 0, merge.stderr);
+            assert.equal(git(root, ['rev-parse', 'HEAD']), tip);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });
@@ -2512,7 +2606,11 @@ test('a chained pre-commit.com hook still runs the .legacy hook it moved aside',
             const repo = openRepo(root);
             const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
             const shim = join(repo.stateDir, 'chained', 'pre-commit.legacy');
-            writeFileSync(join(hooks, 'pre-commit.legacy'), '#!/bin/sh\necho legacy >> "$PWD/ran"\n');
+            // Naming pre-commit's header does not make a hook pre-commit's script.
+            writeFileSync(
+                join(hooks, 'pre-commit.legacy'),
+                '#!/bin/sh\n# Runs before the hook headed "# File generated by pre-commit".\necho legacy >> "$PWD/ran"\n',
+            );
             writeFileSync(
                 join(hooks, 'pre-commit'),
                 '#!/bin/sh\nHERE="$(cd "$(dirname "$0")" && pwd)"\n'
@@ -2523,10 +2621,17 @@ test('a chained pre-commit.com hook still runs the .legacy hook it moved aside',
             chmodSync(join(hooks, 'pre-commit'), 0o755);
             installHooks(repo, CLI);
             installHooks(repo, CLI);
+            assert.equal(existsSync(shim), true);
 
             const out = spawnSync('sh', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8' });
             assert.equal(out.status, 0, out.stderr);
             assert.equal(readFileSync(join(root, 'ran'), 'utf8'), 'legacy\npre-commit\n');
+
+            // pre-commit.com skips a .legacy hook that is gone, and so does the shim.
+            renameSync(join(hooks, 'pre-commit.legacy'), join(base, 'moved'));
+            const gone = spawnSync('sh', [shim], { cwd: root, encoding: 'utf8' });
+            assert.equal(gone.status, 0, gone.stderr);
+            renameSync(join(base, 'moved'), join(hooks, 'pre-commit.legacy'));
 
             // An older dispatcher left as .legacy would run this chain again.
             copyFileSync(join(hooks, 'pre-commit'), join(hooks, 'pre-commit.legacy'));
@@ -2576,6 +2681,46 @@ test('uninstall gives a dispatcher moved aside as .legacy back its chained hook'
             assert.equal(readFileSync(join(hooks, 'pre-commit.legacy'), 'utf8'), original);
             assert.equal(readFileSync(join(hooks, 'pre-commit'), 'utf8'), '#!/bin/sh\n# pre-commit.com\n');
             assert.deepEqual(remainingDispatchers(repo), []);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// pre-commit install, run after aimhooman, moves the dispatcher aside as
+// .legacy. init puts the hook the dispatcher chained back in its place and
+// chains pre-commit.com's script, as if pre-commit had been installed first.
+test('init after pre-commit install keeps both hooks running', (t) => {
+    if (process.platform === 'win32') {
+        t.skip('runs POSIX hook scripts directly');
+        return;
+    }
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-legacy-reinit-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            const original = '#!/bin/sh\necho original >> "$PWD/ran"\n';
+            const script = '#!/bin/sh\n# File generated by pre-commit: https://pre-commit.com\n'
+                + '# ID: 138fd403232d2ddd5efb44317e38bf03\n'
+                + 'HERE="$(cd "$(dirname "$0")" && pwd)"\n'
+                + '[ -x "$HERE/pre-commit.legacy" ] && "$HERE/pre-commit.legacy" "$@"\n'
+                + 'echo pre-commit >> "$PWD/ran"\n';
+            writeFileSync(join(hooks, 'pre-commit'), original);
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+            installHooks(repo, CLI);
+            renameSync(join(hooks, 'pre-commit'), join(hooks, 'pre-commit.legacy'));
+            writeFileSync(join(hooks, 'pre-commit'), script);
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+
+            const result = installHooks(repo, CLI);
+            assert.ok(result.installed.includes('pre-commit'), JSON.stringify(result));
+            assert.equal(readFileSync(join(hooks, 'pre-commit.legacy'), 'utf8'), original);
+            assert.equal(readFileSync(join(repo.stateDir, 'chained', 'pre-commit'), 'utf8'), script);
+            const out = spawnSync('sh', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8' });
+            assert.equal(out.status, 0, out.stderr);
+            assert.equal(readFileSync(join(root, 'ran'), 'utf8'), 'original\npre-commit\n');
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

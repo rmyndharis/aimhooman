@@ -758,11 +758,9 @@ function cmdRefcheck(args) {
     }
 
     let commits;
+    const fetchedTips = [...remoteTips, ...fetchHeadObjects(repo)];
     try {
-        commits = resolveIntroduced(repo, updates, {
-            firstBranchFromRemotes: true,
-            fetchedTips: [...remoteTips, ...fetchHeadObjects(repo)],
-        });
+        commits = resolveIntroduced(repo, updates, { firstBranchFromRemotes: true, fetchedTips });
     }
     catch (error) {
         console.error(`aimhooman: cannot resolve proposed commits: ${error.message}`);
@@ -771,8 +769,10 @@ function cmdRefcheck(args) {
     const code = scanProposedCommits(repo, commits, {
         limits: scanLimits(),
         afterPrecommit: true,
+        fetchedTips,
         // A rebase replays commits whose reviews showed when they were made.
-        printReviews: !['rebase-merge', 'rebase-apply'].some((dir) => existsSync(join(repo.gitDir, dir))),
+        // git am keeps its state in the same directory but runs no pre-commit.
+        printReviews: !['rebase-merge', join('rebase-apply', 'rebasing')].some((path) => existsSync(join(repo.gitDir, path))),
         rejectNote: (revision) =>
             `aimhooman: proposed commit ${revision} was rejected before refs changed\n`
             // The vetoed commit stays in the object store: the ref never

@@ -5,7 +5,7 @@
 // exercised without spawning it.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GIT_TIMEOUT_MS } from './git-environment.mjs';
 import {
@@ -123,7 +123,8 @@ export function precommitCleanMatches(repo, treeSha, profile) {
 // The tree whose reviews a hook has printed. The final guard prints a review
 // only where no hook did (--no-verify, a cherry-pick). Separate from the clean
 // marker, which stays unwritten for a repaired or incomplete scan that still
-// printed its reviews.
+// printed its reviews. It speaks for one commit: the next one with this tree,
+// an --amend --no-verify with a new message, ran no hook.
 function reviewsShownPath(repo) {
     return join(repo.stateDir, 'reviews-shown.json');
 }
@@ -137,9 +138,30 @@ export function recordReviewsShown(repo, tree = null) {
 }
 function reviewsShown(repo, tree) {
     try {
-        return JSON.parse(readFileSync(reviewsShownPath(repo), 'utf8'))?.tree === tree;
+        const shown = JSON.parse(readFileSync(reviewsShownPath(repo), 'utf8'))?.tree === tree;
+        rmSync(reviewsShownPath(repo), { force: true });
+        return shown;
     } catch {
         return false;
+    }
+}
+
+// The commits the final guard refused. Nothing else tells one apart once it has
+// a ref or the identity has changed. It stays a commit made here, so only its
+// bytes decide: one refused for a gap in the scan can still pass later.
+function refusedCommits(repo) {
+    try {
+        return new Set(readFileSync(join(repo.stateDir, 'refused-commits'), 'utf8').split('\n').filter(Boolean));
+    } catch {
+        return new Set();
+    }
+}
+function recordRefusedCommit(repo, revision) {
+    try {
+        mkdirSync(repo.stateDir, { recursive: true });
+        appendFileSync(join(repo.stateDir, 'refused-commits'), `${revision}\n`);
+    } catch {
+        // best effort; the committer check in authoredHere still applies
     }
 }
 
@@ -219,14 +241,16 @@ export function resolveIntroduced(repo, updates, {
     // branch pulled in by `gh pr checkout` or `git fetch`, a merge of fetched
     // history — imports other people's commit text the developer cannot
     // change, and scanning it only blocks the review.
-    const localAuthorTips = new Set();
+    const authored = new Set();
+    const refused = refusedCommits(repo);
     for (const update of updates) {
         const introduced = introducedCommits(repo, [update], { firstBranchFromRemotes });
         // A forced move onto a fetched commit is not a commit made here.
         if (!update.forced && authoredHere(repo, update, introduced, fetchedTips)) {
-            localAuthorTips.add(update.newObjectId);
+            authored.add(update.newObjectId);
         }
         for (const revision of introduced) {
+            if (refused.has(revision)) authored.add(revision);
             const contexts = contextsByCommit.get(revision) || [];
             contexts.push({
                 head: update.newObjectId,
@@ -253,7 +277,7 @@ export function resolveIntroduced(repo, updates, {
     return [...contextsByCommit].map(([revision, reviewContexts]) => [
         revision,
         reviewContexts,
-        localAuthorTips.has(revision),
+        authored.has(revision),
     ]);
 }
 
@@ -282,13 +306,15 @@ function authoredHere(repo, { oldObjectId, newObjectId }, introduced, fetchedTip
 // line(s) printed after the findings; callers without a note pass null. The
 // scan budget comes from the caller: it is CLI environment input, parsed and
 // validated at the surface. afterPrecommit marks the final guard of a commit,
-// whose tree pre-commit may already have reported; printReviews off keeps
-// advisory reviews quiet where they were shown when the commit was made.
+// whose tree pre-commit may already have reported, and fetchedTips what it
+// knows came in by a fetch; printReviews off keeps advisory reviews quiet where
+// they were shown when the commit was made.
 export function scanProposedCommits(repo, commits, {
     rejectNote,
     limits = {},
     afterPrecommit = false,
     printReviews = true,
+    fetchedTips = [],
 }) {
     const reviews = [];
     for (const [revision, reviewContexts, authoredLocally] of commits) {
@@ -323,6 +349,7 @@ export function scanProposedCommits(repo, commits, {
             advisoryReviews: true,
         });
         if (code !== 0) {
+            if (afterPrecommit && authoredLocally) recordRefusedCommit(repo, revision);
             process.stderr.write(human(scan.findings, tone()));
             if (!scan.complete) process.stderr.write(incompleteMessage(scan));
             if (rejectNote) process.stderr.write(rejectNote(revision));
@@ -333,7 +360,9 @@ export function scanProposedCommits(repo, commits, {
         // ran it. Commits brought in from elsewhere are not the developer's to
         // review, and a tree pre-commit passed was reported there already.
         if (printReviews && authoredLocally && scan.findings.length
-            && !(afterPrecommit && (reviewsShown(repo, commitTree(repo, revision)) || onLocalBranch(repo, revision)))) {
+            && !(afterPrecommit && (reviewsShown(repo, commitTree(repo, revision))
+                || onLocalBranch(repo, revision)
+                || fetchedCommit(repo, revision, fetchedTips)))) {
             reviews.push(...scan.findings);
         }
         if (!scan.complete) {

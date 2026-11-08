@@ -609,7 +609,9 @@ export function symbolicHead(repo) {
 // fetchedCommit reports whether the commit came from elsewhere: a
 // remote-tracking ref holds it, or one of tips does (the remote-tracking refs
 // the same transaction writes, FETCH_HEAD). A local branch or tag does not
-// count, since a commit the final guard refused can be given one.
+// count, since a commit the final guard refused can be given one. A tip or a
+// ref Git cannot walk (a pruned object, a tag of a tree, an empty ref file left
+// by a crash) only narrows what counts as fetched.
 export function fetchedCommit(repo, oid, tips = []) {
     assertOid(oid);
     const reached = (extra) => gitBuf(['rev-list', '-n', '1', oid, '--not', '--remotes', ...extra], repo.root)
@@ -617,9 +619,11 @@ export function fetchedCommit(repo, oid, tips = []) {
     try {
         return reached(tips);
     } catch {
-        // A tip Git cannot walk (a pruned object, a tag of a tree) only
-        // narrows what counts as fetched.
-        return reached([]);
+        try {
+            return reached([]);
+        } catch {
+            return false;
+        }
     }
 }
 
@@ -630,16 +634,23 @@ export function committedElsewhere(repo, oid) {
     assertOid(oid);
     try {
         const local = /<([^<>]*)>/.exec(gitStr(['var', 'GIT_COMMITTER_IDENT'], repo.root))?.[1].toLowerCase();
-        return Boolean(local) && gitStr(['log', '-1', '--format=%ce', oid], repo.root).toLowerCase() !== local;
+        // log.showSignature would print the signature check before the address.
+        return Boolean(local)
+            && gitStr(['log', '-1', '--no-show-signature', '--format=%ce', oid], repo.root).toLowerCase() !== local;
     } catch {
         return false;
     }
 }
 
-// onLocalBranch reports whether a branch already holds the commit.
+// onLocalBranch reports whether a branch already holds the commit. It only keeps
+// a review from printing twice, so a ref Git cannot walk answers no.
 export function onLocalBranch(repo, oid) {
     assertOid(oid);
-    return gitBuf(['rev-list', '-n', '1', oid, '--not', '--branches'], repo.root).toString('utf8').trim() !== oid;
+    try {
+        return gitBuf(['rev-list', '-n', '1', oid, '--not', '--branches'], repo.root).toString('utf8').trim() !== oid;
+    } catch {
+        return false;
+    }
 }
 
 // fetchHeadObjects lists the object IDs FETCH_HEAD records, or none.
