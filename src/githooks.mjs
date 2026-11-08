@@ -497,7 +497,10 @@ function linkLegacyHook(dir, chainedDir, name, writeHook) {
     const present = entry(shim);
     if (present && !isLegacyShim(shim, present)) return;
     const target = entry(legacy);
-    if (!target?.isFile() || ownedHook(readFileSync(legacy, 'utf8'), name)) {
+    // A dispatcher edited after install (a git-lfs line appended) no longer
+    // reads as ours, but still names this backup slot.
+    const content = target?.isFile() ? readFileSync(legacy, 'utf8') : '';
+    if (!target?.isFile() || ownedHook(content, name) || content.includes(`\nCHAINED=${shq(join(chainedDir, name))}\n`)) {
         if (present) unlinkSync(shim);
         return;
     }
@@ -579,6 +582,20 @@ function uninstallHooksLocked(repo, dir, warnings) {
     const failures = [];
     for (const name of Object.keys(MANAGED)) {
         const dest = join(dir, name);
+        const chained = join(chainedDir, name);
+        // pre-commit.com moves the hook it finds aside as <name>.legacy and
+        // runs it from there, so a dispatcher it moved keeps running unless it
+        // goes too. Beside pre-commit.com's own hook it gets back the hook we
+        // chained; anywhere else it is removed.
+        const settleLegacy = (restoreHere) => {
+            try {
+                const outcome = releaseLegacyDispatcher(repo, dir, name, chained, restoreHere);
+                if (outcome === 'restored') restored.push(`${name}.legacy`);
+                if (outcome) removed.push(`${name}.legacy`);
+            } catch (error) {
+                failures.push(`${name}.legacy: ${error.message}`);
+            }
+        };
         let current;
         try {
             current = entry(dest);
@@ -586,15 +603,20 @@ function uninstallHooksLocked(repo, dir, warnings) {
             failures.push(`${name}: cannot inspect hook: ${error.message}`);
             continue;
         }
-        if (!current) continue;
+        if (!current) {
+            settleLegacy(false);
+            continue;
+        }
         if (current.isSymbolicLink()) {
             warnings.push(symlinkWarning(name));
             continue;
         }
         try {
-            const chained = join(chainedDir, name);
             const content = readFileSync(dest, 'utf8');
-            if (!ownedHook(content, name)) continue;
+            if (!ownedHook(content, name)) {
+                settleLegacy(true);
+                continue;
+            }
             if (!ownedByRepo(repo, dir, content, name, chained)) {
                 failures.push(`${name}: managed for another repository; left in place at ${dest}`);
                 continue;
@@ -631,8 +653,32 @@ function uninstallHooksLocked(repo, dir, warnings) {
         } catch (error) {
             failures.push(`${name}: ${error.message}`);
         }
+        settleLegacy(false);
     }
     return { removed: removed.sort(), restored: restored.sort(), warnings, failures };
+}
+
+// releaseLegacyDispatcher removes a dispatcher of this repository that sits at
+// <name>.legacy, or with restoreHere puts the hook it chained there instead.
+// Returns 'restored', 'removed', or null when <name>.legacy is not ours.
+function releaseLegacyDispatcher(repo, dir, name, chained, restoreHere) {
+    const legacy = join(dir, `${name}.legacy`);
+    const stat = entry(legacy);
+    if (!stat?.isFile()) return null;
+    const content = readFileSync(legacy, 'utf8');
+    if (!ownedHook(content, name) || !ownedByRepo(repo, dir, content, name, chained)) return null;
+    const shim = `${chained}.legacy`;
+    if (isLegacyShim(shim)) unlinkSync(shim);
+    const predecessor = restoreHere ? entry(chained) : null;
+    if (predecessor?.isFile() && !readFileSync(chained).includes(`\nCHAINED=${shq(chained)}\n`)) {
+        const mode = predecessor.mode & 0o777;
+        atomicWrite(legacy, readFileSync(chained), { mode });
+        chmodSync(legacy, mode);
+        unlinkSync(chained);
+        return 'restored';
+    }
+    unlinkSync(legacy);
+    return 'removed';
 }
 
 // remainingDispatchers lists aimhooman dispatchers a local uninstall was meant
@@ -651,8 +697,9 @@ export function remainingDispatchers(repo) {
 }
 
 function dispatchersLeftIn(dir) {
-    return Object.keys(MANAGED).sort().flatMap((name) => {
-        const path = join(dir, name);
+    // pre-commit.com runs a dispatcher it moved aside as <name>.legacy.
+    return Object.keys(MANAGED).sort().flatMap((name) => [name, `${name}.legacy`].flatMap((file) => {
+        const path = join(dir, file);
         try {
             const stat = entry(path);
             if (!stat || stat.isSymbolicLink()) return [];
@@ -662,7 +709,7 @@ function dispatchersLeftIn(dir) {
             // claim a clean removal.
             return [path];
         }
-    });
+    }));
 }
 
 // hookDiagnostics reports both dispatcher integrity and whether its configured

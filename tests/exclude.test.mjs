@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawn } from 'node:child_process';
-import { defaultPatterns, applyExclude, inspectExclude, removeExclude } from '../src/exclude.mjs';
+import { defaultPatterns, applyExclude, inspectExclude, patternsForRules, removeExclude } from '../src/exclude.mjs';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -61,6 +61,22 @@ test('a rule exception re-includes its paths after every exclude line', () => {
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
+});
+
+// A `!` line reaches the whole exclude file. One that reaches outside its own
+// rule's directory would show another rule's artifacts again.
+test('an exception reaching outside its rule keeps that rule out of the block', () => {
+    const rule = (paths, except) => ({
+        kind: 'path',
+        category: 'ephemeral-state',
+        actions: { clean: 'block', strict: 'block', compliance: 'block' },
+        match: { paths, except },
+    });
+    assert.deepEqual(patternsForRules([rule(['scratch/**'], ['**/*.md'])]), []);
+    assert.deepEqual(
+        patternsForRules([rule(['**/.x/**'], ['**/.x/keep/**'])]),
+        ['**/.x/**', '!**/.x/keep/', '!**/.x/keep/**'],
+    );
 });
 
 test('applyExclude writes a managed block and preserves user lines', () => {

@@ -1684,10 +1684,11 @@ test('compliance keeps a review a notice through the final ref guard', () => {
     }
 });
 
-test('a review that never passed pre-commit is named at the final ref guard and at push', () => {
+test('a review that never passed pre-commit is named once, at the final ref guard', () => {
     // pre-commit is the hook that prints a review, and --no-verify or a
-    // cherry-pick never runs it. The final guards let the commit and the push
-    // through on compliance; they must still say what went through.
+    // cherry-pick never runs it. The final guard lets the commit through on
+    // compliance and still says what went through; a rebase or a push of the
+    // same commits repeats nothing.
     const repo = createRepo('compliance');
     const remote = mkdtempSync(join(tmpdir(), 'aim-lifecycle-remote-'));
     const gitRun = (args) => spawnSync('git', args, { cwd: repo.root, env: repo.env, encoding: 'utf8' });
@@ -1717,9 +1718,16 @@ test('a review that never passed pre-commit is named at the final ref guard and 
         assert.equal(picked.status, 0, picked.stderr);
         assert.match(picked.stderr, /^REVIEW +generic\.agent-instructions[^\n]*\n\s+GEMINI\.md/m);
 
+        git(repo, ['checkout', '-q', '-b', 'later', 'HEAD~1']);
+        git(repo, ['commit', '-q', '--allow-empty', '-m', 'later work']);
+        git(repo, ['checkout', '-q', main]);
+        const rebased = gitRun(['rebase', '-q', 'later']);
+        assert.equal(rebased.status, 0, rebased.stderr);
+        assert.equal(reviews(rebased).length, 0, rebased.stderr);
+
         const pushed = gitRun(['push', '-q', 'origin', `HEAD:refs/heads/${main}`]);
         assert.equal(pushed.status, 0, pushed.stderr);
-        assert.match(pushed.stderr, /^REVIEW +generic\.agent-instructions/m);
+        assert.equal(reviews(pushed).length, 0, pushed.stderr);
     } finally {
         rmSync(remote, { recursive: true, force: true });
         cleanup(repo);

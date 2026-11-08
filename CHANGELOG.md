@@ -91,8 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incomplete, instead of being counted as binary.
 - Commit and range scans read UTF-16 files whole, so a marker on a changed line
   is no longer missed where Git's line numbers do not match the text.
-- The commit-msg hook ignores the diff `git commit -v` adds below the scissors
-  line, honoring `core.commentChar` and `core.commentString`.
+- The commit-msg hook ignores what Git cuts at the scissors line, the diff
+  `git commit -v` adds or text under `commit.cleanup=scissors`, honoring
+  `core.commentChar` and `core.commentString`.
 - pre-push accepts a local ref with spaces, such as `main@{1 minute ago}`, and
   scans a push whose local ref holds two spaces in a row; run `aimhooman init`
   to update installed hooks.
@@ -133,10 +134,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted a lock file it still holds open.
 - `check --profile` names where the repository's profile comes from when it
   refuses to swap `clean` and `compliance`.
-- A pull that fast-forwards one fetched commit no longer fails on that
-  commit's message on `strict`; fetched history is exempt like a longer pull.
 - On `clean` and `compliance`, a review-required finding is printed for a
-  commit made with `--no-verify` or by cherry-pick, and for a pushed commit.
+  commit made with `--no-verify` or by cherry-pick, once; a rebase or a push
+  of it repeats nothing.
+- `uninstall` removes a dispatcher that pre-commit.com moved aside as
+  `.legacy`, giving that file back the hook it chained, instead of leaving it
+  running.
+- `git clone --depth 1` succeeds under global hooks: the final ref guard no
+  longer stops on the shallow tip it has no parent to diff against.
 - Branch switches, tags and the `preparing` phase of a ref update no longer
   start Node. Run `aimhooman init` to update installed hooks.
 - `doctor` reports dispatchers left pointing at a moved or renamed repository;
@@ -161,6 +166,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SpecStory project config (`.specstory/cli/`, `.project.json`, `.gitignore`,
   `.what-is-this.md`) is no longer blocked; everything else under `.specstory/`
   is, and the managed exclude re-includes that config with `!` lines.
+- A local rule whose exceptions stay inside its own directory joins the
+  managed exclude block, with `!` lines for them.
 - `.agent/` is no longer blocked or excluded: Google Antigravity still reads
   workspace rules and workflows from it.
 - A chained bash hook sees the backup path as `$0`. `init` puts a shim beside

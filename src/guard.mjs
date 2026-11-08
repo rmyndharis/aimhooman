@@ -13,7 +13,7 @@ import {
     stagedPaths,
     stagedRenameSources,
     stagedTreeSha,
-    unreferenced,
+    fetchedCommit,
     unstagePaths,
 } from './gitx.mjs';
 import { installedHooks } from './githooks.mjs';
@@ -179,7 +179,11 @@ export function repairStagedBlocks(repo, blocks, paths) {
 // includeStagedContexts carries a staged review into the direct tip's scan;
 // pushcheck leaves it off because a pushed commit is judged as an object, not
 // against the live index it may never have passed through.
-export function resolveIntroduced(repo, updates, { includeStagedContexts = true, firstBranchFromRemotes = false } = {}) {
+export function resolveIntroduced(repo, updates, {
+    includeStagedContexts = true,
+    firstBranchFromRemotes = false,
+    fetchedTips = [],
+} = {}) {
     const contextsByCommit = new Map();
     // A commit's message belongs to whoever wrote it. Attribution and marker
     // rules police the text a local developer can edit, so they are scoped
@@ -193,7 +197,7 @@ export function resolveIntroduced(repo, updates, { includeStagedContexts = true,
     for (const update of updates) {
         const introduced = introducedCommits(repo, [update], { firstBranchFromRemotes });
         // A forced move onto a fetched commit is not a commit made here.
-        if (!update.forced && authoredHere(repo, update, introduced)) {
+        if (!update.forced && authoredHere(repo, update, introduced, fetchedTips)) {
             localAuthorTips.add(update.newObjectId);
         }
         for (const revision of introduced) {
@@ -227,22 +231,22 @@ export function resolveIntroduced(repo, updates, { includeStagedContexts = true,
     ]);
 }
 
-// authoredHere decides whether an update's new tip was written in this clone:
-// one new commit on top of a non-zero old tip (a plain commit, an --amend), a
-// merge on top of the old tip, or a commit with no parent that starts a branch
-// (an initial or orphan commit). Every shape also arrives by fetch, a pull that
-// fast-forwards one commit included, so each counts only while no ref reaches
-// the tip, which a fetched one always has. The commits a merge brings in keep
-// their own standing.
-function authoredHere(repo, { oldObjectId, newObjectId }, introduced) {
-    if (!introduced.includes(newObjectId)) return false;
+// authoredHere decides whether an update's new tip was written in this clone.
+// One new commit on top of a non-zero old tip (a plain commit, an --amend)
+// always is: a commit the final guard refused can be given a branch or a tag,
+// and nothing tells it apart from a fetched one. A merge on top of the old tip,
+// or a commit with no parent that starts a branch (an initial or orphan
+// commit), is unless it came from elsewhere (fetchedCommit). The commits a
+// merge brings in keep their own standing.
+// shortcut: a pull that fast-forwards exactly one fetched commit is read as
+// made here, so its message can stop the pull; tell fetches apart if that bites.
+function authoredHere(repo, { oldObjectId, newObjectId }, introduced, fetchedTips) {
     const created = /^0+$/.test(oldObjectId);
-    let shaped = !created && introduced.length === 1;
-    if (!shaped) {
-        const { parents } = commitParents(repo, newObjectId);
-        shaped = created ? !parents.length : parents.length > 1 && parents[0] === oldObjectId;
-    }
-    return shaped && unreferenced(repo, newObjectId);
+    if (!created && introduced.length === 1 && introduced[0] === newObjectId) return true;
+    if (!introduced.includes(newObjectId)) return false;
+    const { parents } = commitParents(repo, newObjectId);
+    const shaped = created ? !parents.length : parents.length > 1 && parents[0] === oldObjectId;
+    return shaped && !fetchedCommit(repo, newObjectId, fetchedTips);
 }
 
 // scanProposedCommits scans each introduced commit and returns the first
@@ -250,8 +254,14 @@ function authoredHere(repo, { oldObjectId, newObjectId }, introduced) {
 // line(s) printed after the findings; callers without a note pass null. The
 // scan budget comes from the caller: it is CLI environment input, parsed and
 // validated at the surface. afterPrecommit marks the final guard of a commit,
-// whose tree pre-commit may already have reported.
-export function scanProposedCommits(repo, commits, { rejectNote, limits = {}, afterPrecommit = false }) {
+// whose tree pre-commit may already have reported; printReviews off keeps
+// advisory reviews quiet where they were shown when the commit was made.
+export function scanProposedCommits(repo, commits, {
+    rejectNote,
+    limits = {},
+    afterPrecommit = false,
+    printReviews = true,
+}) {
     const reviews = [];
     for (const [revision, reviewContexts, authoredLocally] of commits) {
         let scan;
@@ -294,7 +304,7 @@ export function scanProposedCommits(repo, commits, { rejectNote, limits = {}, af
         // prints them, but a commit made with --no-verify or by cherry-pick never
         // ran it. Commits brought in from elsewhere are not the developer's to
         // review, and a tree pre-commit passed was reported there already.
-        if (authoredLocally && scan.findings.length
+        if (printReviews && authoredLocally && scan.findings.length
             && !(afterPrecommit && precommitCleanMatches(repo, commitTree(repo, revision), scan.profile))) {
             reviews.push(...scan.findings);
         }
