@@ -180,7 +180,7 @@
     },
     {
         "id": "specstory.history",
-        "version": 3,
+        "version": 4,
         "provider": "specstory",
         "category": "ephemeral-state",
         "confidence": "medium",
@@ -188,10 +188,14 @@
         "match": {
             "path_case": "insensitive",
             "paths": [
-                ".specstory/history/**",
-                "**/.specstory/history/**",
-                ".specstory/cursorcloud/**",
-                "**/.specstory/cursorcloud/**"
+                ".specstory/**",
+                "**/.specstory/**"
+            ],
+            "except": [
+                "**/.specstory/cli/**",
+                "**/.specstory/.project.json",
+                "**/.specstory/.gitignore",
+                "**/.specstory/.what-is-this.md"
             ]
         },
         "actions": {
@@ -199,7 +203,7 @@
             "strict": "block",
             "compliance": "block"
         },
-        "reason": "SpecStory session history is local, not repository content.",
+        "reason": "SpecStory history and session state are local, not repository content.",
         "remediation": [
             "git restore --staged <path>"
         ]

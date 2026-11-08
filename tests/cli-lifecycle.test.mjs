@@ -210,7 +210,8 @@ test('init --gitignore writes the managed block into .gitignore and .git/info/ex
         const patterns = patternsForRules(loadRules());
         assert.deepEqual(inspectExclude(gitignore, patterns), { installed: true, current: true, missing: [] });
         assert.deepEqual(inspectExclude(gitPath(repo, 'info/exclude'), patterns), { installed: true, current: true, missing: [] });
-        assert.deepEqual(managedPatterns(gitignore), patterns);
+        // The `!` re-includes stay in the block but never become pathspecs.
+        assert.deepEqual(managedPatterns(gitignore), patterns.filter((pattern) => !pattern.startsWith('!')));
         assert.match(readFileSync(gitignore, 'utf8'), /^node_modules\/$/m);
 
         // The file predates us, so the record says we did not create it.

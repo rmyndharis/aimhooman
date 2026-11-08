@@ -168,6 +168,10 @@ test('catalog: blocks what agent tools write and leaves their project config alo
             ['pkg/.aider.tags.cache.v3/cache.db', 'aider.history'],
             ['.specstory/history/2026-11-07_session.md', 'specstory.history'],
             ['.specstory/cursorcloud/run.jsonl', 'specstory.history'],
+            // Any other state SpecStory writes there, not only the folders known today.
+            ['.specstory/statistics.json', 'specstory.history'],
+            ['.specstory/ai_rules_backups/rules.mdc', 'specstory.history'],
+            ['pkg/.specstory/debug/run.log', 'specstory.history'],
         ]) {
             const [finding] = e.checkPaths([path]);
             assert.equal(finding?.decision, 'block', `${profile}: ${path}`);
@@ -180,6 +184,10 @@ test('catalog: blocks what agent tools write and leaves their project config alo
             '.aider.model.settings.yml',
             '.specstory/cli/config.toml',
             '.specstory/.project.json',
+            '.specstory/.gitignore',
+            '.specstory/.what-is-this.md',
+            'pkg/.specstory/cli/config.toml',
+            '.SpecStory/CLI/config.toml',
         ]) {
             assert.equal(e.checkPaths([path]).length, 0, `${profile}: ${path} is project config`);
         }

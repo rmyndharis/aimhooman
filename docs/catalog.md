@@ -30,7 +30,7 @@ recommend instead.
 | `copilot.session-state` | copilot | ephemeral-state | path | block | block | block | Copilot local state is not repository content. |
 | `cursor.session-state` | cursor | ephemeral-state | path | block | block | block | Cursor session artifacts are local, not repository content. |
 | `aider.history` | aider | ephemeral-state | path | block | block | block | Aider chat history and caches are local, not repository content. |
-| `specstory.history` | specstory | ephemeral-state | path | block | block | block | SpecStory session history is local, not repository content. |
+| `specstory.history` | specstory | ephemeral-state | path | block | block | block | SpecStory history and session state are local, not repository content. |
 | `continue.sessions` | continue | ephemeral-state | path | block | block | block | Continue session artifacts are local, not repository content. |
 | `generic.agent-instructions` | generic | ambiguous-instructions | path | review | block | review | Agent instruction files may be intentional team config. Review before committing. |
 | `generic.project-policy` | aimhooman | policy-config | path | review | block | review | Versioned enforcement policy changes require explicit human review. |

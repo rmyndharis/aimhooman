@@ -129,8 +129,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `.aider.conf.yml` and other Aider project config are no longer blocked; the
   rule covers Aider's history and cache files only.
-- SpecStory project config is no longer blocked; only `.specstory/history/` and
-  `.specstory/cursorcloud/` are.
+- SpecStory project config (`.specstory/cli/`, `.project.json`, `.gitignore`,
+  `.what-is-this.md`) is no longer blocked; everything else under `.specstory/`
+  is, and the managed exclude re-includes that config with `!` lines.
 - `.agent/` is no longer blocked or excluded: Google Antigravity still reads
   workspace rules and workflows from it.
 - A chained bash hook sees the backup path as `$0`, so pre-commit.com no longer

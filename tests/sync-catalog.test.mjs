@@ -40,7 +40,9 @@ test('catalog generators are deterministic across rule loads', () => {
     assert.equal(renderGitignore(loadRules()), renderGitignore(loadRules()));
     assert.equal(renderCatalog(loadRules()), renderCatalog(loadRules()));
     const patterns = patternsForRules(loadRules());
-    assert.deepEqual(patterns, [...patterns].sort());
+    // Sorted excludes, then the sorted `!` re-includes, which must come last.
+    const reincluded = patterns.filter((p) => p.startsWith('!'));
+    assert.deepEqual(patterns, [...patterns.filter((p) => !p.startsWith('!')).sort(), ...reincluded.sort()]);
 });
 
 test('sync:catalog --check passes on the committed artifacts', () => {

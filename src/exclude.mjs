@@ -14,18 +14,24 @@ const AUTO_EXCLUDE_CATEGORIES = new Set(['ephemeral-state', 'local-settings']);
 
 export function patternsForRules(rules) {
     const patterns = new Set();
+    const reincluded = new Set();
     for (const rule of rules || []) {
         if (rule.kind !== 'path' || !AUTO_EXCLUDE_CATEGORIES.has(rule.category)) continue;
-        if (rule.match?.except?.length) continue;
         const actions = rule.actions || {};
         if (['clean', 'strict', 'compliance'].some((p) => actions[p] !== 'block')) continue;
-        for (const pattern of rule.match?.paths || []) {
-            // .gitignore-style files are line based. Never let a local rule
-            // turn one catalog value into extra unmanaged exclude lines.
-            if (!/[\r\n]/.test(pattern)) patterns.add(pattern);
+        // .gitignore-style files are line based. Never let a local rule
+        // turn one catalog value into extra unmanaged exclude lines.
+        const lines = (values) => (values || []).filter((pattern) => !/[\r\n]/.test(pattern));
+        for (const pattern of lines(rule.match?.paths)) patterns.add(pattern);
+        // An exception becomes a `!` line. Git re-includes nothing below an
+        // excluded directory, so `dir/**` also re-includes `dir/` itself.
+        for (const pattern of lines(rule.match?.except)) {
+            if (pattern.endsWith('/**')) reincluded.add(`!${pattern.slice(0, -2)}`);
+            reincluded.add(`!${pattern}`);
         }
     }
-    return [...patterns].sort();
+    // Git applies the last matching line, so every `!` line follows the excludes.
+    return [...[...patterns].sort(), ...[...reincluded].sort()];
 }
 
 // Default exclude patterns derived from the built-in catalog — a convenience

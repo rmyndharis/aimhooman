@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { defaultPatterns, applyExclude, inspectExclude, removeExclude } from '../src/exclude.mjs';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 test('defaultPatterns is derived from unambiguous AI residue rules', () => {
     for (const p of [
@@ -24,13 +24,43 @@ test('defaultPatterns is derived from unambiguous AI residue rules', () => {
         assert.ok(defaultPatterns().some((x) => x.startsWith(p)), `missing ${p}`);
     }
     // Project config these tools read must stay visible to git status.
-    for (const p of ['.aider.*', '.agent/**', '.specstory/**']) {
+    for (const p of ['.aider.*', '.agent/**']) {
         assert.equal(defaultPatterns().includes(p), false, `${p} would hide project config`);
     }
     // Review-required files stay visible in git status, and .env was never in
     // the auto-exclude set: it was enforced by content and path scanning until
     // that left the product in v0.3.0, and auto-exclude stays artifact-only.
     assert.equal(defaultPatterns().some((x) => x.includes('.env')), false);
+});
+
+test('a rule exception re-includes its paths after every exclude line', () => {
+    // SpecStory keeps project config beside its history. Git applies the last
+    // matching line, so the `!` lines must follow every exclude.
+    const patterns = defaultPatterns();
+    const firstNegation = patterns.findIndex((p) => p.startsWith('!'));
+    assert.ok(firstNegation > patterns.indexOf('.specstory/**'), 'history is excluded first');
+    assert.ok(patterns.slice(firstNegation).every((p) => p.startsWith('!')));
+    const dir = mkdtempSync(join(tmpdir(), 'aim-ex-except-'));
+    try {
+        execFileSync('git', ['init', '-q', dir]);
+        applyExclude(join(dir, '.git', 'info', 'exclude'), patterns);
+        for (const path of [
+            '.specstory/history/s.md', '.specstory/statistics.json', 'pkg/.specstory/history/s.md',
+            '.specstory/cli/config.toml', '.specstory/cli/sub/x.toml', '.specstory/.project.json',
+            'pkg/.specstory/cli/config.toml',
+        ]) {
+            mkdirSync(dirname(join(dir, path)), { recursive: true });
+            writeFileSync(join(dir, path), 'x\n');
+        }
+        const ignored = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard'], {
+            cwd: dir, encoding: 'utf8',
+        }).trim().split('\n').sort();
+        assert.deepEqual(ignored, [
+            '.specstory/history/s.md', '.specstory/statistics.json', 'pkg/.specstory/history/s.md',
+        ]);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test('applyExclude writes a managed block and preserves user lines', () => {
