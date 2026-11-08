@@ -289,15 +289,22 @@ function collectLineRanges(repo, entries) {
             // --no-renames: a rename would hand over only its edited lines, so
             // the rest of a moved file escaped the rules of its new path.
             // --inter-hunk-context=0: diff.interHunkContext fuses hunks with
-            // context lines, which the body budget below does not expect.
+            // context lines, which the body budget below does not expect, and
+            // GIT_DIFF_OPTS overrides --unified the same way. An external diff
+            // or a textconv filter replaces the lines themselves. Only modified
+            // files need hunks; any other path is scanned whole, and a large
+            // move would otherwise overflow the buffer for the whole commit.
+            const env = gitEnvironment();
+            delete env.GIT_DIFF_OPTS;
             output = execFileSync('git', [
                 '-c', 'core.quotePath=false',
                 'diff', '--unified=0', '--inter-hunk-context=0', '--no-renames',
+                '--no-ext-diff', '--no-textconv', '--diff-filter=M',
                 '--no-color', '--no-prefix',
                 parent, commit,
             ], {
                 cwd: repo.root,
-                env: gitEnvironment(),
+                env,
                 encoding: 'utf8',
                 timeout: GIT_TIMEOUT_MS,
                 maxBuffer: 16 * 1024 * 1024,
@@ -332,8 +339,9 @@ function collectLineRanges(repo, entries) {
                 currentPath = null;
                 continue;
             }
-            // With --no-prefix the +++ line is `+++ path` (no b/ prefix).
-            const plusMatch = /^\+\+\+ (.+)$/.exec(line);
+            // With --no-prefix the +++ line is `+++ path` (no b/ prefix), and
+            // git ends it with a tab when the path holds a space.
+            const plusMatch = /^\+\+\+ (.+?)\t?$/.exec(line);
             if (plusMatch) {
                 currentPath = plusMatch[1] === '/dev/null' ? null : plusMatch[1];
                 continue;
