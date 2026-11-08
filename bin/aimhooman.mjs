@@ -275,7 +275,7 @@ function rejectUnsupportedGit() {
     return true;
 }
 
-// F-E1: the prevention layer keeps AI artifacts out of `git status`, which
+// The prevention layer keeps AI artifacts out of `git status`, which
 // also keeps their exclusion silent — a `git add .` never tells the developer
 // the chat log did not make the commit. Name the artifacts once per set
 // change. The worktree walk is pathspec-pruned to the anchored managed
@@ -346,7 +346,7 @@ function cmdPrecommit(args) {
             warnIncompleteOnce(repo, warnTreeSha, scan);
             return 0;
         }
-        // W5 marker dedup: record that this staged tree scanned clean so the
+        // Marker dedup: record that this staged tree scanned clean so the
         // upcoming commit-msg hook can skip its duplicate tree scan. The tree
         // sha is the same value the commit-msg dispatcher computes via
         // `git write-tree`; the index is unchanged on this no-block path, so the
@@ -458,7 +458,7 @@ function cmdCommitmsg(args) {
     try {
         const checked = againstWouldBeTree(() => ({
             message: scanMessage(repo, text, { target: 'staged' }),
-            // W5 marker dedup: if pre-commit already scanned this exact tree
+            // Marker dedup: if pre-commit already scanned this exact tree
             // clean (matching sha + profile + complete), skip the duplicate
             // ~170ms tree scan. The marker is self-invalidating (any index
             // mutation changes the tree sha), and a missing/stale/mismatched
@@ -989,7 +989,7 @@ function cmdInit(args) {
                 // the exit-code branch below matches on it.
                 const cause = rep.warnings.length ? `${rep.warnings.join('; ')}; ` : '';
                 // When the decline is because the hooks path is shared/tracked (or,
-                // after B2, worktree content the next add would commit), name the two
+                // worktree content the next add would commit), name the two
                 // ways out so the user is not stuck: let aimhooman use the default
                 // .git/hooks, or — for a worktree hooks path kept local — exclude it
                 // first. A refused install leaves earlier dispatchers in place, so

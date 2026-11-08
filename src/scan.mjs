@@ -49,7 +49,7 @@ export class Engine {
     decide(base, target, rule, context = {}) {
         if (this.denyPaths.has(target) || this.denyRules.has(rule.id)) return 'block';
         if (context.transientAllowRules?.has(rule.id)) return 'allow';
-        // W11 (F2): review binding is profile-dependent.
+        // Review binding is profile-dependent.
         //   - strict: review binds the EXACT reviewed blob. A changed/copied/
         //     symlinked/mode-flipped target is NOT covered — it must be re-
         //     reviewed. This is the security property the strict lifecycle tests
@@ -128,7 +128,7 @@ export class Engine {
     checkContent(path, content, options = {}) {
         const out = [];
         const p = normalize(path);
-        // lineRanges narrows content scanning to changed hunks (W4, bug 12d-F1).
+        // lineRanges narrows content scanning to changed hunks.
         // When provided (an array of inclusive 1-based {start,end} ranges), only
         // lines falling in a range are evaluated; this stops a file that contains
         // a flagged line ELSEWHERE (a marker phrase inside a test fixture on

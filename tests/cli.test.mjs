@@ -100,7 +100,7 @@ test('help lists command aliases and mutually exclusive lifecycle forms', () => 
     assert.doesNotMatch(help.stdout, /uninstall[^\n]*--purge-state[^\n]*--global/);
 });
 
-// W10: `aimhooman <subcommand> --help` used to fall into the subcommand's strict
+// `aimhooman <subcommand> --help` used to fall into the subcommand's strict
 // argument parser, which rejects --help as an unknown option and exits 20. A
 // leading --help/-h/help on any known subcommand now routes to usage() with
 // exit 0. Covers override (the originally-reported form), init, status, and a
@@ -131,7 +131,7 @@ test('refcheck accepts Git 2.54 preparing phase without running the prepared sca
 });
 
 test('precommit names locally-ignored AI artifacts once per set change', () => {
-    // F-E1: the prevention layer keeps AI artifacts out of `git status`, which
+    // The prevention layer keeps AI artifacts out of `git status`, which
     // also keeps their exclusion silent — a `git add .` never tells the
     // developer the chat log did not make the commit. The notice fires once
     // per set change, never changes the exit code, and costs one pruned
@@ -290,7 +290,7 @@ test('an unchanged file over the per-file scan budget does not wedge commits tha
         // Changing the oversized file trips the budget again. On the clean
         // profile the commit now goes through with a warning: path rules still
         // covered the file, and the final ref guard downgrades a size-limit-only
-        // gap instead of wedging the commit (field test F-3).
+        // gap instead of wedging the commit.
         writeFileSync(join(dir, 'vendor.js'), 'export const chunk = 2;\n'.repeat(140000));
         execFileSync('git', ['add', 'vendor.js'], { cwd: dir });
         const warned = spawnSync('git', ['commit', '-m', 'update vendor'], {

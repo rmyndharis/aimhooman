@@ -612,7 +612,7 @@ function protectedPolicyFinding(rawPolicy, policy, entry, migration = {}) {
         : 'A versioned strict project policy cannot be downgraded without a bound review acknowledgment.';
     // Name the exact command, oids included: "use the reviewed migration
     // command" sent developers to the docs for a three-flag incantation they
-    // could not guess (field-test rerun). The staged form binds to the live
+    // could not guess. The staged form binds to the live
     // index; the transition form binds to the commit that carries the change.
     const remediation = ['Restore the strict policy, or unstage the change to keep the current baseline.'];
     if (migration.oldObjectId && migration.transition) {

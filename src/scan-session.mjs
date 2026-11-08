@@ -100,7 +100,7 @@ export function scanEntries(repo, engine, entries, options = {}) {
     for (const failure of batch.failures) increment(stats.skipped, failure.reason);
 
     // Precompute changed-line ranges for all text candidates in ONE batched
-    // diff per (commit, parent) pair (W4 + perf). A missing path key means
+    // diff per (commit, parent) pair. A missing path key means
     // "scan the whole blob" (staged/snapshot/root entries, or a diff failure).
     const lineRanges = collectLineRanges(repo, candidates);
 
@@ -263,7 +263,7 @@ function decodeUtf16(buffer) {
 }
 
 // collectLineRanges builds a Map<path, ranges[]> for all entries whose content
-// scan can be narrowed to changed hunks (W4, bug 12d-F1). It batches the work
+// scan can be narrowed to changed hunks. It batches the work
 // into ONE `git diff --unified=0` per (commit, parent) pair rather than one diff
 // per file — a commit touching 50 files would otherwise pay ~650ms of per-file
 // git subprocess startup. Entries are grouped by their first parent; a normal

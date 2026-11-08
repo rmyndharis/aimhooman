@@ -185,7 +185,7 @@ test('incomplete-scan message escapes control characters in skipped paths', () =
     assert.match(message, /skipped: big\\x1b\[2K\\rscan complete\.js \(size-limit, 3\.0 MB\)/);
 });
 
-// W6: only remediation[0] used to render, so a rule whose remediation array
+// Only remediation[0] used to render, so a rule whose remediation array
 // carried a second line (e.g. "rotate the key if it was ever exposed") lost it
 // silently. The whole array now renders, one `fix:` line per entry.
 test('human report renders every remediation entry, not just the first', () => {
@@ -201,7 +201,7 @@ test('human report renders every remediation entry, not just the first', () => {
     assert.equal(fixLines.length, 3, `expected 3 fix lines, got ${fixLines.length}`);
 });
 
-// W7: the summary line was always "findings" even for a single finding, and the
+// The summary line was always "findings" even for a single finding, and the
 // block/review nouns did not agree either. Singular/plural now applied to all
 // three counts.
 test('human report summary line agrees on number for one vs many findings', () => {
@@ -216,7 +216,7 @@ test('human report summary line agrees on number for one vs many findings', () =
     assert.match(two, /2 findings: 1 block, 1 review/);
 });
 
-// W8: a scan that fires many findings (a vendored OpenSSL corpus can produce 99)
+// A scan that fires many findings (a vendored OpenSSL corpus can produce 99)
 // used to emit hundreds of near-identical stderr lines with no truncation
 // marker. The human report now caps the printed blocks and collapses the rest
 // into one summary line; the JSON report is never capped.
@@ -275,7 +275,7 @@ test('human report keeps full remediation for distinct rules', () => {
     assert.match(pointers[0], /local\.secret/);
 });
 
-// Field test F-4: the "not very hooman." banner used to fire on pure advisories
+// The "not very hooman." banner used to fire on pure advisories
 // (review findings only, the commit proceeds), which wore the signal out. It now
 // appears only when at least one finding blocks the operation.
 test('human report shows the banner only when a finding blocks', () => {

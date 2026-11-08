@@ -153,12 +153,12 @@ test('review-scoped allows require the exact reviewed blob object', () => {
     }), []);
 });
 
-// W11 (F2): on clean/compliance, review is ADVISORY (a stderr message, exit 0),
+// On clean/compliance, review is ADVISORY (a stderr message, exit 0),
 // so re-surfacing it on every edit of a reviewed agent-instruction file is pure
 // friction. A live-file review (newObjectId set) therefore persists per path +
 // rule across edits on clean/compliance. Strict keeps the exact-OID binding (the
 // test above). Tombstones keep the exact match in every profile.
-test('review-scoped allows persist per path on clean/compliance, not strict (W11 hybrid)', () => {
+test('review-scoped allows persist per path on clean/compliance, not strict', () => {
     const reviewed = 'a'.repeat(40);
     const transition = 'c'.repeat(40);
     const entry = {
