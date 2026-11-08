@@ -74,8 +74,10 @@ function payloadUnreadable(text) {
 
 // $'...' reads backslash escapes, so \' does not end it, while every scanner
 // in this module ends a single quote at the next '. Rewriting each $'...' as
-// a $"..." with the same boundaries keeps a command after $'\'' in sight.
-// An unterminated $' is left alone; the leading $ keeps the word dynamic.
+// a "..." with the same boundaries keeps a command after $'\'' in sight, and
+// core.hooks$'\x50'ath reads as the core.hooksPath the shell passes on. One
+// that keeps an escape this cannot spell becomes $"...", and the $ keeps the
+// word dynamic, as it does for an unterminated $'.
 // The printable character an ANSI-C escape at text[at] (after the backslash)
 // spells, as in $'\x67it', or null. Whitespace and control characters keep
 // their escape, so a decoded line never gains a separator.
@@ -108,6 +110,7 @@ export function normalizeAnsiCQuotes(command) {
         }
         if (char === '$' && text[i + 1] === "'") {
             let body = '';
+            let kept = false;
             let end = i + 2;
             for (; end < text.length && text[end] !== "'"; end += 1) {
                 if (text[end] === '\\' && end + 1 < text.length) {
@@ -116,11 +119,16 @@ export function normalizeAnsiCQuotes(command) {
                     if (decoded) {
                         body += decoded.char;
                         end += decoded.length - 1;
-                    } else body += escaped === "'" || escaped === '\\' ? escaped : `\\${escaped}`;
+                    } else if (escaped === "'" || escaped === '\\') {
+                        body += escaped;
+                    } else {
+                        body += `\\${escaped}`;
+                        kept = true;
+                    }
                 } else body += text[end];
             }
             if (end < text.length) {
-                out += `$"${body.replace(/[\\"$`]/g, '\\$&')}"`;
+                out += `${kept ? '$' : ''}"${body.replace(/[\\"$`]/g, '\\$&')}"`;
                 i = end;
                 continue;
             }
@@ -167,6 +175,10 @@ export function configuredGitRisk(listing, cwd) {
         const at = entry.indexOf('\n');
         if (at < 0) continue;
         const key = entry.slice(0, at);
+        // A config hook runs before the managed hook of its event, and an
+        // allowed ext transport runs its URL; neither shows the command.
+        if (/^hook\..+\.command$/i.test(key)
+            || (/^protocol\.(?:ext\.)?allow$/i.test(key) && !/^\s*never\s*$/i.test(entry.slice(at + 1)))) return key;
         for (const payload of configCommands(`${key}=${entry.slice(at + 1)}`)) {
             if (/\bhookspath\b/i.test(payload) || inOrder(payload, [/\bgit\b/, /--no-veri(?:fy?)?(?![\w-])/i])) return key;
             if (parseGit(payload, cwd).commands.some((candidate) => (
@@ -214,6 +226,16 @@ function parseGitLine(command, initialCwd) {
     };
     let unreadable = payloadUnreadable(cmd);
     let setNames;
+    let assignedHooks;
+    // A command before Git can take the hooks away when its words name them,
+    // when it runs inside .git (cd .git && rm -rf hooks), or when it expands a
+    // word and the line assigns a value that names them (H=.git/hooks; rm -rf $H).
+    const prefixTouchesHooks = (tokens, text, cwd) => commandMayTouchHooks(tokens, text)
+        || insideGitDirectory(cwd)
+        || (/[$`]/.test(text) && (assignedHooks ??= commandMayTouchHooks(
+            shellWords(cmd).filter(isAssignment).map((word) => word.slice(word.indexOf('=') + 1)),
+            '',
+        )));
     let shellCwd = initialCwd;
     const directoryStack = [];
     let subshellDepth = 0;
@@ -241,6 +263,12 @@ function parseGitLine(command, initialCwd) {
         prefixRisk ||= ran.prefixHooksRisk;
         prefixHooksRisk ||= ran.prefixHooksRisk;
     };
+    // echo $(git push --no-verify) runs that push before echo starts. What a
+    // substitution leaves unreadable stays a matter for the line around it,
+    // which is already uncertain for holding one.
+    for (const inner of substitutedCommands(cmd)) {
+        mergeGitRun({ ...parseGit(inner, initialCwd), unreadable: false }, initialCwd);
+    }
     for (const unit of shellUnits(cmd)) {
         const precedingOperator = previousOperator;
         previousOperator = unit.operator;
@@ -251,9 +279,10 @@ function parseGitLine(command, initialCwd) {
             || precedingOperator === '&&'
             || precedingOperator === '||';
         subshellDepth = Math.max(0, subshellDepth + subshellState.delta);
-        const control = unwrapShellControl(shellWords(unit.text.trim()));
+        const outer = unwrapShellControl(shellWords(unit.text.trim()));
+        const control = unwrapShellControl(stripCommandGrouping(outer.tokens));
         const words = control.tokens;
-        if (control.uncertain) markUncertain();
+        if (outer.uncertain || control.uncertain) markUncertain();
         if (updatePersistentEnvironment(words, persistentEnvironmentRisk)) {
             // An exported GIT_SSH_COMMAND runs under the Git commands after it.
             const exported = environmentCommands(words.filter(isAssignment));
@@ -285,6 +314,13 @@ function parseGitLine(command, initialCwd) {
         }
         const toks = dashedGitInvocation(unwrapped.tokens) ?? unwrapped.tokens;
         if (unwrapped.uncertain) markUncertain();
+        if (mayChangeAimhoomanState(toks, unit.text, unwrapped.cwd)) {
+            commands.push({ verb: 'aimhooman-state', cwd: unwrapped.cwd });
+        }
+        if (!isGitExecutable(toks[0]) && !NON_EXECUTING_COMMANDS.has(shellExecutable(toks[0]))) {
+            const admin = aimhoomanInvocation(toks);
+            if (admin) commands.push({ verb: 'aimhooman', ...admin, cwd: unwrapped.cwd });
+        }
         let commandPathDialectUncertain = shellPathDialectUncertain
             || unwrapped.pathDialectUncertain;
         let commandTargetUncertain = shellTargetUncertain || unwrapped.targetUncertain;
@@ -420,9 +456,12 @@ function parseGitLine(command, initialCwd) {
         if (SHELL_CONTROL_DECLARATIONS.has(toks[0])) continue;
         const dynamicName = commandWordExpands(toks[0] ?? '');
         if (toks.length < 2 && !dynamicName) {
+            // ./leak.sh or a bare make runs a file of its own.
+            const script = toks.length ? executedScript(toks) : null;
+            if (script) commands.push({ verb: 'script', ...script, cwd: unwrapped.cwd });
             if (toks.length && (!READ_ONLY_SHELL_COMMANDS.has(basename(toks[0])) || hasFileRedirect(unit.text))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
-                prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
+                prefixHooksRisk ||= prefixTouchesHooks(toks, unit.text, unwrapped.cwd);
                 prefixRisk = true;
             }
             continue;
@@ -466,20 +505,27 @@ function parseGitLine(command, initialCwd) {
                     pathDialectUncertain: commandPathDialectUncertain
                         || indirect.pathDialectUncertain,
                 });
-            } else if (INDIRECT_EXECUTORS.has(shellExecutable(g0)) && !dynamicName) {
-                // A wrapper such as find -exec, xargs or su -c can run a push or
-                // a merge as well as a commit. The command from its first Git or
-                // shell word, and a word it takes as a command line (su -c,
-                // watch), are read as Git at a target the wrapper may change.
-                // Only a skipped hook counts: Git run with its hooks is no reason
-                // to refuse, nor is a loop the wrapper's shell runs, or grep -l
-                // "git push" under find.
+            } else if (!dynamicName && !NON_EXECUTING_COMMANDS.has(shellExecutable(g0))
+                && !REMOTE_COMMAND_DRIVERS.has(shellExecutable(g0))) {
+                // Any program can run Git: a wrapper such as find -exec, xargs
+                // or caffeinate runs the command from its first Git or shell
+                // word, su -c and watch a command line, and an interpreter the
+                // Git its code spells. That Git is read at a target the program
+                // may change. Only a skipped hook counts: Git run with its hooks
+                // is no reason to refuse, nor is a loop the wrapper's shell
+                // runs, or grep -l "git push" under find.
                 const rest = toks.slice(1);
                 const wholeLine = ['parallel', 'watch'].includes(shellExecutable(g0));
                 const texts = rest.filter((word, index) => /\s/.test(word)
                     && (wholeLine || rest[index - 1] === '-c' || rest[index - 1] === '--command'));
                 const at = rest.findIndex((word) => isGitExecutable(word) || WRAPPED_SHELLS.has(shellExecutable(word)));
                 if (at >= 0) texts.unshift(rest.slice(at).map(quoteShellWord).join(' '));
+                const program = interpreterCode(toks);
+                if (program && (SHELL_CODE_PROGRAMS.has(shellExecutable(g0)) || CODE_RUNS_COMMANDS.test(program.code))) {
+                    texts.push(...embeddedGitTexts([program.code, ...program.rest].join(' ')));
+                }
+                const script = executedScript(toks);
+                if (script) commands.push({ verb: 'script', ...script, cwd: unwrapped.cwd });
                 for (const text of texts) {
                     const ran = parseGit(text, unwrapped.cwd);
                     mergeGitRun({
@@ -499,7 +545,7 @@ function parseGitLine(command, initialCwd) {
             if ((!READ_ONLY_SHELL_COMMANDS.has(basename(g0)) || hasFileRedirect(unit.text))
                 && !PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(g0))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
-                prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
+                prefixHooksRisk ||= prefixTouchesHooks(toks, unit.text, unwrapped.cwd);
                 prefixRisk = true;
                 if (CURRENT_SHELL_MUTATORS.has(shellExecutable(g0)) || definesShellFunction) {
                     shellTargetUncertain = true;
@@ -514,6 +560,7 @@ function parseGitLine(command, initialCwd) {
         let aliasResolutionRisk = !canResolveGitAlias(g0);
         let inlineAliasRisk = false;
         let unknownGlobalOption = false;
+        let unseenConfig = null;
         const configRuns = [];
         while (i < toks.length && toks[i].startsWith('-')) {
             const option = toks[i];
@@ -531,6 +578,7 @@ function parseGitLine(command, initialCwd) {
                 cwd = resolveShellPath(cwd, target);
                 i += 1;
             } else if (option === '-c' && toks[i + 1]) {
+                unseenConfig ||= unseenConfigKey(toks[i + 1]);
                 if (hookAffectingConfig(toks[i + 1])) commandBypass = true;
                 if (hooksPathOverrideConfig(toks[i + 1])) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(toks[i + 1])) {
@@ -540,6 +588,7 @@ function parseGitLine(command, initialCwd) {
                 configRuns.push(...configCommands(toks[i + 1]));
                 i += 2;
             } else if (option.startsWith('-c') && option.length > 2) {
+                unseenConfig ||= unseenConfigKey(option.slice(2));
                 if (hookAffectingConfig(option.slice(2))) commandBypass = true;
                 if (hooksPathOverrideConfig(option.slice(2))) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(option.slice(2))) {
@@ -552,6 +601,7 @@ function parseGitLine(command, initialCwd) {
                 // A command-valued key read from the environment is a command
                 // this check cannot see.
                 unknownGlobalOption ||= commandConfigKey(toks[i + 1].split('=', 1)[0]);
+                unseenConfig ||= unseenConfigKey(toks[i + 1]);
                 if (hookAffectingConfig(toks[i + 1])) commandBypass = true;
                 if (hooksPathOverrideConfig(toks[i + 1])) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(toks[i + 1])) {
@@ -561,6 +611,7 @@ function parseGitLine(command, initialCwd) {
                 i += 2;
             } else if (option.startsWith('--config-env=')) {
                 unknownGlobalOption ||= commandConfigKey(option.slice('--config-env='.length).split('=', 1)[0]);
+                unseenConfig ||= unseenConfigKey(option.slice('--config-env='.length));
                 if (hookAffectingConfig(option.slice('--config-env='.length))) commandBypass = true;
                 if (hooksPathOverrideConfig(option.slice('--config-env='.length))) commandHooksPathOverride = true;
                 if (aliasAffectingConfig(option.slice('--config-env='.length))) {
@@ -605,6 +656,30 @@ function parseGitLine(command, initialCwd) {
                 unknownGlobalOption ||= !GIT_GLOBAL_OPTIONS.has(option.split('=', 1)[0]);
                 i += 1;
             }
+        }
+        if (unseenConfig) {
+            // Whatever the subcommand, even git ls-remote: Git runs it.
+            commands.push({
+                verb: 'unknown',
+                subcommand: toks[i] ?? '',
+                args: toks.slice(i + 1),
+                cwd,
+                bypassHooks: true,
+                hooksPathOverride: true,
+                runsConfigCommand: unseenConfig,
+                environmentRisk,
+                targetEnvironmentRisk,
+                prefixRisk,
+                policyTransitionRisk,
+                explicitTargetOption: commandExplicitTargetOption,
+                targetUncertain: true,
+                pathDialectUncertain: commandPathDialectUncertain,
+                classification: 'unknown',
+            });
+            prefixRisk = true;
+            prefixHooksRisk = true;
+            policyTransitionRisk = true;
+            continue;
         }
         if (unknownGlobalOption) {
             commands.push({
@@ -877,6 +952,98 @@ export function unwrapShellControl(input) {
     return { tokens, uncertain };
 }
 
+// The command lines a line runs in $(...), `...`, <(...) and >(...), outermost
+// only; parsing each finds the ones inside it. A single quote keeps them text,
+// a double quote does not. One pass: each closing ) is found from where the
+// substitution opened, and the scan resumes after it.
+function substitutedCommands(text) {
+    const found = [];
+    let quote = '';
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quote === "'") {
+            if (char === "'") quote = '';
+            continue;
+        }
+        if (char === '\\') {
+            i += 1;
+            continue;
+        }
+        if (char === '"') {
+            quote = quote ? '' : '"';
+            continue;
+        }
+        if (char === "'" && !quote) {
+            quote = "'";
+            continue;
+        }
+        if (char === '`') {
+            let end = i + 1;
+            while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1;
+            if (end >= text.length) break;
+            found.push(text.slice(i + 1, end));
+            i = end;
+            continue;
+        }
+        const opens = text[i + 1] === '(' && text[i + 2] !== '('
+            && (char === '$' || (!quote && (char === '<' || char === '>')));
+        if (!opens) continue;
+        let depth = 1;
+        let inner = '';
+        let end = i + 2;
+        for (; end < text.length && depth; end += 1) {
+            const c = text[end];
+            if (inner) {
+                if (c === inner) inner = '';
+                else if (c === '\\' && inner === '"') end += 1;
+                continue;
+            }
+            if (c === '\\') end += 1;
+            else if (c === "'" || c === '"') inner = c;
+            else if (c === '(') depth += 1;
+            else if (c === ')') depth -= 1;
+        }
+        if (depth) break;
+        found.push(text.slice(i + 2, end - 1));
+        i = end - 1;
+    }
+    return found;
+}
+
+// ( and { group commands without changing what the words inside run, so
+// (git -c core.hooksPath=/dev/null commit) is that commit. The shell splits a
+// parenthesis off a word and this tokenizer does not, so one glued to the first
+// word is taken off, and as many at the end; (( is arithmetic and stays. A lone
+// } or ) only closes a group an earlier unit opened.
+function stripCommandGrouping(tokens) {
+    let words = [...tokens];
+    let parens = 0;
+    let braces = 0;
+    for (;;) {
+        if (words[0] === '{') {
+            words = words.slice(1);
+            braces += 1;
+        } else if (words[0] === '}' || words[0] === ')') {
+            words = words.slice(1);
+        } else if (words[0]?.startsWith('(') && !words[0].startsWith('((')) {
+            const rest = words[0].slice(1);
+            parens += 1;
+            words = rest ? [rest, ...words.slice(1)] : words.slice(1);
+        } else break;
+    }
+    while (braces && words.at(-1) === '}') {
+        words = words.slice(0, -1);
+        braces -= 1;
+    }
+    while (parens && words.length) {
+        const last = words.at(-1);
+        if (!last.endsWith(')')) break;
+        words = last === ')' ? words.slice(0, -1) : [...words.slice(0, -1), last.slice(0, -1)];
+        parens -= 1;
+    }
+    return words;
+}
+
 function updateDirectoryStack(tokens, cwd, stack, followingOperator) {
     const command = directoryCommandTokens(tokens);
     const executable = shellExecutable(command[0]);
@@ -936,7 +1103,7 @@ function directoryCommandTokens(tokens) {
 // redirection, and worktree index paths without treating every ordinary build
 // command before a commit as an index replacement.
 function commandMayReplaceIndex(tokens, source) {
-    const text = `${tokens.join(' ')} ${source}`.replace(/\\/g, '/');
+    const text = pathText(tokens, source);
     // A path that ends in /.git/index is one whose last directory name is
     // .git; looking only at the character before it keeps the scan linear.
     return /(?:^|[\s"'=]|[^\s"']\/)\.git\/index(?:\.lock)?(?:$|[\s"'])/i.test(text)
@@ -954,16 +1121,39 @@ function commandMayReplaceIndex(tokens, source) {
 // the -c spelling, so leaving it out here would let the two spellings of one
 // bypass disagree.
 export function commandMayTouchHooks(tokens, source) {
-    const text = `${tokens.join(' ')} ${source}`.replace(/\\/g, '/');
+    const text = pathText(tokens, source);
     // The directory need not be spelled in full to be removed: `.git/h*` takes
     // it just as well as `.git/hooks`. Match the segment and step around HEAD,
     // the only other `.git/h` an ordinary command reads.
     return /(?:^|[\s"'=/])\.git\/h(?!ead\b)/i.test(text)
+        // Any other glob or .. under .git can reach the hooks too, and so does
+        // the directory itself: rm -rf .git, find .git -delete.
+        || /(?:^|[\s"'=/])\.git\/[^\s"'/]*(?:[*?[]|\.\.(?:\/|$))/i.test(text)
+        || /(?:^|[\s"'=/])\.git(?=$|[\s"';&|)])/i.test(text)
+        // The guard's own state, which says what it already refused.
+        || /(?:^|[\s"'=/])\.git\/aimhooman\b/i.test(text)
         || /--git-path\s+hooks\b/i.test(text)
         || /\bhookspath\b/i.test(text)
+        || /\bhook\.[^\s"'.=]+\.(?:command|event)\b/i.test(text)
+        || /\bprotocol\.(?:ext\.)?allow\b/i.test(text)
         || namesIncludePath(text)
-        // Whatever is written into .git/config can set core.hooksPath.
-        || /(?:^|[\s"'=/])\.git\/config\b/i.test(text);
+        // Whatever is written into a config file can set core.hooksPath.
+        || /(?:^|[\s"'=/])\.git\/config\b/i.test(text)
+        || /(?:^|[\s"'=/~])\.gitconfig\b|\.config\/git\/config\b|\/etc\/gitconfig\b/i.test(text);
+}
+
+// A path as the filesystem reads it: \ as /, and // or /./ as one /.
+function pathText(tokens, source) {
+    return `${tokens.join(' ')} ${source}`
+        .replace(/\\/g, '/')
+        .replace(/\/{2,}/g, '/')
+        .replace(/\/(?:\.\/)+/g, '/');
+}
+
+// Whether a directory is a Git directory or inside one, where a relative path
+// such as hooks/pre-commit names the hooks.
+function insideGitDirectory(path) {
+    return /(?:^|\/)\.git(?:\/|$)/i.test(String(path || '').replace(/\\/g, '/'));
 }
 
 // include.path or includeIf.<condition>.path. The condition is looked for
@@ -979,8 +1169,17 @@ function namesIncludePath(text) {
 // An unquoted > or >> that writes a file. fd duplications (2>&1, >&2, >&-)
 // write none.
 function hasFileRedirect(text) {
+    return redirectTargets(text, 1).length > 0;
+}
+
+// The files the unquoted > and >> of a command write, up to limit of them.
+// Characters are compared in place: slicing the rest of a long line at each >
+// made a run of >&2 quadratic.
+function redirectTargets(text, limit = Infinity) {
+    const targets = [];
+    const word = /"[^"]*"|'[^']*'|[^\s;&|<>]+/y;
     let quote = '';
-    for (let i = 0; i < text.length; i += 1) {
+    for (let i = 0; i < text.length && targets.length < limit; i += 1) {
         const char = text[i];
         if (quote) {
             if (char === quote) quote = '';
@@ -995,9 +1194,62 @@ function hasFileRedirect(text) {
             quote = char;
             continue;
         }
-        if (char === '>' && !/^>?&[0-9-]/.test(text.slice(i))) return true;
+        if (char !== '>' || (text[i + 1] === '&' && /[0-9-]/.test(text[i + 2] ?? ''))) continue;
+        let at = i + 1;
+        while (text[at] === '>' || text[at] === '|') at += 1;
+        while (at < text.length && /\s/.test(text[at])) at += 1;
+        word.lastIndex = at;
+        const target = word.exec(text)?.[0] ?? '';
+        targets.push(target.replace(/^(["'])(.*)\1$/s, '$2'));
+        i = Math.max(i, at + target.length - 1);
     }
-    return false;
+    return targets;
+}
+
+// aimhooman's own commands that loosen what this guard enforces: allow and
+// review add exceptions, policy-review accepts a weaker policy, override remove
+// and reset drop deny rules, uninstall takes the hooks away, and init with
+// --profile can change the profile. Found after npx, node or a path as well.
+function aimhoomanInvocation(tokens) {
+    for (let at = 0; at < tokens.length; at += 1) {
+        const word = String(tokens[at]).replace(/\\/g, '/');
+        if (!/^aimhooman(?:@\S*)?(?:\.[cm]?js)?$/i.test(word.slice(word.lastIndexOf('/') + 1))) continue;
+        const args = tokens.slice(at + 1);
+        const subcommand = args.find((arg) => !arg.startsWith('-')) ?? '';
+        const option = args.findIndex((arg) => arg === '--profile' || arg.startsWith('--profile='));
+        const profile = option < 0 ? null
+            : args[option].startsWith('--profile=') ? args[option].slice('--profile='.length) : (args[option + 1] ?? '');
+        if (['allow', 'review', 'policy-review', 'uninstall'].includes(subcommand)
+            || (subcommand === 'override' && args.some((arg) => arg === 'remove' || arg === 'reset'))
+            || (subcommand === 'init' && profile !== null)) {
+            return { subcommand, profile };
+        }
+        return null;
+    }
+    return null;
+}
+
+// Programs that change nothing in the files they name, so they change the
+// guard's state only through a redirect.
+const FILE_READERS = new Set([
+    ...READ_ONLY_SHELL_COMMANDS,
+    'cd', 'popd', 'pushd',
+    'ack', 'ag', 'cat', 'cmp', 'diff', 'du', 'egrep', 'fgrep', 'file', 'grep', 'head',
+    'hexdump', 'jq', 'less', 'ls', 'md5', 'md5sum', 'more', 'od', 'rg', 'sha1sum',
+    'sha256sum', 'shasum', 'stat', 'tail', 'tree', 'wc', 'xxd',
+]);
+
+// Whether a command writes or removes aimhooman's state in .git/aimhooman: the
+// commits it refused, the overrides, the profile.
+function mayChangeAimhoomanState(tokens, source, cwd) {
+    const directory = String(cwd || '').replace(/\\/g, '/');
+    const inState = /(?:^|\/)\.git\/aimhooman(?:\/|$)/i.test(directory);
+    const inGit = insideGitDirectory(directory);
+    const names = (text) => /(?:^|[\s"'=/])\.git\/aimhooman\b/i.test(text)
+        || (inGit && /(?:^|[\s"'=])aimhooman(?:\/|$|\s)/i.test(text));
+    if (!inState && !names(pathText(tokens, source))) return false;
+    if (!FILE_READERS.has(shellExecutable(tokens[0]))) return true;
+    return redirectTargets(source).some((target) => inState || names(pathText([target], '')));
 }
 
 export const GIT_POLICY_TRANSITION_COMMANDS = new Set([
@@ -1344,10 +1596,9 @@ const EXPANDED_GIT_VERBS = new Set([
 // the command is read as if written out. Otherwise the arguments are read as Git's, and refused only when they
 // skip or repoint the hooks for a subcommand that moves refs: another program's
 // own -c or -m proves nothing. So ${PYTHON:-python3} -m pip install, $CC -c
-// main.c and "$DOCKER" push pass.
-// shortcut: a variable an earlier command exported in a persistent shell can
-// still hold Git with arguments that look harmless; the Git hooks and CI remain
-// the backstop there.
+// main.c and "$DOCKER" push pass. A variable an earlier command exported in a
+// persistent shell can still hold Git with arguments that look harmless; the
+// Git hooks and CI remain the backstop there.
 function expandedWordMayRunGit(tokens, setNames, cwd) {
     const word = tokens[0];
     const args = tokens.slice(1);
@@ -1428,6 +1679,7 @@ function dynamicConfigKey(value) {
 function hookAffectingConfig(value) {
     const key = String(value).split('=', 1)[0];
     return dynamicConfigKey(value)
+        || runsUnseenCommand(key)
         || /^(?:core\.(?:editor|hookspath)|sequence\.editor|include\.path|includeif\..+\.path|remote\..+\.receivepack)$/i.test(key);
 }
 
@@ -1437,7 +1689,22 @@ function hookAffectingConfig(value) {
 // running; these do not.
 function hooksPathOverrideConfig(value) {
     const key = String(value).split('=', 1)[0];
-    return dynamicConfigKey(value) || /^(?:core\.hookspath|include\.path|includeif\..+\.path)$/i.test(key);
+    return dynamicConfigKey(value)
+        || runsUnseenCommand(key)
+        || /^(?:core\.hookspath|include\.path|includeif\..+\.path)$/i.test(key);
+}
+
+function unseenConfigKey(value) {
+    const key = String(value).split('=', 1)[0];
+    return runsUnseenCommand(key) ? key : null;
+}
+
+// Keys that hand Git a command whatever the subcommand. A config hook
+// (hook.<name>.command for hook.<name>.event) runs before the managed hook of
+// the same event and can rewrite it. protocol.allow and protocol.ext.allow open
+// the ext transport, whose URL is a command line.
+function runsUnseenCommand(key) {
+    return /^(?:hook\..+\.(?:command|event)|protocol\.(?:ext\.)?allow)$/i.test(String(key));
 }
 
 function aliasAffectingConfig(value) {
@@ -2057,7 +2324,10 @@ function gitPipeSourceSubcommand(segment) {
     if (i < words.length && words[i] === '--') i += 1;
     const subcommand = words[i];
     if (!subcommand) return null;
-    return GIT_READONLY_PIPE_SUBCOMMANDS.has(subcommand) ? subcommand : null;
+    // A listing such as git tag -l or git branch --merged reads like git log.
+    return GIT_READONLY_PIPE_SUBCOMMANDS.has(subcommand) || gitReadOnlyRefCommand(subcommand, words.slice(i + 1))
+        ? subcommand
+        : null;
 }
 
 // containsOpaquePipeLexeme is a quote-aware scan for shell constructs that can
@@ -2701,6 +2971,22 @@ const INDIRECT_EXECUTORS = new Set([
     'systemd-run', 'faketime', 'script',
 ]);
 
+// Programs that print, search or describe text: a git among their words is
+// data, as in echo git push --no-verify or grep -r 'git commit' src.
+const NON_EXECUTING_COMMANDS = new Set([
+    ...READ_ONLY_SHELL_COMMANDS,
+    'ack', 'ag', 'apropos', 'cat', 'cmp', 'column', 'cut', 'diff', 'egrep', 'fgrep', 'fold',
+    'grep', 'head', 'help', 'info', 'jq', 'less', 'man', 'more', 'nl', 'rg', 'sort', 'tail',
+    'tee', 'tr', 'type', 'uniq', 'wc', 'whatis', 'whereis', 'which', 'yq',
+]);
+
+// Programs that run their command on another machine or in a container, a
+// repository this guard does not answer for.
+const REMOTE_COMMAND_DRIVERS = new Set([
+    'colima', 'docker', 'kubectl', 'lima', 'limactl', 'mosh', 'multipass', 'nerdctl', 'podman',
+    'ssh', 'vagrant',
+]);
+
 // These wrappers can evaluate command text, change cwd, or enter another
 // filesystem namespace before Git starts. Their target cannot be authenticated
 // from the caller's repository, even when a literal `git commit` is visible.
@@ -2809,6 +3095,9 @@ const INTERPRETER_EVAL_OPTIONS = new Map([
     ['swipl', ['-g', '-t']],
     ['guile', ['-c']],
     ['sbcl', ['--eval']],
+    // GNU make reads --eval as makefile text, whose recipes run in a shell.
+    ['make', ['--eval', '-E']],
+    ['gmake', ['--eval', '-E']],
 ]);
 
 // evalFlagCode finds the code string that follows a recognized eval-style flag
@@ -2843,6 +3132,15 @@ const NON_EXECUTING_EVAL_PROGRAMS = new Set([
 ]);
 
 function interpretedCommitInvocation(words, initialCwd) {
+    const found = interpreterCode(words);
+    if (!found) return null;
+    return literalCommitDetails(found.code, initialCwd)
+        || interpretedArgumentCommitInvocation(found.code, found.rest, initialCwd);
+}
+
+// The code an interpreter runs from its command line, with the words after it,
+// or null.
+function interpreterCode(words) {
     if (!words.length) return null;
     const executable = shellExecutable(words[0]);
 
@@ -2850,10 +3148,7 @@ function interpretedCommitInvocation(words, initialCwd) {
         : INTERPRETER_EVAL_OPTIONS.get(executable);
     if (options) {
         const found = evalFlagCode(words, options);
-        if (found) {
-            return literalCommitDetails(found.code, initialCwd)
-                || interpretedArgumentCommitInvocation(found.code, found.rest, initialCwd);
-        }
+        if (found) return found;
     }
 
     // awk family: the program is the first positional argument (often quoted),
@@ -2865,29 +3160,102 @@ function interpretedCommitInvocation(words, initialCwd) {
             if (skippingValue) { skippingValue = false; continue; }
             if (arg === '--') {
                 const program = words[index + 1];
-                return program ? literalCommitDetails(program, initialCwd) : null;
+                return program ? { code: program, rest: [] } : null;
             }
             if (/^-[Ffv]/.test(arg) && arg.length === 2) { skippingValue = true; continue; }
             if (arg.startsWith('-')) continue;
-            return literalCommitDetails(arg, initialCwd);
+            return { code: arg, rest: [] };
         }
     }
 
     // Generic fallback: an unrecognized <prog> <eval-flag> <code> whose code
-    // both executes something and references a git commit. Catches future
-    // interpreters (janet, deno --eval, bun -e) without enumerating each. The
-    // execution-indicator requirement + non-executing denylist avoids false
-    // positives such as `grep -e "git commit"`.
+    // executes something. Catches future interpreters (janet, deno --eval,
+    // bun -e) without enumerating each. The execution-indicator requirement +
+    // non-executing denylist avoids false positives such as `grep -e "git commit"`.
     if (!NON_EXECUTING_EVAL_PROGRAMS.has(executable)) {
         const generic = evalFlagCode(words, ['-e', '-c', '--eval', '--exec', '-p', '--print', '-r']);
-        if (generic && /\b(?:argv|child_process|exec|popen|spawn|subprocess|system)\b/.test(generic.code)) {
-            const details = literalCommitDetails(generic.code, initialCwd)
-                || interpretedArgumentCommitInvocation(generic.code, generic.rest, initialCwd);
-            if (details) return details;
-        }
+        if (generic && /\b(?:argv|child_process|exec|popen|spawn|subprocess|system)\b/.test(generic.code)) return generic;
     }
 
     return null;
+}
+
+// Code that can start a process: a system, exec, spawn or popen call, Python's
+// subprocess, Node's child_process, Perl's qx and pipe open, awk's getline,
+// and the backtick and %x of Ruby and Perl. print('git push') starts nothing.
+const CODE_RUNS_COMMANDS = /\b(?:child_process|exec\w*|getline|open|popen|qx|spawn\w*|subprocess|system)\b|`|%x/;
+
+// Programs whose code is shell commands outright, such as a make recipe.
+const SHELL_CODE_PROGRAMS = new Set(['gmake', 'make']);
+
+// Subcommands of yarn and pnpm that are not a package.json script.
+const PACKAGE_MANAGER_COMMANDS = new Set([
+    'add', 'audit', 'bin', 'cache', 'config', 'create', 'dlx', 'exec', 'global', 'help', 'i',
+    'import', 'info', 'init', 'install', 'licenses', 'link', 'list', 'login', 'logout', 'ls',
+    'outdated', 'owner', 'pack', 'prune', 'publish', 'rebuild', 'remove', 'rm', 'root', 'store',
+    'unlink', 'up', 'update', 'upgrade', 'version', 'why', 'workspace', 'workspaces',
+]);
+
+// The file a command runs shell text from, for the guard to read: the
+// makefiles of make, the package.json script npm, yarn, pnpm or bun runs, a
+// script handed to a shell or to source, or an executable run by its path.
+// An agent can write such a file with an editor tool this guard never sees.
+function executedScript(tokens) {
+    const program = shellExecutable(tokens[0]);
+    const args = tokens.slice(1);
+    if (program === 'make' || program === 'gmake') {
+        const paths = [];
+        for (let i = 0; i < args.length; i += 1) {
+            if (['-f', '--file', '--makefile'].includes(args[i]) && args[i + 1]) paths.push(args[++i]);
+            else if (/^--(?:file|makefile)=/.test(args[i])) paths.push(args[i].slice(args[i].indexOf('=') + 1));
+            else if (/^-f./.test(args[i])) paths.push(args[i].slice(2));
+        }
+        return { kind: 'files', paths: paths.length ? paths : ['GNUmakefile', 'makefile', 'Makefile'], label: program };
+    }
+    if (['bun', 'npm', 'pnpm', 'yarn'].includes(program)) {
+        const words = args.filter((word) => !word.startsWith('-'));
+        let name = null;
+        if (['run', 'run-script', 'rum', 'urn'].includes(words[0])) name = words[1] ?? null;
+        else if (program !== 'bun' && ['test', 'start', 'stop', 'restart', 't', 'tst'].includes(words[0])) {
+            name = ['t', 'tst'].includes(words[0]) ? 'test' : words[0];
+        } else if ((program === 'yarn' || program === 'pnpm') && words[0] && !PACKAGE_MANAGER_COMMANDS.has(words[0])) {
+            name = words[0];
+        }
+        return name ? { kind: 'package', name, label: `${program} ${name}` } : null;
+    }
+    if (WRAPPED_SHELLS.has(program) || program === 'source' || program === '.') {
+        for (let i = 0; i < args.length; i += 1) {
+            if (args[i] === '--') return args[i + 1] ? { kind: 'files', paths: [args[i + 1]], label: `${program} ${args[i + 1]}` } : null;
+            if (['-O', '-o', '--init-file', '--rcfile'].includes(args[i])) i += 1;
+            else if (!args[i].startsWith('-') || args[i] === '-') {
+                return args[i] === '-' ? null : { kind: 'files', paths: [args[i]], label: `${program} ${args[i]}` };
+            }
+        }
+        return null;
+    }
+    return String(tokens[0] ?? '').includes('/') ? { kind: 'files', paths: [tokens[0]], shebang: true, label: tokens[0] } : null;
+}
+
+// The Git commands a program's code spells: the words after each git, read
+// once with the quotes that join string literals taken out ('core.hooks''Path',
+// 'comm''it') and once with every quote as a separator (['git','push']). Code
+// that builds a word at run time ('--no-ver' + 'ify', a decoded string) is not
+// seen; strict refuses a commit there, and CI stays the backstop.
+function embeddedGitTexts(code) {
+    const texts = [];
+    for (const view of [code.replace(/['"`]/g, ''), code.replace(/['"`]/g, ' ')]) {
+        const fragments = view.split(/[\s,;()[\]{}+]+/).filter(Boolean);
+        for (let at = 0; at < fragments.length; at += 1) {
+            if (!isGitExecutable(fragments[at])) continue;
+            const words = ['git'];
+            for (let next = at + 1; next < fragments.length && words.length < 64; next += 1) {
+                if (/^(?:&&|\|\||\||&)$/.test(fragments[next]) || isGitExecutable(fragments[next])) break;
+                words.push(fragments[next]);
+            }
+            texts.push(words.map(quoteShellWord).join(' '));
+        }
+    }
+    return texts;
 }
 
 function interpretedArgumentCommitInvocation(code, args, initialCwd) {
