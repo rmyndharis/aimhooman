@@ -342,6 +342,10 @@ function parseGitLine(command, initialCwd, posix = true) {
         // the program that runs it.
         if (kind === 'process' && ran.stdinCode) markUncertain();
     }
+    if (posix && heredocBodyLeaksQuote(cmd)) {
+        markUncertain();
+        commands.push(unreadableCommand(initialCwd));
+    }
     for (const unit of shellUnits(cmd)) {
         const precedingOperator = previousOperator;
         previousOperator = unit.operator;
@@ -1274,6 +1278,67 @@ function dataReaderLine(line) {
     // cat <<EOF | fold -w 72: the body may pass through a pipe of text filters.
     const [reader, ...sinks] = rest.split('|').map((segment) => shellExecutable(shellWords(segment.trim())[0] ?? ''));
     return HEREDOC_DATA_READERS.has(reader) && sinks.every((sink) => SAFE_PIPE_EXECUTABLES.has(sink));
+}
+
+// Whether a heredoc body that stands in the line itself, not inside a
+// substitution, leaves a quote open. The body is not shell text, but the
+// splitters here read it as such, so "echo it's" in it would turn everything
+// after the terminator into one quoted word and the command there would never be
+// seen. The shell reads the same lines as data; this parser cannot, so a body
+// that would leak a quote is refused.
+function heredocBodyLeaksQuote(text) {
+    if (!text.includes('<<')) return false;
+    const pending = [];
+    let quote = '';
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quote) {
+            if (char === '\\' && quote === '"') i += 1;
+            else if (char === quote) quote = '';
+            continue;
+        }
+        if (char === '\\') {
+            i += 1;
+        } else if (char === "'" || char === '"') {
+            quote = char;
+        } else if (char === '<' && text[i + 1] === '<') {
+            const operator = heredocOperator(text, i);
+            if (operator) {
+                if (!operator.hereString) pending.push(operator);
+                i = operator.end - 1;
+            }
+        } else if (char === '\n' && pending.length) {
+            let at = i + 1;
+            for (const operator of pending.splice(0)) {
+                const body = heredocBody(text, at, operator);
+                if (endsInsideQuote(text.slice(at, body.end))) return true;
+                at = body.after;
+            }
+            i = at - 1;
+        } else if ((char === '$' || char === '<' || char === '>') && text[i + 1] === '(' && text[i + 2] !== '(') {
+            // A substitution is parsed on its own, with its heredocs.
+            const close = closingParen(text, i + 2);
+            if (close < 0) return false;
+            i = close;
+        }
+    }
+    return false;
+}
+
+function endsInsideQuote(text) {
+    let quote = '';
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quote) {
+            if (char === '\\' && quote === '"') i += 1;
+            else if (char === quote) quote = '';
+        } else if (char === '\\') {
+            i += 1;
+        } else if (char === "'" || char === '"') {
+            quote = char;
+        }
+    }
+    return quote !== '';
 }
 
 function dropDataHeredocs(text) {

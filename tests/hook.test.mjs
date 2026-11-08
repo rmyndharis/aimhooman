@@ -4185,6 +4185,34 @@ test('a script written and run in the same line is read', async () => {
     }
 });
 
+// A heredoc body is data to the shell, but the splitters here read it as text, so
+// a quote it leaves open swallowed the terminator and the command after it: a
+// body line that starts with a read-only word, as in echo it's, was not even
+// flagged. A message written in a substitution is data and is not affected.
+test('a quote left open in a heredoc body does not hide the commands after it', async () => {
+    const lines = (...parts) => parts.join('\n');
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-heredoc-quote-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                lines("true <<'EOF'", "echo it's", 'EOF', 'git push --no-verify origin wip'),
+                lines("true <<'EOF'", "echo don't", 'EOF', 'git -c core.hooksPath=/dev/null commit -qm x'),
+                lines('true <<EOF', "echo it's", 'EOF', 'git push --no-verify origin wip'),
+                lines("printf hi <<'EOF'", "printf it's", 'EOF', 'git push --no-verify origin wip'),
+                lines("git add -A && true <<'EOF'", "echo it's", 'EOF', 'git push --no-verify origin wip'),
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            if (profile === 'clean') {
+                assert.equal(await decide(lines('git commit -m "$(cat <<\'EOF\'', "don't refuse (this)", 'EOF', ')"')), null, profile);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
 // A shell ends a comment at the newline, whatever quotes it holds. The splitters
 // track quotes on their own, so "# don't hurry" made the line after it read as
 // inside a quote: the command on it was never seen, on every profile.
