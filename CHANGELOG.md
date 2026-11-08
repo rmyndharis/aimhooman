@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The release workflow verifies with read-only permissions and publishes the
   tarball it verified, only for a tag on `main` that names the `package.json`
   version.
+- The final ref guard reads the message of an initial commit, an orphan root
+  and a merge made here, so `--no-verify` no longer carries an AI trailer past
+  it; fetched history stays exempt.
+- The final ref guard scans a commit made while HEAD names a ref outside
+  `refs/heads`. Run `aimhooman init` to update installed hooks.
 
 ### Fixed
 
@@ -108,6 +113,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted a lock file it still holds open.
 - `check --profile` names where the repository's profile comes from when it
   refuses to swap `clean` and `compliance`.
+- A pull that fast-forwards one fetched commit no longer fails on that
+  commit's message on `strict`; fetched history is exempt like a longer pull.
+- On `clean` and `compliance`, a review-required finding is printed for a
+  commit made with `--no-verify` or by cherry-pick, and for a pushed commit.
+- Branch switches, tags and the `preparing` phase of a ref update no longer
+  start Node. Run `aimhooman init` to update installed hooks.
+- `doctor` reports dispatchers left pointing at a moved or renamed repository;
+  `init` re-pins them.
+- `init --global` and `uninstall --global` read `core.hooksPath` as Git applies
+  it (`~`, a trailing slash, an included file), so uninstall no longer removes
+  dispatchers the setting still names.
 
 ### Changed
 

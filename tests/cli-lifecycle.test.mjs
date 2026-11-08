@@ -1683,6 +1683,48 @@ test('compliance keeps a review a notice through the final ref guard', () => {
     }
 });
 
+test('a review that never passed pre-commit is named at the final ref guard and at push', () => {
+    // pre-commit is the hook that prints a review, and --no-verify or a
+    // cherry-pick never runs it. The final guards let the commit and the push
+    // through on compliance; they must still say what went through.
+    const repo = createRepo('compliance');
+    const remote = mkdtempSync(join(tmpdir(), 'aim-lifecycle-remote-'));
+    const gitRun = (args) => spawnSync('git', args, { cwd: repo.root, env: repo.env, encoding: 'utf8' });
+    const reviews = (result) => result.stderr.match(/^REVIEW .*\n\s+(\S+)/gm) || [];
+    try {
+        git(repo, ['init', '-q', '--bare', remote]);
+        git(repo, ['remote', 'add', 'origin', remote]);
+        writeFileSync(join(repo.root, 'AGENTS.md'), '# Agent instructions\n');
+        git(repo, ['add', 'AGENTS.md']);
+        const plain = gitRun(['commit', '-q', '-m', 'Add agent instructions']);
+        assert.equal(plain.status, 0, plain.stderr);
+        assert.equal(reviews(plain).length, 1, `pre-commit names it and the final guard does not repeat it: ${plain.stderr}`);
+
+        writeFileSync(join(repo.root, 'CLAUDE.md'), '# Claude instructions\n');
+        git(repo, ['add', 'CLAUDE.md']);
+        const skipped = gitRun(['commit', '-q', '--no-verify', '-m', 'Add Claude instructions']);
+        assert.equal(skipped.status, 0, skipped.stderr);
+        assert.match(skipped.stderr, /^REVIEW +generic\.agent-instructions[^\n]*\n\s+CLAUDE\.md/m);
+
+        const main = git(repo, ['branch', '--show-current']);
+        git(repo, ['checkout', '-q', '-b', 'side', 'HEAD~2']);
+        writeFileSync(join(repo.root, 'GEMINI.md'), '# Gemini instructions\n');
+        git(repo, ['add', 'GEMINI.md']);
+        git(repo, ['commit', '-q', '--no-verify', '-m', 'Add Gemini instructions']);
+        git(repo, ['checkout', '-q', main]);
+        const picked = gitRun(['cherry-pick', 'side']);
+        assert.equal(picked.status, 0, picked.stderr);
+        assert.match(picked.stderr, /^REVIEW +generic\.agent-instructions[^\n]*\n\s+GEMINI\.md/m);
+
+        const pushed = gitRun(['push', '-q', 'origin', `HEAD:refs/heads/${main}`]);
+        assert.equal(pushed.status, 0, pushed.stderr);
+        assert.match(pushed.stderr, /^REVIEW +generic\.agent-instructions/m);
+    } finally {
+        rmSync(remote, { recursive: true, force: true });
+        cleanup(repo);
+    }
+});
+
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

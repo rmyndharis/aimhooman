@@ -316,6 +316,13 @@ export function globalHooksDir() {
     return join(homedir(), '.aimhooman', 'hooks');
 }
 
+// isGlobalHooksDir compares a configured hooks path with globalHooksDir as a
+// directory: a trailing slash or a symlinked HOME spells it differently. A
+// relative path is resolved per repository by Git, so it is never ours.
+export function isGlobalHooksDir(path) {
+    return Boolean(path) && isAbsolute(path) && canonicalPath(path) === canonicalPath(globalHooksDir());
+}
+
 // installGlobalHooks writes aimhooman dispatchers to ~/.aimhooman/hooks for global use.
 export function installGlobalHooks(cliPath, options = {}) {
     const dir = options.dir || globalHooksDir();
@@ -708,11 +715,16 @@ export function hookDiagnostics(repo) {
             && gitReachable
             && chainedSafe
             && inspected.shellPathCompatible;
+        // Inside our own .git a moved or renamed repository still owns the
+        // dispatcher, which keeps guarding, but the chained hook and compile
+        // cache it names are under the old path: the user's hook stops running.
+        const stale = !namesChained(content, base.chainedPath);
         return {
             ...base,
             managed: true,
             reachable,
             executable,
+            stale,
             version: inspected.version,
             fingerprint: inspected.fingerprint,
             cliPath: inspected.cliPath,
@@ -725,7 +737,7 @@ export function hookDiagnostics(repo) {
             reason: !executable
                 ? 'not executable'
                 : reachable
-                    ? ''
+                    ? stale ? "written for the repository's old path; run: aimhooman init" : ''
                     : !chainedSafe
                         ? 'chained predecessor is a symlink'
                         : !inspected.shellPathCompatible
@@ -884,30 +896,56 @@ esac
     // committed/aborted fire only after refs are locked in, and refcheck can do
     // nothing but return 0 for them (see cmdRefcheck). Short-circuit in the shell
     // so an ordinary commit no longer pays a Node cold start for the committed
-    // phase. The prepared filter goes further: a transaction that moves neither
-    // a branch nor HEAD (ORIG_HEAD, tags, remote-tracking refs) carries nothing
-    // refcheck scans, so it never spawns at all — but only after proving the
+    // phase. preparing scans nothing either, and in prepared a transaction that
+    // moves neither a branch nor HEAD to a commit (ORIG_HEAD, tags,
+    // remote-tracking refs, the symbolic HEAD a branch switch writes) carries
+    // nothing refcheck scans. Neither spawns at all, but only after proving the
     // guard is still there to skip. A hook manager that wipes the dispatchers
     // during a branch-free operation (tag, fetch, stash) would otherwise go
     // unnoticed, because after a full wipe no later hook exists to raise the
     // alarm. Presence is exactly what a deletion removes; content integrity
-    // keeps running on every branch transaction via refcheck. Both sit after
-    // the chained-hook call, so a chained hook still sees every phase.
+    // keeps running on every branch transaction via refcheck. A HEAD that names
+    // a ref outside refs/heads sends every prepared phase to refcheck: a commit
+    // there moves only that ref. All of this sits after the chained-hook call,
+    // so a chained hook still sees every phase. The lines are split with IFS
+    // and a for loop, not read from a here-document, which may need a
+    // temporary file the shell cannot always write.
     const phaseShortCircuit = name === 'reference-transaction'
         ? `case "$1" in committed|aborted) exit 0 ;; esac
-case "$1" in prepared)
-  case "$AIMHOOMAN_REF_UPDATES" in
-    *refs/heads/*|*" HEAD"*) ;;
-    *)
-      for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction pre-push; do
-        [ -x "$(PATH="$AIMHOOMAN_PATH" dirname "$0")/$AIMHOOMAN_GUARD" ] || {
-          echo "aimhooman: required Git guards changed while reference-transaction was running; $AIMHOOMAN_GUARD is unavailable. The operation was stopped; run 'aimhooman init' and retry." >&2
-          exit 20
-        }
-      done
-      exit 0 ;;
-  esac ;;
+AIMHOOMAN_SCAN=1
+case "$1" in
+  preparing) AIMHOOMAN_SCAN= ;;
+  prepared)
+    AIMHOOMAN_SCAN=
+    AIMHOOMAN_IFS=$IFS
+    IFS='
+'
+    set -f
+    for AIMHOOMAN_REF_UPDATE in $AIMHOOMAN_REF_UPDATES; do
+      case "$AIMHOOMAN_REF_UPDATE" in
+        *" ref:"*" HEAD") ;;
+        *refs/heads/*|*" HEAD") AIMHOOMAN_SCAN=1 ;;
+      esac
+    done
+    set +f
+    IFS=$AIMHOOMAN_IFS
+    if [ -z "$AIMHOOMAN_SCAN" ]; then
+      case $(PATH="$AIMHOOMAN_PATH" git symbolic-ref -q HEAD 2>/dev/null) in
+        ''|refs/heads/*) ;;
+        *) AIMHOOMAN_SCAN=1 ;;
+      esac
+    fi ;;
 esac
+if [ -z "$AIMHOOMAN_SCAN" ]; then
+  AIMHOOMAN_HOOKS=$(PATH="$AIMHOOMAN_PATH" dirname "$0")
+  for AIMHOOMAN_GUARD in pre-commit pre-merge-commit commit-msg reference-transaction pre-push; do
+    [ -x "$AIMHOOMAN_HOOKS/$AIMHOOMAN_GUARD" ] || {
+      echo "aimhooman: final Git guards changed while reference-transaction was running; $AIMHOOMAN_GUARD is unavailable. The operation was stopped; run 'aimhooman init' and retry." >&2
+      exit 20
+    }
+  done
+  exit 0
+fi
 `
         : '';
     const template = `#!/bin/sh -p
@@ -1077,6 +1115,10 @@ function ownedByRepo(repo, dir, content, name, chainedPath) {
     // the first assignment keeps this the same byte-exact check it has always
     // been — the fingerprint is a plain checksum anyone can recompute, so this
     // comparison is what actually establishes who wrote the file.
+    return namesChained(content, chainedPath);
+}
+
+function namesChained(content, chainedPath) {
     const chained = `\nCHAINED=${shq(chainedPath)}\n`;
     const first = content.indexOf('\nCHAINED=');
     return first !== -1 && content.startsWith(chained, first);

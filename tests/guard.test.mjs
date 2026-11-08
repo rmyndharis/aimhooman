@@ -164,8 +164,8 @@ test('resolveIntroduced separates locally authored tips from imported history', 
         const parent = git(dir, ['rev-parse', 'HEAD']);
         writeFileSync(join(dir, 'work.txt'), 'work\n');
         git(dir, ['add', 'work.txt']);
-        git(dir, ['commit', '-q', '-m', 'work']);
-        const head = git(dir, ['rev-parse', 'HEAD']);
+        // At the prepared phase a commit Git just wrote is held by no ref yet.
+        const head = git(dir, ['commit-tree', git(dir, ['write-tree']), '-p', parent, '-m', 'work']);
 
         const ordinary = resolveIntroduced(repo, [
             { oldObjectId: parent, newObjectId: head, ref: branch },
@@ -186,6 +186,75 @@ test('resolveIntroduced separates locally authored tips from imported history', 
         ], { includeStagedContexts: false });
         assert.deepEqual(creation.map(([oid]) => oid).sort(), [parent, head].sort());
         assert.equal(creation.every(([, , local]) => local === false), true);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('resolveIntroduced counts a merge made here and a commit with no history as authored here', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        const branch = git(dir, ['symbolic-ref', 'HEAD']);
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const side = git(dir, ['commit-tree', tree, '-p', base, '-m', 'side work']);
+        git(dir, ['update-ref', 'refs/heads/side', side]);
+        // At the prepared phase a commit Git just wrote is held by no ref yet.
+        const merge = git(dir, ['commit-tree', tree, '-p', base, '-p', side, '-m', 'merge side']);
+        const root = git(dir, ['commit-tree', tree, '-m', 'orphan root']);
+        const authored = (update) => new Map(
+            resolveIntroduced(repo, [update], { includeStagedContexts: false })
+                .map(([oid, , local]) => [oid, local]),
+        );
+        const mergeUpdate = { oldObjectId: base, newObjectId: merge, ref: branch };
+        const rootUpdate = { oldObjectId: '0'.repeat(40), newObjectId: root, ref: 'refs/heads/orphan' };
+
+        const merged = authored(mergeUpdate);
+        assert.equal(merged.get(merge), true, 'a merge on the old tip is written here');
+        assert.equal(merged.get(side), false, 'the merged commits keep their own authorship');
+        assert.equal(authored(rootUpdate).get(root), true, 'an initial or orphan commit enters alone');
+        assert.equal(authored({ ...mergeUpdate, forced: true }).get(merge), false, 'a forced move is not a commit made here');
+
+        // A fetch, a clone or a checkout of a fetched branch brings the same
+        // shapes, already held by the remote-tracking ref the fetch wrote.
+        git(dir, ['update-ref', 'refs/remotes/origin/main', merge]);
+        git(dir, ['update-ref', 'refs/remotes/origin/pages', root]);
+        assert.equal(authored(mergeUpdate).get(merge), false, 'a fast-forward to a fetched merge');
+        assert.equal(authored(rootUpdate).get(root), false, 'a branch made from a fetched root');
+        const lone = git(dir, ['commit-tree', tree, '-p', base, '-m', 'one more']);
+        const one = { oldObjectId: base, newObjectId: lone, ref: branch };
+        assert.equal(authored(one).get(lone), true, 'one commit on the old tip, held by no ref');
+        git(dir, ['update-ref', 'refs/remotes/origin/one', lone]);
+        assert.equal(authored(one).get(lone), false, 'a pull that fast-forwards one fetched commit');
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('scanProposedCommits names an advisory review for a commit made here, once', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        mkdirSync(repo.stateDir, { recursive: true });
+        writeFileSync(join(dir, 'AGENTS.md'), '# Agent instructions\n');
+        git(dir, ['add', 'AGENTS.md']);
+        git(dir, ['commit', '-q', '-m', 'agents']);
+        const head = git(dir, ['rev-parse', 'HEAD']);
+        const context = [{ head, storedTransition: head, scanTransition: head }];
+        const notice = (authoredLocally, options = {}) => {
+            let code;
+            const stderr = captureStderr(() => {
+                code = scanProposedCommits(repo, [[head, context, authoredLocally]], { limits: {}, rejectNote: null, ...options });
+            });
+            assert.equal(code, 0, stderr);
+            return stderr;
+        };
+        assert.match(notice(true), /REVIEW +generic\.agent-instructions/);
+        assert.equal(notice(false), '', 'a commit from elsewhere is not the developer\'s to review');
+        recordPrecommitClean(repo, 'clean');
+        assert.equal(notice(true, { afterPrecommit: true }), '', 'pre-commit already named this tree');
+        assert.match(notice(true), /REVIEW/, 'a push names it whatever pre-commit printed');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
