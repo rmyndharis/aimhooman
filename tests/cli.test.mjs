@@ -95,7 +95,7 @@ test('help lists command aliases and mutually exclusive lifecycle forms', () => 
     const help = result('--help', [], process.cwd());
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /aimhooman audit\|scan/);
-    assert.match(help.stdout, /fix .*--apply \(strict only\)/);
+    assert.match(help.stdout, /fix \(-m <file>\|--message <file>\) \[--apply \(strict only\)\]/);
     assert.match(help.stdout, /uninstall \[--purge-state\]\n\s+aimhooman uninstall --global/);
     assert.doesNotMatch(help.stdout, /uninstall[^\n]*--purge-state[^\n]*--global/);
 });
@@ -513,6 +513,42 @@ test('commitmsg: strict blocks and exits 10', () => {
         writeFileSync(msg, 'Fix\n\nCo-authored-by: Claude <noreply@anthropic.com>\n');
         const out = run('commitmsg', [msg], dir);
         assert.equal(out.code, 10);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// `git commit -v` writes the diff below a scissors line, and Git drops that
+// line and everything after it, so a diff line quoting an attribution is not
+// part of the message.
+test('commitmsg: nothing from the scissors line on is read as the message', () => {
+    const dir = makeRepo('strict');
+    try {
+        const msg = join(dir, 'MSG');
+        const cut = ' ------------------------ >8 ------------------------\n';
+        const diff = 'diff --git a/docs.md b/docs.md\n Co-authored-by: Claude <noreply@anthropic.com>\n';
+        writeFileSync(msg, `Update docs\n\n#${cut}${diff}`);
+        assert.equal(result('commitmsg', [msg], dir).status, 0);
+        // The line opens with Git's comment string; under another one it is text.
+        execFileSync('git', ['config', 'core.commentString', '//'], { cwd: dir });
+        assert.equal(result('commitmsg', [msg], dir).status, 10);
+        writeFileSync(msg, `Update docs\n\n//${cut}${diff}`);
+        assert.equal(result('commitmsg', [msg], dir).status, 0);
+        // Set last, auto wins, and Git may pick any of its characters.
+        execFileSync('git', ['config', 'core.commentChar', 'auto'], { cwd: dir });
+        writeFileSync(msg, `Update docs\n\n;${cut}${diff}`);
+        assert.equal(result('commitmsg', [msg], dir).status, 0);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('commitmsg: clean repairs the message above the scissors line and keeps the rest byte for byte', () => {
+    const dir = makeRepo('clean');
+    try {
+        const msg = join(dir, 'MSG');
+        // A Latin-1 file in the diff is not UTF-8, and it is not message text.
+        const below = Buffer.from('# ------------------------ >8 ------------------------\ndiff --git a/n.txt b/n.txt\n+caf\xe9\n', 'latin1');
+        writeFileSync(msg, Buffer.concat([Buffer.from('Fix\n\nCo-authored-by: Claude <noreply@anthropic.com>\n'), below]));
+        const out = result('commitmsg', [msg], dir);
+        assert.equal(out.status, 0, out.stderr);
+        assert.deepEqual(readFileSync(msg), Buffer.concat([Buffer.from('Fix\n\n'), below]));
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1259,6 +1295,41 @@ test('status reports the enforced staged profile and warns when the worktree pol
         assert.equal(applied.status, 0, applied.stderr);
         assert.match(applied.stdout, /profile:\s+strict\n/);
         assert.doesNotMatch(applied.stdout, /is not staged/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The hooks hold a weaker staged policy at strict while HEAD's is strict, and
+// staging the file again changes nothing, so status must not say it would.
+test('status reports the strict profile HEAD holds a weaker staged policy at', () => {
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'strict' }));
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', 'strict baseline'], { cwd: dir });
+        writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'clean' }));
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+
+        const status = result('status', [], dir);
+        assert.equal(status.status, 0, status.stderr);
+        assert.match(status.stdout, /profile:\s+strict \(worktree: clean\)/);
+        assert.match(status.stdout, /holds the hooks at strict until `aimhooman policy-review`/);
+        assert.doesNotMatch(status.stdout, /git add/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('check -m reads the staged policy the commit hooks apply', () => {
+    const dir = makeRepo('clean');
+    try {
+        writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'strict' }));
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+        // Not staged, so commit-msg and fix -m still apply strict.
+        writeFileSync(join(dir, '.aimhooman.json'), JSON.stringify({ schema_version: 1, profile: 'compliance' }));
+        const msg = join(dir, 'MSG');
+        writeFileSync(msg, 'Fix\n\nCo-authored-by: Claude <noreply@anthropic.com>\n');
+
+        const out = result('check', ['-m', msg, '--json'], dir);
+        assert.equal(out.status, 10, out.stderr);
+        assert.equal(JSON.parse(out.stdout).profile, 'strict');
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

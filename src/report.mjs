@@ -183,7 +183,7 @@ export function incompleteMessage(scan, { blocking = true } = {}) {
     for (const [reason, entries] of Object.entries(skippedPaths)) {
         for (const entry of entries.slice(0, 5)) {
             const sizeStr = formatBytes(entry.size);
-            pathLines.push(`  skipped: ${entry.path} (${reason}, ${sizeStr})\n`);
+            pathLines.push(`  skipped: ${visible(entry.path)} (${reason}, ${sizeStr})\n`);
         }
         if (entries.length > 5) pathLines.push(`  ... and ${entries.length - 5} more\n`);
     }

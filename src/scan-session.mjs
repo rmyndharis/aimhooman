@@ -66,8 +66,9 @@ export function scanEntries(repo, engine, entries, options = {}) {
     // Oversized files: probe the first 8 KB to separate binary from text.
     // A binary file (PSD, WOFF, PNG) holds no text lines the content rules
     // could match, so it skips as 'binary' (complete). A text file that
-    // exceeds the budget is a genuine 'size-limit' skip (incomplete) and the
-    // caller must raise the limit to cover it.
+    // exceeds the budget, UTF-16 with a byte-order mark included, is a
+    // genuine 'size-limit' skip (incomplete) and the caller must raise the
+    // limit to cover it.
     // Cap probing at 16 MiB: cat-file --batch reads the full blob into memory,
     // so probing a 500 MB file just to check for NULs is wasteful. Files above
     // the cap are classified as size-limit without probing.
@@ -83,7 +84,7 @@ export function scanEntries(repo, engine, entries, options = {}) {
         const probes = probeObjects(repo, probeOids, probeable);
         for (const entry of probeable) {
             const header = probes.get(entry.oid);
-            if (header && isBinary(header)) {
+            if (header && decodeUtf16(header) === null && isBinary(header)) {
                 increment(stats.skipped, 'binary');
                 appendPath(stats.skippedPaths, 'binary', entry.path, entry.size);
             } else {
@@ -122,7 +123,9 @@ export function scanEntries(repo, engine, entries, options = {}) {
             continue;
         }
         stats.files_scanned += 1;
-        const ranges = lineRanges.get(entry.path);
+        // Git numbers lines by 0x0A bytes, which UTF-16 also uses inside other
+        // characters, so its hunks cannot narrow the decoded text: read it whole.
+        const ranges = utf16 === null ? lineRanges.get(entry.path) : null;
         const matched = engine.checkContent(entry.path, utf16 ?? blob.toString('utf8'),
             ranges && ranges.length ? { lineRanges: ranges } : {});
         stats.findings_total += matched.length;

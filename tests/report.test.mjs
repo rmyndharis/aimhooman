@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { human, jsonReport, exitCode } from '../src/report.mjs';
+import { human, incompleteMessage, jsonReport, exitCode } from '../src/report.mjs';
 import { openRepo } from '../src/gitx.mjs';
 import { scanMessage } from '../src/scan-target.mjs';
 
@@ -173,6 +173,16 @@ test('human report escapes control characters in paths', () => {
     const cr = human([{ ...nonSecret, path: 'weird\rname', text: 'bell\x07end\x7f' }], 'professional');
     assert.match(cr, /weird\\rname/);
     assert.match(cr, /bell\\x07end\\x7f/);
+});
+
+test('incomplete-scan message escapes control characters in skipped paths', () => {
+    const message = incompleteMessage({
+        stats: {
+            skipped: { 'size-limit': 1 },
+            skippedPaths: { 'size-limit': [{ path: 'big\x1b[2K\rscan complete.js', size: 3 << 20 }] },
+        },
+    });
+    assert.match(message, /skipped: big\\x1b\[2K\\rscan complete\.js \(size-limit, 3\.0 MB\)/);
 });
 
 // W6: only remediation[0] used to render, so a rule whose remediation array

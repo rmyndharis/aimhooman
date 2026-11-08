@@ -805,7 +805,8 @@ function hookScript(name, cmd, cliPath, chainedPath) {
     //   input above. The filter is grep, not a shell `case` loop: case
     //   patterns break inside $( ) on older POSIX shells (bash 3.2 /bin/sh).
     //   grep exit 1 means "only deletions" — not an error; anything worse
-    //   aborts the push rather than skipping the guard.
+    //   aborts the push rather than skipping the guard. The local oid is read
+    //   third from the end: Git passes the local ref as typed, spaces included.
     const preAimFilter = name === 'commit-msg'
         ? `AIMHOOMAN_COMMON=$(PATH="$AIMHOOMAN_PATH" git rev-parse --git-common-dir 2>/dev/null) || AIMHOOMAN_COMMON=
 if [ ! -x "$(PATH="$AIMHOOMAN_PATH" dirname "$0")/pre-commit" ]; then
@@ -827,7 +828,7 @@ esac
 `
             : name === 'pre-push'
                 ? `AIMHOOMAN_PUSH_UPDATES=$(
-  printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | PATH="$AIMHOOMAN_PATH" grep -v '^[^ ]* 0* ' || [ $? -eq 1 ]
+  printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | PATH="$AIMHOOMAN_PATH" grep -v ' 00* [^ ]* [^ ]*$' || [ $? -eq 1 ]
 ) || exit $?
 [ -n "$AIMHOOMAN_PUSH_UPDATES" ] || exit 0
 `
