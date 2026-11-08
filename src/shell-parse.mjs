@@ -55,7 +55,13 @@ function unreadableCommand(cwd) {
 }
 
 // eval, source or . where a command starts runs text the parser never sees.
-const SOURCED_COMMAND = /(?:^|[\n;&|(])\s*(?:eval|source|\.)\s/;
+// A newline starts a command too, so the blanks after a separator never need
+// to cross one; letting them do so made a run of blank lines quadratic.
+const SOURCED_COMMAND = /(?:^|[\n;&|(])[^\S\n]*(?:eval|source|\.)\s/;
+
+// name () { and function name {, the two ways a shell defines a function. A
+// word before {, as in echo {} > f.json, is an ordinary command.
+const SHELL_FUNCTION = /(?:^|[;&\n])[^\S\n]*(?:function\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\(\s*\))?|([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\))\s*\{/;
 
 // A payload the parser cannot read in full: substitution, a subshell, brace
 // group or function, control flow, an input redirect, a background job, a
@@ -139,7 +145,7 @@ function parseGitLine(command, initialCwd) {
     let previousOperator = null;
     let shellTargetUncertain = false;
     let shellPathDialectUncertain = false;
-    const definesShellFunction = /(?:^|[;&\n])\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/.test(cmd);
+    const definesShellFunction = SHELL_FUNCTION.test(cmd);
     const persistentEnvironmentRisk = new Set();
     let prefixRisk = false;
     let prefixIndexMutationRisk = false;
@@ -182,13 +188,14 @@ function parseGitLine(command, initialCwd) {
         // time, timeout, nice and the like run the command after them with the
         // same argv, so that command is unwrapped again, env and all.
         for (let after = passthroughTarget(unwrapped.tokens); after; after = passthroughTarget(unwrapped.tokens)) {
+            const otherUser = PASSTHROUGH_PREFIXES.get(shellExecutable(unwrapped.tokens[0])).otherUser === true;
             const inner = unwrapCommand(after, unwrapped.cwd);
             unwrapped = {
                 ...inner,
                 assignments: [...unwrapped.assignments, ...inner.assignments],
                 uncertain: unwrapped.uncertain || inner.uncertain,
                 pathDialectUncertain: unwrapped.pathDialectUncertain || inner.pathDialectUncertain,
-                targetUncertain: unwrapped.targetUncertain || inner.targetUncertain,
+                targetUncertain: unwrapped.targetUncertain || inner.targetUncertain || otherUser,
                 explicitTargetOption: unwrapped.explicitTargetOption || inner.explicitTargetOption,
             };
         }
@@ -312,8 +319,20 @@ function parseGitLine(command, initialCwd) {
             shellPathDialectUncertain ||= stackChange.pathDialectUncertain;
             continue;
         }
+        // printf -v NAME stores its output in NAME, a value this check never
+        // sees. Git runs it when NAME holds a command or Git config. The
+        // command still goes on below, where a redirect of it is read.
+        const printfName = printfVariable(toks);
+        if (printfName !== null) {
+            const name = printfName.split('[', 1)[0].toUpperCase();
+            for (const risk of assignmentRiskNames([`${name}=<unseen>`])) persistentEnvironmentRisk.add(risk);
+            if (!/^[A-Z_][A-Z0-9_]*$/.test(name) || COMMAND_ENVIRONMENT.has(name) || gitConfigEnvName(name)) {
+                commands.push(unreadableCommand(shellCwd));
+            }
+        }
         if (SHELL_CONTROL_DECLARATIONS.has(toks[0])) continue;
-        if (toks.length < 2) {
+        const dynamicName = commandWordExpands(toks[0] ?? '');
+        if (toks.length < 2 && !dynamicName) {
             if (toks.length && (!READ_ONLY_SHELL_COMMANDS.has(basename(toks[0])) || hasFileRedirect(unit.text))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
                 prefixHooksRisk ||= commandMayTouchHooks(toks, unit.text);
@@ -327,7 +346,7 @@ function parseGitLine(command, initialCwd) {
             ...assignmentRiskNames(unwrapped.assignments),
         ]);
         const targetEnvironmentRisk = hasCrossTargetEnvironmentRisk(environmentRisk, g0);
-        if (!isGitExecutable(g0)) {
+        if (dynamicName || !isGitExecutable(g0)) {
             if (CURRENT_SHELL_MUTATORS.has(shellExecutable(g0))) uncertainShell = true;
             const indirect = indirectCommitInvocation(toks, unwrapped.cwd)
                 || interpretedCommitInvocation(toks, unwrapped.cwd)
@@ -360,6 +379,24 @@ function parseGitLine(command, initialCwd) {
                     pathDialectUncertain: commandPathDialectUncertain
                         || indirect.pathDialectUncertain,
                 });
+            } else if (INDIRECT_EXECUTORS.has(shellExecutable(g0)) && !dynamicName) {
+                // A wrapper such as xargs or su -c can run a push or a merge as
+                // well as a commit. The Git words it shows are read as Git, at
+                // a target the wrapper may change.
+                const words = toks.slice(1).flatMap((word) => word.split(/\s+/).filter(Boolean));
+                const at = words.findIndex((word) => isGitExecutable(word));
+                if (at >= 0) {
+                    const ran = parseGit(words.slice(at).map(quoteShellWord).join(' '), unwrapped.cwd);
+                    mergeGitRun({
+                        ...ran,
+                        commands: ran.commands.filter((candidate) => EXPANDED_GIT_VERBS.has(candidate.verb)),
+                    }, unwrapped.cwd);
+                }
+            } else if (dynamicName && expandedWordMayRunGit(toks, cmd)) {
+                // The expanded name can be Git with arguments this check
+                // cannot read.
+                uncertainShell = true;
+                commands.push(unreadableCommand(unwrapped.cwd));
             }
             // echo and printf only read, unless the line writes their output
             // to a file: `echo ... >> .git/config` repoints the hooks.
@@ -797,7 +834,9 @@ function directoryCommandTokens(tokens) {
 // command before a commit as an index replacement.
 function commandMayReplaceIndex(tokens, source) {
     const text = `${tokens.join(' ')} ${source}`.replace(/\\/g, '/');
-    return /(?:^|[\s"'=])(?:\.git\/index|[^\s"']+\/\.git\/index)(?:\.lock)?(?:$|[\s"'])/i.test(text)
+    // A path that ends in /.git/index is one whose last directory name is
+    // .git; looking only at the character before it keeps the scan linear.
+    return /(?:^|[\s"'=]|[^\s"']\/)\.git\/index(?:\.lock)?(?:$|[\s"'])/i.test(text)
         || /\bGIT_INDEX_FILE\b/.test(text)
         || /\bgit\s+rev-parse\b[^;&|\n]*\b--git-path(?:=|\s+)index\b/i.test(text);
 }
@@ -819,9 +858,19 @@ export function commandMayTouchHooks(tokens, source) {
     return /(?:^|[\s"'=/])\.git\/h(?!ead\b)/i.test(text)
         || /--git-path\s+hooks\b/i.test(text)
         || /\bhookspath\b/i.test(text)
-        || /\binclude(?:if\.[^\s"'=]*)?\.path\b/i.test(text)
+        || namesIncludePath(text)
         // Whatever is written into .git/config can set core.hooksPath.
         || /(?:^|[\s"'=/])\.git\/config\b/i.test(text);
+}
+
+// include.path or includeIf.<condition>.path. The condition is looked for
+// once per word: a regex retried at every includeIf in one word was quadratic.
+function namesIncludePath(text) {
+    return text.split(/[\s"'=]+/).some((word) => {
+        if (/\binclude\.path\b/i.test(word)) return true;
+        const at = word.search(/\bincludeif\./i);
+        return at >= 0 && /\.path\b/i.test(word.slice(at + 'includeif.'.length));
+    });
 }
 
 // An unquoted > or >> that writes a file. fd duplications (2>&1, >&2, >&-)
@@ -897,7 +946,7 @@ const GIT_BRANCH_MUTATING_FLAGS = new Set([
 ]);
 const GIT_REMOTE_MUTATING_SUBCOMMANDS = new Set([
     'add', 'rename', 'rm', 'remove', 'set-url', 'set-head', 'prune', 'update',
-    'get-url', 'set-urladd',
+    'set-urladd',
 ]);
 const GIT_STASH_MUTATING_SUBCOMMANDS = new Set([
     'push', 'pop', 'apply', 'drop', 'clear', 'save', 'create', 'store', 'branch',
@@ -907,8 +956,11 @@ const GIT_NOTES_MUTATING_SUBCOMMANDS = new Set([
 ]);
 
 export function gitReadOnlyRefCommand(verb, args = []) {
-    const flags = args.filter((arg) => arg.startsWith('-'));
-    const positionals = args.filter((arg) => !arg.startsWith('-'));
+    // A word the shell still expands can turn a listing into --no-list or a
+    // new name.
+    if ((verb === 'branch' || verb === 'tag') && args.some(mayExpandToOption)) return false;
+    const { flags, positionals } = refListingWords(verb, args);
+    const listMode = flags.some((flag) => REF_LIST_MODE_OPTIONS.has(flag));
     if (verb === 'branch') {
         // `git branch`, `git branch -a/-r/-l/--list/-v/--verbose/--all/--remotes`
         // only list. A name, a start-point, or any create/delete/move/copy flag
@@ -918,19 +970,17 @@ export function gitReadOnlyRefCommand(verb, args = []) {
             GIT_BRANCH_READONLY_FLAGS.has(flag)
         ));
         if (!listingOnly) return false;
-        // A positional without --list/-l creates or moves a branch.
-        if (positionals.length && !flags.some((flag) => flag === '-l' || flag === '--list')) {
-            return false;
-        }
+        // A positional outside list mode creates or moves a branch.
+        if (positionals.length && !listMode) return false;
         return true;
     }
     if (verb === 'remote') {
         // `git remote` and `git remote -v/--verbose` list; `git remote show <n>`
-        // is read-only; everything else mutates.
+        // and `git remote get-url <n>` are read-only; everything else mutates.
         if (positionals.length === 0) return flags.every((flag) => flag === '-v' || flag === '--verbose');
         const sub = positionals[0];
         if (GIT_REMOTE_MUTATING_SUBCOMMANDS.has(sub)) return false;
-        return sub === 'show';
+        return sub === 'show' || sub === 'get-url';
     }
     if (verb === 'stash') {
         // No subcommand defaults to `push` (a mutation). Only list/show are read.
@@ -948,12 +998,41 @@ export function gitReadOnlyRefCommand(verb, args = []) {
         // `git tag` and `git tag -l/--list` only list. A name, -d/--delete, -f/--force,
         // -a/--annotate, -s, -m, or -u creates/moves/deletes a tag.
         if (flags.some((flag) => GIT_TAG_MUTATING_FLAGS.has(flag))) return false;
-        if (positionals.length && !flags.some((flag) => flag === '-l' || flag === '--list')) {
-            return false;
-        }
+        if (positionals.length && !listMode) return false;
         return true;
     }
+    // `git worktree list` reads; add, move, remove, prune and the rest do not.
+    if (verb === 'worktree') return args[0] === 'list';
     return false;
+}
+
+// Options of git branch and git tag that read the next word as their value,
+// and those that put either command in list mode as -l does, where a word is
+// a pattern rather than a name to create.
+const REF_LISTING_VALUE_OPTIONS = new Set([
+    '--sort', '--format', '--points-at', '--contains', '--no-contains', '--merged', '--no-merged',
+]);
+const REF_LIST_MODE_OPTIONS = new Set([
+    '-l', '--list', '--points-at', '--contains', '--no-contains', '--merged', '--no-merged',
+]);
+
+// Options by name (--sort=x is --sort, and branch -av is -a -v) and the words
+// that are not an option's value.
+function refListingWords(verb, args) {
+    const flags = [];
+    const positionals = [];
+    for (let i = 0; i < args.length; i += 1) {
+        const arg = args[i];
+        if (!arg.startsWith('-')) {
+            positionals.push(arg);
+            continue;
+        }
+        const name = arg.split('=', 1)[0];
+        if (verb === 'branch' && /^-[^-]/.test(name)) flags.push(...[...name.slice(1)].map((letter) => `-${letter}`));
+        else flags.push(name);
+        if (name === arg && REF_LISTING_VALUE_OPTIONS.has(name)) i += 1;
+    }
+    return { flags, positionals };
 }
 
 const GIT_TAG_MUTATING_FLAGS = new Set([
@@ -1080,9 +1159,14 @@ function dashedGitInvocation(tokens) {
 // A word the shell still expands can become an option. An unquoted $X or a
 // backtick splits into words wherever it stands, and the quotes are gone by
 // now; a brace expansion yields one only where it starts the word or follows
-// a dash ({--no-verify,}). @{u}, HEAD@{1} and {x} in a message cannot.
+// a dash ({--no-verify,}). @{u}, HEAD@{1} and {x} in a message cannot. A glob
+// becomes the names of matching files, and --no-ver*, -* or * can match one
+// named --no-verify; after --name= it only matches more of the same option.
 function mayExpandToOption(word) {
-    return /[$`]/.test(word) || (/^[-{]/.test(word) && /[{}]/.test(word));
+    const glob = word.startsWith('--') ? word.split('=', 1)[0] : word;
+    return /[$`]/.test(word)
+        || (/^[-{]/.test(word) && /[{}]/.test(word))
+        || (/^[-*?[]/.test(glob) && /[*?[]/.test(glob));
 }
 
 // push, merge and pull take --no-verify; pull hands it to merge. A push skips
@@ -1119,6 +1203,56 @@ const HOOK_SKIP_VALUE_OPTIONS = new Set([
     '-m', '-F', '--file', '-o', '--push-option', '--repo', '--receive-pack', '--exec',
     '-s', '--strategy', '-X', '--strategy-option', '--into-name',
 ]);
+
+// A command word the shell still expands can turn into Git and its arguments:
+// git${IFS}push, $G push, /usr/bin/gi? push, {git,push}, and =git in zsh. [
+// and [[ are the test commands and a lone { opens a brace group, so neither
+// counts. A literal last path segment names the program whatever the
+// directories before it expand to: "$VENV/bin/python" runs python.
+function commandWordExpands(word) {
+    const slash = word.lastIndexOf('/');
+    if (slash >= 0 && !/[$`*?[\]{}()=\\]/.test(word.slice(slash + 1))) return false;
+    return /^=|[$`*?]/.test(word) || inOrder(word, [/\[/, /\]/]) || inOrder(word, [/\{/, /,|\.\./, /\}/]);
+}
+
+// Subcommands that make or move commits and refs, or skip the hooks.
+const EXPANDED_GIT_VERBS = new Set([
+    'am', 'cherry-pick', 'commit', 'merge', 'notes', 'pull', 'push', 'rebase', 'replace',
+    'reset', 'revert', 'symbolic-ref', 'update-ref',
+]);
+
+// Whether an expanded command word can be Git. A glob or a brace expansion
+// picks a name the line does not show; a word that names git, or a variable
+// this line sets, can be it; so can a word on its own, which may expand to a
+// whole command, or one followed by Git's options and a subcommand that makes
+// commits, or by a hook bypass. Anything else, such as ${PYTHON:-python3}
+// -m pip install, runs another program.
+// shortcut: a variable an earlier command exported in a persistent shell can
+// still hold Git with arguments that look like another program's; the Git
+// hooks and CI remain the backstop there.
+function expandedWordMayRunGit(tokens, line) {
+    const word = tokens[0];
+    if (/[*?]/.test(word) || inOrder(word, [/\[/, /\]/]) || inOrder(word, [/\{/, /,|\.\./, /\}/])) return true;
+    if (/(?:^|[^a-z])git(?![a-z])/i.test(word)) return true;
+    const elsewhere = line.split(word).join(' ');
+    for (const [, name] of word.matchAll(/\$\{?[#!]?([A-Za-z_][A-Za-z0-9_]*)/g)) {
+        if (new RegExp(`(?:^|[^A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).test(elsewhere)) return true;
+    }
+    if (tokens.length === 1) return true;
+    if (tokens.slice(1).some((token) => /no-verify|hookspath|config-env/i.test(token))) return true;
+    let i = 1;
+    while (i < tokens.length && tokens[i].startsWith('-')) {
+        i += ['-c', '-C', ...GIT_GLOBAL_VALUE_OPTIONS].includes(tokens[i]) ? 2 : 1;
+    }
+    return EXPANDED_GIT_VERBS.has(tokens[i]);
+}
+
+// The variable printf -v NAME or -vNAME assigns, or null.
+function printfVariable(tokens) {
+    if (shellExecutable(tokens[0]) !== 'printf') return null;
+    if (tokens[1] === '-v') return tokens[2] ?? '';
+    return tokens[1]?.startsWith('-v') ? tokens[1].slice(2) : null;
+}
 
 function isGitExecutable(value) {
     const executable = String(value || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
@@ -1544,14 +1678,17 @@ function hasUncertainShellSyntax(command, { payload = false } = {}) {
             if (isBraceGroupToken(command, i)) return true;
             continue;
         }
+        // && and || only chain commands; neither is a pipe or a background job.
+        if ((char === '|' || char === '&') && command[i + 1] === char) {
+            i += 1;
+            continue;
+        }
         if (payload && char === '>' && command[i + 1] !== '(') continue;
         if (payload && char === '&' && (command[i - 1] === '>' || command[i + 1] === '>')) continue;
-        if (payload && char === '|' && (command[i - 1] === '|' || command[i + 1] === '|')) continue;
-        if (payload && char === '|' && command[i + 1] !== '|'
-            && SAFE_PIPE_EXECUTABLES.has(shellExecutable(shellWords(command.slice(i + 1))[0] ?? ''))) continue;
+        if (payload && char === '|'
+            && SAFE_PIPE_EXECUTABLES.has(shellExecutable(shellWords(command.slice(i + 1), 1)[0] ?? ''))) continue;
         if (char === '`' || char === '(' || char === ')' || char === '<' || char === '>') return true;
-        if (char === '|' && command[i + 1] !== '|') return true;
-        if (char === '&' && command[i + 1] !== '&' && command[i - 1] !== '&') return true;
+        if (char === '|' || char === '&') return true;
     }
     return shellUnits(command).some((unit) => {
         const words = shellWords(unit.text.trim());
@@ -1605,7 +1742,8 @@ export function hasUnquotedPipe(command) {
             continue;
         }
         if (char === "'" || char === '"') { quote = char; continue; }
-        if (char === '|' && command[i + 1] !== '|') return true;
+        if (char === '|' && command[i + 1] === '|') { i += 1; continue; }
+        if (char === '|') return true;
     }
     return false;
 }
@@ -2047,10 +2185,13 @@ function pipedShellCommitInvocations(source, initialCwd) {
 
 function dynamicLiteralCommitInvocations(command, initialCwd) {
     const commits = [];
+    const variable = /\$(?:[A-Za-z_@*]|[1-9])/;
     const variableExecution = (
-        /(?:^|[;&\n])\s*eval\b[^;&\n]*\$(?:[A-Za-z_][A-Za-z0-9_]*|[@*]|[1-9][0-9]*)/m.test(command)
-        || /\b(?:bash|dash|ksh|sh|zsh)\b[^;&\n]*-[A-Za-z]*c[^;&\n]*\$(?:[A-Za-z_][A-Za-z0-9_]*|[@*]|[1-9][0-9]*)/.test(command)
-        || /\bset\s+--[\s\S]*?(?:^|[;&\n])\s*["']?\$(?:@|\*)/m.test(command)
+        /(?:^|[;&\n])[^\S\n]*eval\b[^;&\n]*\$(?:[A-Za-z_][A-Za-z0-9_]*|[@*]|[1-9][0-9]*)/m.test(command)
+        || command.split(/[;&\n]/).some((segment) => (
+            inOrder(segment, [/\b(?:bash|dash|ksh|sh|zsh)\b/, /-[A-Za-z]*c/, variable])
+        ))
+        || inOrder(command, [/\bset\s+--/, /[;&\n][^\S\n]*["']?\$[@*]/])
     );
     if (variableExecution) {
         const details = literalCommitDetails(command, initialCwd);
@@ -2060,21 +2201,31 @@ function dynamicLiteralCommitInvocations(command, initialCwd) {
         }
     }
 
-    const definition = /(?:^|[;&\n])\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\s*\))?\s*\{([\s\S]*?)\}/gm;
-    for (const match of command.matchAll(definition)) {
-        const tail = command.slice(match.index + match[0].length);
-        const invoked = new RegExp(`(?:^|[;&\\n])\\s*${match[1]}(?:\\s|[;&]|$)`).test(tail);
-        if (!invoked) continue;
-        const parsed = parseGit(match[2], initialCwd);
+    // Where each name last starts a command, found in one pass, so a function
+    // is known to be called after its body without rescanning the rest.
+    const lastCall = new Map();
+    for (const call of command.matchAll(/(?:^|[;&\n}])[^\S\n]*([A-Za-z_][A-Za-z0-9_]*)(?=\s|[;&]|$)/g)) {
+        lastCall.set(call[1], call.index + call[0].length - call[1].length);
+    }
+    let targetChange;
+    const definition = new RegExp(SHELL_FUNCTION, 'g');
+    for (let match; (match = definition.exec(command));) {
+        // The body ends at the first }. With none left, no later body can end.
+        const close = command.indexOf('}', definition.lastIndex);
+        if (close < 0) break;
+        const body = command.slice(definition.lastIndex, close);
+        definition.lastIndex = close + 1;
+        if ((lastCall.get(match[1] ?? match[2]) ?? -1) < close) continue;
+        const parsed = parseGit(body, initialCwd);
         for (const candidate of parsed.commands.filter((entry) => entry.verb === 'commit')) {
+            targetChange ??= commandMayChangeShellTarget(command);
             commits.push({
                 cwd: candidate.cwd,
                 bypassHooks: candidate.bypassHooks || false,
                 environmentRisk: candidate.environmentRisk || [],
                 targetEnvironmentRisk: candidate.targetEnvironmentRisk || false,
                 explicitTargetOption: candidate.explicitTargetOption || false,
-                targetUncertain: candidate.targetUncertain
-                    || commandMayChangeShellTarget(command),
+                targetUncertain: candidate.targetUncertain || targetChange,
                 pathDialectUncertain: candidate.pathDialectUncertain || false,
             });
         }
@@ -2082,8 +2233,20 @@ function dynamicLiteralCommitInvocations(command, initialCwd) {
     return commits;
 }
 
+// Whether the patterns occur in this order in text. Each search starts where
+// the last one ended; one regex with [^;&\n]* between them was cubic.
+function inOrder(text, patterns) {
+    let rest = text;
+    for (const pattern of patterns) {
+        const found = pattern.exec(rest);
+        if (!found) return false;
+        rest = rest.slice(found.index + found[0].length);
+    }
+    return true;
+}
+
 function commandMayChangeShellTarget(command) {
-    return /(?:^|[;&\n{}])\s*(?:(?:builtin|command)\s+)?(?:(?:alias|autoload|cd|enable|eval|hash|popd|pushd|rehash|setopt|source|unalias|unfunction)\b|\.(?=\s|$))/m
+    return /(?:^|[;&\n{}])[^\S\n]*(?:(?:builtin|command)\s+)?(?:(?:alias|autoload|cd|enable|eval|hash|popd|pushd|rehash|setopt|source|unalias|unfunction)\b|\.(?=\s|$))/m
         .test(String(command || ''));
 }
 
@@ -2140,6 +2303,8 @@ function shellReadsStandardInput(tokens) {
 }
 
 function pipelineCommandConsumesCode(tokens) {
+    // A trailing | has no command after it; the shell refuses the whole line.
+    if (!tokens?.length) return false;
     if (shellReadsStandardInput(tokens)) return true;
     const nested = nestedShellPayload(tokens);
     if (nested === null) return false;
@@ -2400,6 +2565,18 @@ const PASSTHROUGH_PREFIXES = new Map([
     ['nohup', { values: [], operands: 0 }],
     ['prlimit', { values: ['-p', '--pid'], operands: 0 }],
     ['faketime', { values: ['-m', '-f'], operands: 1 }],
+    // sudo and doas run the same argv as another user, whose Git config and
+    // hooks need not be this repository's, so the target counts as uncertain.
+    ['sudo', {
+        values: [
+            '-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from',
+            '-D', '--chdir', '-r', '--role', '-t', '--type', '-T', '--command-timeout',
+            '-U', '--other-user', '-R', '--chroot',
+        ],
+        operands: 0,
+        otherUser: true,
+    }],
+    ['doas', { values: ['-u', '-C'], operands: 0, otherUser: true }],
 ]);
 const PASSTHROUGH_PREFIX_EXECUTORS = new Set(PASSTHROUGH_PREFIXES.keys());
 
@@ -2710,7 +2887,8 @@ export function unique(values) {
 // Minimal shell tokenizer for recognizing Git commands without executing or
 // expanding them. It preserves whitespace inside quotes and handles ordinary
 // backslash escapes; shell expansion remains intentionally out of scope.
-export function shellWords(s) {
+// limit stops it early for a caller that needs only the first words.
+export function shellWords(s, limit = Infinity) {
     const out = [];
     let word = '';
     let started = false;
@@ -2748,6 +2926,7 @@ export function shellWords(s) {
         } else if (/\s/.test(c)) {
             if (started) {
                 out.push(word);
+                if (out.length >= limit) return out;
                 word = '';
                 started = false;
             }
