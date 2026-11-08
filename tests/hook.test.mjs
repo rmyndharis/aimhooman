@@ -3635,6 +3635,8 @@ test('expanded command words and wrappers are refused only where they can run Gi
                 '${PYTHON:-python3} -m pip install requests',
                 '$PYTHON -m pytest -q',
                 'sudo git status',
+                '$TOOL push origin main',
+                '"$DOCKER" pull alpine:3',
             ]) {
                 assert.equal(
                     await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
@@ -3644,7 +3646,7 @@ test('expanded command words and wrappers are refused only where they can run Gi
             }
             for (const command of [
                 '$G push --no-verify origin main',
-                '$TOOL push origin main',
+                '$G push --no-veri origin main',
                 '$(which git) push origin main',
                 '$CMD',
                 'sudo git push --no-verify origin main',
@@ -3700,9 +3702,50 @@ test('Git commands configured in files and helper functions are read', async () 
         const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command: 'git log --oneline -1' } });
         assert.equal(out?.permissionDecision, 'deny');
         assert.match(out.permissionDecisionReason, /core\.pager/);
-        assert.equal(await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command: 'ls' } }), null);
+        // Whatever spells the call: the setting runs under any Git command.
+        const spelled = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command: "g''it log --oneline -1" } });
+        assert.equal(spelled?.permissionDecision, 'deny');
     } finally {
         rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// Each of these runs Git with its hooks skipped or repointed, through words
+// the shell builds at run time: a function's arguments, an array subscript zsh
+// evaluates, positional parameters, ANSI-C escapes, a wrapper's sh -c, or a
+// variable printf -v sets. The everyday commands beside them still pass.
+test('Git hidden behind arguments, subscripts, escapes or wrappers is refused', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-hidden-git-${profile}-`);
+        try {
+            for (const command of [
+                'f() { "$@" -q; }; f git -c core.hooksPath=/dev/null commit --allow-empty -m x',
+                'f() { "$@" -q; }; f git push --no-verify origin HEAD:main',
+                "printf -v 'a[$(git -c core.hooksPath=/dev/null commit --allow-empty -qm x)]' y",
+                "printf -vG 'git -c core.hooksPath=/dev/null commit --allow-empty'; $G -qm x",
+                'set -- git -c core.hooksPath=/dev/null commit --allow-empty -qm x; $1 $2 $3 $4 $5 $6 $7',
+                "$'\\x67it' -c core.hooks$'\\x50'ath=/dev/null $'\\x63'ommit --allow-empty -qm x",
+                'find . -maxdepth 0 -exec sh -c "g\'\'it push --no-verify origin HEAD:main" \\;',
+                'G=git; $G push origin main',
+            ]) {
+                const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(out?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                "git tag -l '*rc*' | sort -V",
+                "git branch --list '*fix*' | head",
+                'find . -type f -exec sh -c \'for f; do echo "$f"; done\' _ {} +',
+                'f() { npm test; }; f',
+            ]) {
+                assert.equal(
+                    await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                    null,
+                    `${profile}: ${command}`,
+                );
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     }
 });
 
@@ -3740,6 +3783,7 @@ test('large commands are decided in time proportional to their length', async ()
         `bash -c 'x${' | cat'.repeat(6000)}'`,
         `x ${'includeif.'.repeat(16000)}`,
         `x ${'a='.repeat(32000)}`,
+        '$a b;'.repeat(16000),
     ]) {
         const started = performance.now();
         parseGit(command);
