@@ -135,7 +135,20 @@ function parseGitLine(cmd, initialCwd) {
             if (exported.length) mergeGitRun(parseGit(text, shellCwd), shellCwd);
             continue;
         }
-        const unwrapped = unwrapCommand(words, shellCwd);
+        let unwrapped = unwrapCommand(words, shellCwd);
+        // time, timeout, nice and the like run the command after them with the
+        // same argv, so that command is unwrapped again, env and all.
+        for (let after = passthroughTarget(unwrapped.tokens); after; after = passthroughTarget(unwrapped.tokens)) {
+            const inner = unwrapCommand(after, unwrapped.cwd);
+            unwrapped = {
+                ...inner,
+                assignments: [...unwrapped.assignments, ...inner.assignments],
+                uncertain: unwrapped.uncertain || inner.uncertain,
+                pathDialectUncertain: unwrapped.pathDialectUncertain || inner.pathDialectUncertain,
+                targetUncertain: unwrapped.targetUncertain || inner.targetUncertain,
+                explicitTargetOption: unwrapped.explicitTargetOption || inner.explicitTargetOption,
+            };
+        }
         const toks = dashedGitInvocation(unwrapped.tokens) ?? unwrapped.tokens;
         uncertainShell ||= unwrapped.uncertain;
         let commandPathDialectUncertain = shellPathDialectUncertain
@@ -283,47 +296,6 @@ function parseGitLine(cmd, initialCwd) {
                     environmentRisk,
                     'git',
                 );
-                // A passthrough prefix (time, timeout, nice, ...) execs the inner
-                // command with the same argv in the same place, so it cannot
-                // inject a flag or hide a --no-verify the way eval/sudo/bash -c
-                // can. Re-parse the inner command from its `git` token so the
-                // commit is judged exactly as if the prefix were not there
-                // (--no-verify still denied, a clean commit still allowed). The
-                // carve-out only applies when nothing else injects risk;
-                // otherwise the wrapper falls back to the closed uncertain path.
-                const passthroughExecutable = PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(g0))
-                    && environmentRisk.length === 0
-                    && !targetEnvironmentRisk
-                    && !indirectTargetEnvironmentRisk
-                    && !commandTargetUncertain
-                    && !indirect.targetUncertain
-                    && !indirect.pathDialectUncertain
-                    && !commandPathDialectUncertain
-                    && !unwrapped.uncertain
-                    ? shellExecutable(g0)
-                    : null;
-                if (passthroughExecutable) {
-                    const gitIndex = toks.findIndex((token, index) => (
-                        index > 0 && isGitExecutable(token.replace(/^\(+/, '').replace(/\)+$/, ''))
-                    ));
-                    if (gitIndex > 0) {
-                        // The tokens have lost their quotes, so each is quoted
-                        // again: an apostrophe in a message must not open a
-                        // quote that swallows the rest of the line.
-                        const innerText = toks.slice(gitIndex)
-                            .map((token, index) => quoteShellWord(index === 0 ? token.replace(/^\(+/, '') : token))
-                            .join(' ');
-                        const inner = parseGit(innerText, unwrapped.cwd);
-                        commit ||= inner.commit;
-                        noVerify ||= inner.noVerify;
-                        bypassHooks ||= inner.bypassHooks;
-                        uncertainShell ||= inner.uncertainShell;
-                        addPaths.push(...inner.addPaths);
-                        commands.push(...inner.commands);
-                        sawAdd ||= inner.addPaths.length > 0;
-                        continue;
-                    }
-                }
                 commit = true;
                 uncertainShell = true;
                 commands.push({
@@ -947,10 +919,12 @@ const GIT_BRANCH_READONLY_FLAGS = new Set([
 
 export function gitCommandMayBypassRefGuard(verb, args = []) {
     if (verb !== 'push') return false;
-    return args.some((arg) => arg === '--receive-pack'
-        || arg === '--exec'
-        || arg.startsWith('--receive-pack=')
-        || arg.startsWith('--exec='));
+    // Git takes any unique prefix: --rece, --e.
+    return args.some((arg) => {
+        const name = arg.split('=', 1)[0];
+        return (name.length >= 6 && '--receive-pack'.startsWith(name))
+            || (name.length >= 3 && '--exec'.startsWith(name));
+    });
 }
 
 export function isProtectedMutation(candidate) {
@@ -1029,7 +1003,7 @@ const GIT_GLOBAL_VALUE_OPTIONS = new Set(['--namespace', '--shallow-file', '--at
 const GIT_GLOBAL_OPTIONS = new Set([
     ...GIT_GLOBAL_VALUE_OPTIONS,
     '-p', '--paginate', '-P', '--no-pager', '--bare', '--no-replace-objects', '--no-lazy-fetch',
-    '--no-optional-locks', '--no-advice', '--literal-pathspecs', '--glob-pathspecs',
+    '--no-optional-locks', '--no-advice', '--literal-pathspecs', '--no-literal-pathspecs', '--glob-pathspecs',
     '--noglob-pathspecs', '--icase-pathspecs', '--exec-path', '--html-path', '--man-path',
     '--info-path', '--list-cmds', '-v', '--version', '-h', '--help',
 ]);
@@ -1038,12 +1012,26 @@ function quoteShellWord(word) {
     return `'${String(word).replace(/'/g, "'\\''")}'`;
 }
 
+const KNOWN_GIT_VERBS = new Set([
+    ...SAFE_NON_COMMIT_GIT, ...GIT_REF_MUTATION_COMMANDS, ...GIT_POLICY_TRANSITION_COMMANDS,
+]);
+
 // Git's dashed programs (libexec/git-core/git-commit) run the same command as
 // `git commit`, so they are read in that form.
 function dashedGitInvocation(tokens) {
-    const executable = String(tokens[0] || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
-    const match = /^git-([a-z][a-z0-9-]*?)(?:\.exe)?$/.exec(executable);
-    return match ? ['git', match[1], ...tokens.slice(1)] : null;
+    const path = String(tokens[0] || '').replace(/\\/g, '/');
+    const match = /^git-([a-z][a-z0-9-]*?)(?:\.exe)?$/.exec(path.split('/').at(-1).toLowerCase());
+    // git-lfs, git-cliff and other tools named git-<name> are not Git.
+    if (!match || !(/\/git-core\//i.test(path) || KNOWN_GIT_VERBS.has(match[1]))) return null;
+    return ['git', match[1], ...tokens.slice(1)];
+}
+
+// A word the shell still expands can become an option. An unquoted $X or a
+// backtick splits into words wherever it stands, and the quotes are gone by
+// now; a brace expansion yields one only where it starts the word or follows
+// a dash ({--no-verify,}). @{u}, HEAD@{1} and {x} in a message cannot.
+function mayExpandToOption(word) {
+    return /[$`]/.test(word) || (/^[-{]/.test(word) && /[{}]/.test(word));
 }
 
 // push, merge and pull take --no-verify; pull hands it to merge. A push skips
@@ -1051,21 +1039,35 @@ function dashedGitInvocation(tokens) {
 // (--no-veri), while -n is --dry-run. merge and pull also have
 // --no-verify-signatures, so only the full spelling counts for them. A word
 // the shell still expands may become any of these.
-function hookSkipOptions(verb, args) {
+export function hookSkipOptions(verb, args) {
     if (!['push', 'merge', 'pull'].includes(verb)) return { noVerify: false, uncertain: false };
     let noVerify = false;
     let uncertain = false;
-    for (const arg of args) {
+    for (let i = 0; i < args.length; i += 1) {
+        const arg = args[i];
         if (arg === '--') break;
+        // A message or a push option is a value, never one of the flags.
+        if (HOOK_SKIP_VALUE_OPTIONS.has(arg)) {
+            i += 1;
+            continue;
+        }
         if (arg === '--verify') noVerify = false;
         else if (arg === '--no-verify'
             || (verb === 'push' && arg.length >= '--no-veri'.length && '--no-verify'.startsWith(arg))) {
             noVerify = true;
         }
-        uncertain ||= /[$`{}]/.test(arg);
+        uncertain ||= mayExpandToOption(arg);
     }
+    // merge and pull skip only hooks that strict alone requires, so there an
+    // expansion counts as --no-verify, not as a ref update nothing can verify.
+    if (verb !== 'push' && uncertain) return { noVerify: true, uncertain: false };
     return { noVerify, uncertain };
 }
+
+const HOOK_SKIP_VALUE_OPTIONS = new Set([
+    '-m', '-F', '--file', '-o', '--push-option', '--repo', '--receive-pack', '--exec',
+    '-s', '--strategy', '-X', '--strategy-option', '--into-name',
+]);
 
 function isGitExecutable(value) {
     const executable = String(value || '').replace(/\\/g, '/').split('/').at(-1).toLowerCase();
@@ -1215,6 +1217,9 @@ export function inspectCommitOptions(args) {
                 uncertain,
             };
         }
+        // An option word the shell still expands (--{no-verify,}, --$X) can
+        // become --no-verify as well.
+        if (arg.startsWith('-') && mayExpandToOption(arg)) uncertain = true;
         if (arg.startsWith('--')) {
             const separator = arg.indexOf('=');
             const spelling = arg.slice(2, separator < 0 ? undefined : separator);
@@ -1248,7 +1253,7 @@ export function inspectCommitOptions(args) {
         }
         // A word the shell still expands ($'...', $VAR, {a,b}, a backtick) can
         // become an option such as --no-verify; read as a pathspec it hid one.
-        uncertain ||= /[$`{}]/.test(arg);
+        uncertain ||= mayExpandToOption(arg);
         futureIndex = true;
     }
     return { noVerify, futureIndex, editorRisk: editorOverride ?? !messageSource, uncertain };
@@ -2329,10 +2334,40 @@ const UNCERTAIN_TARGET_INDIRECT_EXECUTORS = new Set([
 // judged like `git commit` instead of being refused as opaque indirection. The
 // carve-out only applies when nothing else is risky (no environment override,
 // no uncertain target); otherwise the wrapper falls back to the closed path.
-const PASSTHROUGH_PREFIX_EXECUTORS = new Set([
-    'time', 'timeout', 'nice', 'ionice', 'chrt', 'taskset', 'numactl',
-    'stdbuf', 'setsid', 'nohup', 'prlimit', 'faketime',
+// Prefixes that run the next command with the same argv: the options of
+// theirs that take a separate value, and how many operands come before it.
+const PASSTHROUGH_PREFIXES = new Map([
+    ['time', { values: ['-f', '--format', '-o', '--output'], operands: 0 }],
+    ['timeout', { values: ['-s', '--signal', '-k', '--kill-after'], operands: 1 }],
+    ['nice', { values: ['-n', '--adjustment'], operands: 0 }],
+    ['ionice', { values: ['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid'], operands: 0 }],
+    ['chrt', { values: [], operands: 1 }],
+    ['taskset', { values: [], operands: 1 }],
+    ['numactl', { values: ['-N', '-m', '-C', '-p', '-i'], operands: 0 }],
+    ['stdbuf', { values: ['-i', '-o', '-e'], operands: 0 }],
+    ['setsid', { values: [], operands: 0 }],
+    ['nohup', { values: [], operands: 0 }],
+    ['prlimit', { values: ['-p', '--pid'], operands: 0 }],
+    ['faketime', { values: ['-m', '-f'], operands: 1 }],
 ]);
+const PASSTHROUGH_PREFIX_EXECUTORS = new Set(PASSTHROUGH_PREFIXES.keys());
+
+// The command a passthrough prefix runs: what follows the prefix's own
+// options, the values they take and its operands (timeout's duration).
+function passthroughTarget(tokens) {
+    const prefix = PASSTHROUGH_PREFIXES.get(shellExecutable(tokens[0]));
+    if (!prefix) return null;
+    let i = 1;
+    while (i < tokens.length && tokens[i].startsWith('-') && tokens[i] !== '-') {
+        if (tokens[i] === '--') {
+            i += 1;
+            break;
+        }
+        i += prefix.values.includes(tokens[i]) ? 2 : 1;
+    }
+    i += prefix.operands;
+    return i < tokens.length ? tokens.slice(i) : null;
+}
 
 function indirectCommitInvocation(words, initialCwd) {
     if (!words.length) return false;

@@ -29,10 +29,11 @@ rather than claiming that content was checked.
 
 **Can the agent bypass it?** Any local tool can ultimately be bypassed by a user with
 commit access. The agent guard fails closed on what it cannot prove: empty, invalid,
-or non-object hook JSON, missing managed final guards, and hook or receive-pack
-indirection around protected ref mutations are denied on every profile, and `strict`
-additionally rejects `--no-verify`, unknown executor shapes, and uncertain commit
-execution. Read-only commands and pipelines run; the guard stands between the agent
+or non-object hook JSON, missing managed final guards, a push with `--no-verify`,
+and hook or receive-pack indirection around protected ref mutations are denied on
+every profile, and `strict` additionally rejects `--no-verify` on commits, merges
+and pulls, unknown executor shapes, and uncertain commit execution. Read-only
+commands and pipelines run; the guard stands between the agent
 and protected Git mutations, not between you and reading a repository. Git hooks are
 not a sandbox: an editor or another local program started during a commit has the same
 filesystem access and can change a later hook. Wrappers that can select another cwd or

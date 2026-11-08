@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every profile, and refuses any push while pre-push is not installed.
 - On `strict`, the agent guard refuses `git merge --no-verify` and
   `git pull --no-verify`.
+- The agent guard reads Git commands behind `time`, `timeout`, `nice` and
+  similar prefixes, and the push, merge and pull options an alias passes on, so
+  `time git push --no-verify` and an alias for `push` with `--no-verify` are
+  refused.
+- The agent guard refuses `git push --rece=` and `--ex=`, which Git takes as
+  `--receive-pack` and `--exec`.
 
 ### Fixed
 
