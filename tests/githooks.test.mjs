@@ -1200,6 +1200,10 @@ test('pushcheck scans pushed commits, vetoes residue, and stops on input it cann
             const deletion = pushcheckDirect(root, `refs/heads/old ${zero} refs/heads/old ${clean}\n`);
             assert.equal(deletion.status, 0, deletion.stderr);
 
+            // githooks(5): a local ref Git cannot name arrives as typed.
+            const spaced = pushcheckDirect(root, `main@{1 minute ago} ${clean} refs/heads/main ${parent}\n`);
+            assert.equal(spaced.status, 0, spaced.stderr);
+
             const malformed = pushcheckDirect(root, 'garbage\n');
             assert.equal(malformed.status, 30, malformed.stderr);
             assert.match(malformed.stderr, /malformed pre-push input/);
@@ -1345,6 +1349,41 @@ test('installed pre-push hook stops a vetoed dangling commit from reaching the r
             // Deletions sail through without the guard scanning anything.
             const del = spawnSync('git', ['push', 'local', ':refs/heads/never-existed'], { cwd: root, encoding: 'utf8' });
             assert.equal(del.status, 0, del.stderr);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// githooks(5): Git hands pre-push a local ref it cannot name as it was typed,
+// spaces included. Taking the second word for the local oid read `x  y` as a
+// deletion and let the push through unscanned.
+test('installed pre-push hook reads a local ref that holds spaces', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-pre-push-spaces-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const bare = join(base, 'remote.git');
+            execFileSync('git', ['init', '-q', '--bare', bare]);
+            git(root, ['remote', 'add', 'local', bare]);
+            // Committed before init and taken off the branch: only the reflog keeps it.
+            mkdirSync(join(root, '.claude'));
+            writeFileSync(join(root, '.claude', 'session.json'), '{"session":"local"}\n');
+            git(root, ['add', '-f', '.claude/session.json']);
+            git(root, ['commit', '-q', '-m', 'session  state']);
+            git(root, ['reset', '-q', '--hard', 'HEAD~1']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
+
+            const artifact = spawnSync('git', ['push', 'local', 'HEAD@{1}^{/session  state}:refs/heads/artifact'], {
+                cwd: root,
+                encoding: 'utf8',
+            });
+            assert.notEqual(artifact.status, 0, artifact.stderr);
+            assert.match(artifact.stderr, /rejected before any objects were sent/);
+            assert.doesNotMatch(git(bare, ['for-each-ref', '--format=%(refname)']), /artifact/);
+
+            const clean = spawnSync('git', ['push', 'local', 'HEAD^{/init ?ial}:refs/heads/clean'], { cwd: root, encoding: 'utf8' });
+            assert.equal(clean.status, 0, clean.stderr);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

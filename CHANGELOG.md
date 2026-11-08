@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diff that commit and range scans read.
 - Old content in a file whose path holds a space is no longer reported again by
   commit and range scans.
+- A UTF-16 file over the size limit is skipped for size, leaving the scan
+  incomplete, instead of being counted as binary.
+- Commit and range scans read UTF-16 files whole, so a marker on a changed line
+  is no longer missed where Git's line numbers do not match the text.
+- The commit-msg hook ignores the diff `git commit -v` adds below the scissors
+  line, honoring `core.commentChar` and `core.commentString`.
+- pre-push accepts a local ref with spaces, such as `main@{1 minute ago}`, and
+  scans a push whose local ref holds two spaces in a row; run `aimhooman init`
+  to update installed hooks.
+- `status` reports the strict profile HEAD's policy keeps over a weaker staged
+  one, and `check -m` reads the staged policy as the commit hooks do.
+- Incomplete-scan warnings escape control characters in skipped paths.
 - A committed `.aimhooman.json` this version cannot read no longer blocks the
   commit that repairs it, and `policy-review` can acknowledge it; a commit that
   carries it forward unchanged is scanned as strict instead of refused.

@@ -41,7 +41,7 @@ import { loadConfig, loadOverrides, loadProjectPolicy, normalizeOverrideTarget, 
 import { applyExclude, inspectExclude, managedPatterns, patternsForRules, removeExclude } from '../src/exclude.mjs';
 import { MANAGED_HOOKS, effectiveHooksDir, hookDiagnostics, installHooks, installGlobalHooks, uninstallGlobalHooks, globalHooksDir, installedHooks, remainingDispatchers, uninstallHooks, unrestoredChainedBackups } from '../src/githooks.mjs';
 import { ArgumentError, parseArguments } from '../src/args.mjs';
-import { engineForPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
+import { engineForPolicy, resolveStagedPolicy, scanGitTarget, scanMessage } from '../src/scan-target.mjs';
 import { resolvePolicy } from '../src/policy-resolver.mjs';
 import { atomicWrite, withLock } from '../src/atomic-write.mjs';
 import { commitParents, resolveCommit } from '../src/history-scan.mjs';
@@ -442,8 +442,9 @@ function cmdCommitmsg(args) {
         console.error(`aimhooman: could not read message file: ${e.message}; skipping commit-msg guard`);
         return 0;
     }
-    const text = messageBytes.toString('utf8');
-    const validUtf8 = Buffer.from(text, 'utf8').equals(messageBytes);
+    const cut = scissorsOffset(repo, messageBytes);
+    const text = messageBytes.subarray(0, cut).toString('utf8');
+    const validUtf8 = Buffer.from(text, 'utf8').equals(messageBytes.subarray(0, cut));
     const limits = scanLimits();
     let scan;
     let treeScan = null;
@@ -504,7 +505,7 @@ function cmdCommitmsg(args) {
         }
         try {
             atomicWrite(file + '.aimhooman-bak', messageBytes);
-            atomicWrite(file, cleaned);
+            atomicWrite(file, Buffer.concat([Buffer.from(cleaned), messageBytes.subarray(cut)]));
         } catch (e) {
             try { rmSync(file + '.aimhooman-bak', { force: true }); } catch { /* keep the write error */ }
             // blocks.length is always > 0 here: removed entries are block findings
@@ -521,6 +522,31 @@ function cmdCommitmsg(args) {
     return remaining.some((finding) => finding.decision === 'block') ? 10 : 0;
 }
 
+// Git cuts a message file at its scissors line, which `git commit -v` writes
+// above the diff it shows, so nothing from that line on reaches the commit.
+// The line opens with the comment string, which core.commentChar and
+// core.commentString both set; the last one read wins.
+function scissorsOffset(repo, bytes) {
+    if (!bytes.includes(' >8 ')) return bytes.length;
+    let comment = '#';
+    try {
+        const last = execFileSync('git', ['config', '-z', '--get-regexp', '^core\\.comment(char|string)$'], {
+            cwd: repo.root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: GIT_TIMEOUT_MS,
+        }).split('\0').filter(Boolean).at(-1);
+        if (last?.includes('\n')) comment = last.slice(last.indexOf('\n') + 1);
+    } catch { /* neither is set */ }
+    // auto picks one of these per commit. Cutting at the latest of their first
+    // lines never drops text Git keeps.
+    const framed = Buffer.concat([Buffer.from('\n'), bytes]);
+    const found = (/^auto$/i.test(comment) ? [...'#;@!$%^&|:'] : [comment])
+        .map((candidate) => framed.indexOf(`\n${candidate} ------------------------ >8 ------------------------\n`))
+        .filter((offset) => offset >= 0);
+    return found.length ? Math.max(...found) : bytes.length;
+}
+
 function cmdPushcheck(args) {
     parseNoArguments(args);
     let input;
@@ -530,14 +556,14 @@ function cmdPushcheck(args) {
         return 30;
     }
     // pre-push lines: <local ref> <local oid> <remote ref> <remote oid>. The
-    // local ref name is irrelevant (it is the raw oid for a dangling push);
-    // what matters is which objects are about to be published. Deletions
-    // (zero local oid) carry nothing and were already filtered by the
-    // dispatcher, but belt-and-braces here since pushcheck can be driven
-    // directly.
+    // local ref name is irrelevant (Git passes it as typed when it names no
+    // ref, so `main@{1 minute ago}` arrives with its spaces); what matters is
+    // which objects are about to be published. Deletions (zero local oid)
+    // carry nothing and were already filtered by the dispatcher, but
+    // belt-and-braces here since pushcheck can be driven directly.
     const updates = [];
     for (const line of input.split('\n').filter(Boolean)) {
-        const match = /^(\S+) (\S+) (\S+) (\S+)$/.exec(line);
+        const match = /^(.+) (\S+) (\S+) (\S+)$/.exec(line);
         if (!match) {
             console.error('aimhooman: malformed pre-push input; push stopped');
             return 30;
@@ -747,7 +773,7 @@ function cmdCheck(args) {
     try {
         if (o.message && !o.staged && !o.tracked) {
             scan = scanMessage(repo, messageText, {
-                target: 'worktree',
+                target: 'staged',
                 explicitProfile: o.profile,
             });
         } else {
@@ -1028,17 +1054,19 @@ function cmdStatus(args) {
         return 30;
     }
     let policy;
-    let stagedPolicy;
+    let staged;
     let overrides;
     try {
-        // `policy` describes the worktree file as written; `stagedPolicy` is the
-        // one the enforcing hooks actually read (they resolve from the index, so
-        // a worktree profile that has not been staged is invisible to them).
-        // Reporting the worktree value alone used to advertise a profile the
-        // guard was not applying, so the two are compared below and the
-        // mismatch is named when they disagree.
+        // `policy` describes the worktree file as written; `staged.policy` is
+        // the one the enforcing hooks actually apply (they resolve from the
+        // index, so a worktree profile that has not been staged is invisible
+        // to them, and HEAD's strict policy holds a weaker staged one at
+        // strict until a review records it). Reporting the worktree value
+        // alone used to advertise a profile the guard was not applying, so
+        // the two are compared below and the mismatch is named when they
+        // disagree.
         policy = resolvePolicy(repo, { target: 'worktree' });
-        stagedPolicy = resolvePolicy(repo, { target: 'staged' });
+        staged = resolveStagedPolicy(repo);
         overrides = loadOverrides(repo.stateDir);
     } catch (e) {
         console.error(`aimhooman: cannot load enforcement state: ${e.message}`);
@@ -1088,6 +1116,7 @@ function cmdStatus(args) {
         || resolved.source === 'staged-policy'
         || resolved.source === 'commit-policy'
     ) ? 'project' : resolved.source;
+    const stagedPolicy = staged.policy;
     const enforced = stagedPolicy.profile;
     const enforcedLabel = policyLabelOf(stagedPolicy);
     const worktreeLabel = policyLabelOf(policy);
@@ -1095,8 +1124,11 @@ function cmdStatus(args) {
         || policy.policy_object_id !== stagedPolicy.policy_object_id;
     console.log(`profile:  ${enforced}${policyDrift ? ` (worktree: ${policy.profile})` : ''}`);
     console.log(`policy:   ${enforcedLabel} (${stagedPolicy.source}, object=${stagedPolicy.policy_object_id || 'none'})${policyDrift ? `; worktree ${worktreeLabel} (${policy.source}, object=${policy.policy_object_id || 'none'})` : ''}`);
-    if (policyDrift) {
-        console.log(`warning:  worktree .aimhooman.json is not staged, so the hooks enforce the staged profile (${enforced}); run \`git add .aimhooman.json\` to apply ${policy.profile}`);
+    if (policy.profile !== staged.rawPolicy.profile || policy.policy_object_id !== staged.rawPolicy.policy_object_id) {
+        console.log(`warning:  worktree .aimhooman.json is not staged, so the hooks enforce ${enforced}; stage it with \`git add .aimhooman.json\``);
+    }
+    if (staged.floor) {
+        console.log("warning:  HEAD's .aimhooman.json holds the hooks at strict until `aimhooman policy-review` records the staged change");
     }
     console.log(`hooks:    ${hooksComplete ? installed.join(', ') : installed.length ? `${installed.join(', ')} (incomplete; run: aimhooman init)` : 'not installed (run: aimhooman init)'}`);
     for (const hook of hooks) {
@@ -1919,7 +1951,7 @@ Usage:
   aimhooman override reset [--allow|--deny|--all]
   aimhooman review <instruction-path> --head <commit> [--commit <source>] [--reason "..."]
   aimhooman policy-review --head <commit> (--staged|--transition <commit>) --old <oid> --new <oid|missing> [--reason "..."]
-  aimhooman fix [-m <file>|--message <file>] [--apply (strict only)]
+  aimhooman fix (-m <file>|--message <file>) [--apply (strict only)]
   aimhooman doctor
   aimhooman uninstall [--purge-state]
   aimhooman uninstall --global
