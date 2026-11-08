@@ -74,7 +74,7 @@ export function warnIncompleteOnce(repo, treeSha, scan) {
     process.stderr.write(incompleteMessage(scan, { blocking: false }));
 }
 
-// W5 pre-commit/commit-msg marker dedup. pre-commit writes a marker after a
+// pre-commit/commit-msg marker dedup. pre-commit writes a marker after a
 // clean, complete scan of the staged tree; commit-msg reads it and skips its
 // duplicate ~170ms tree scan when the staged tree sha, profile, and
 // completeness all match. The marker lives in stateDir (gitignored plumbing).

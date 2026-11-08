@@ -299,7 +299,7 @@ test('installedHooks executable and reachable filters are load-bearing', () => {
 
 test('install/uninstall honors a local-scope core.hooksPath once it is excluded', () => {
     // A team may set core.hooksPath at local scope to a worktree hooks dir.
-    // Since B2, a worktree hooks path is repository content in waiting (the next
+    // A worktree hooks path is repository content in waiting (the next
     // `git add` would stage the dispatcher's machine-local paths), so install
     // refuses until the path is excluded — proving the team intends it to stay
     // local. Once excluded, install writes dispatchers there (not .git/hooks),
@@ -339,8 +339,8 @@ test('install/uninstall honors a local-scope core.hooksPath once it is excluded'
 // first commit) is repository content in waiting — the next `git add` would
 // stage the dispatcher's machine-local absolute CLI/Node/PATH into history.
 // aimhooman must refuse to install into it until the team excludes the path.
-// Before B2, the guard only checked whether the path was already tracked, so an
-// untracked `.husky` got a dispatcher and B10a6's `git add -A && git commit`
+// The guard used to check only whether the path was already tracked, so an
+// untracked `.husky` got a dispatcher and a later `git add -A && git commit`
 // landed machine-local paths in the repo.
 test('an untracked worktree hooksPath is refused until excluded', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-untracked-hookspath-'));
@@ -360,7 +360,7 @@ test('an untracked worktree hooksPath is refused until excluded', () => {
             assert.equal(git(root, ['status', '--short']), '', 'refusal must not dirty the worktree');
 
             // A subsequent `git add -A` must not stage any dispatcher, because none
-            // was written. This is the B10a6 leak shape — it must not recur.
+            // was written; that is how machine-local paths reached the repo before.
             git(root, ['add', '-A']);
             assert.equal(git(root, ['status', '--short', '--untracked-files=all']), '');
         });
@@ -807,7 +807,7 @@ test('one hooks-directory lock serializes concurrent nested-repository installs'
     const outer = join(base, 'outer');
     const inner = join(outer, 'inner');
     // shared lives inside inner (and thus inside outer's worktree too), so both
-    // repos consider it inside their worktree. Since B2, a worktree hooksPath is
+    // repos consider it inside their worktree. A worktree hooksPath is
     // repository content in waiting unless excluded — and a shared hooks dir
     // used by two nested repos is exactly the "kept local" case that the exclude
     // opt-in covers, so both repos exclude it before pointing core.hooksPath at
@@ -860,7 +860,7 @@ process.stdout.write(JSON.stringify({ result, stateDir: repo.stateDir }));
         init(outer);
         init(inner);
         mkdirSync(shared);
-        // Exclude the shared hooks dir in both repos so B2's worktree-content
+        // Exclude the shared hooks dir in both repos so the worktree-content
         // guard treats it as intentionally local (the lock-contention scenario
         // is about shared local plumbing, not committed hooks).
         appendFileSync(join(outer, '.git', 'info', 'exclude'), 'inner/shared-hooks/\n');
@@ -1179,7 +1179,7 @@ function pushcheckDirect(root, input) {
     });
 }
 
-// Field test F-1: a commit vetoed by refcheck stays in the object store, and
+// A commit vetoed by refcheck stays in the object store, and
 // `git push <remote> <sha>:<ref>` used to publish it without any guard firing.
 // pushcheck closes that by scanning everything a push would introduce.
 test('pushcheck scans pushed commits, vetoes residue, and stops on input it cannot parse', () => {
@@ -2104,7 +2104,7 @@ test('a moved Node pin allows the operation when no Node exists to run the remed
     }
 });
 
-// Field test F-2: the commit-msg dispatcher greps the message for the
+// The commit-msg dispatcher greps the message for the
 // attribution anchors and skips the Node spawn when none is present. These
 // tests drive the dispatcher with a missing CLI: a skipped spawn stays silent,
 // a taken spawn hits the fail-open 'guard unavailable' path.
@@ -2176,7 +2176,7 @@ test('every built-in message rule carries a literal the commit-msg fast path gre
     }
 });
 
-// Field test F-2: pre-commit with a proven-empty index skips the Node spawn.
+// pre-commit with a proven-empty index skips the Node spawn.
 test('pre-commit fast path skips the Node spawn when nothing is staged', () => {
     const base = mkdtempSync(join(tmpdir(), 'aim-hooks-empty-index-'));
     try {
@@ -2230,7 +2230,7 @@ test('chained hook failure is returned without running the final guard', () => {
     }
 });
 
-// W5 pre-commit/commit-msg marker dedup. After a clean, complete pre-commit
+// pre-commit/commit-msg marker dedup. After a clean, complete pre-commit
 // scan, pre-commit records the staged tree sha so commit-msg can skip its
 // duplicate tree scan. These tests verify the marker is written on a clean
 // commit, NOT written when pre-commit blocks, and that a --no-verify commit

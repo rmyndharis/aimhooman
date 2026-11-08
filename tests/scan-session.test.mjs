@@ -213,9 +213,9 @@ test('git stderr from a passing blob read is captured, not printed', () => {
     }
 });
 
-// 12d-F1: scanEntries used to read the full blob, so a file that contained a
+// scanEntries used to read the full blob, so a file that contained a
 // flagged line ELSEWHERE (an AI-authored marker in a fixture string on line 10)
-// blocked a commit that only edited line 1. With hunk-narrowing (W4), only the
+// blocked a commit that only edited line 1. With hunk-narrowing, only the
 // changed line ranges reach checkContent, so an unrelated edit no longer trips
 // a marker that lives outside the diff. Entries here come from commitChanges,
 // which carries the parent commit needed to compute the changed hunks.

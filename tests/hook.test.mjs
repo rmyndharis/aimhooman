@@ -2648,7 +2648,7 @@ test('uncertain shell syntax remains advisory outside strict', async () => {
     }
 });
 
-// W1 (B-F1, B-F2): unquoted braces in a POSIX shell command were flagged as
+// Unquoted braces in a POSIX shell command were flagged as
 // opaque commit-hiding syntax, which denied read-only commands copied verbatim
 // from `gh`'s own docs — `gh api repos/{owner}/{repo}/pulls` — with no pipe, no
 // Git, and no commit. The closing probe is `ls {owner}`: not `gh`, not `git`,
@@ -2660,7 +2660,7 @@ test('uncertain shell syntax remains advisory outside strict', async () => {
 // non-POSIX executor path, the former via isBraceGroupToken.
 test('brace expansion is not opaque commit-hiding; brace groups and pwsh blocks are', () => {
     // Brace expansion in everyday read-only commands: none of these hide a
-    // commit or feed a pipe sink, so none are opaque. These are the B-F1 probes.
+    // commit or feed a pipe sink, so none are opaque.
     for (const command of [
         'gh api repos/{owner}/{repo}/pulls',          // P5c5 — the original complaint
         'gh api repos/owner/repo/pulls',              // P5c12 — baseline, no braces
@@ -2707,7 +2707,7 @@ test('brace expansion is not opaque commit-hiding; brace groups and pwsh blocks 
     }
 });
 
-// W1 (B-F2): the opaque deny message always named a pipe and `| bash` even when
+// The opaque deny message always named a pipe and `| bash` even when
 // the command had no pipe, sending the developer looking for a segment that did
 // not exist. The message is now conditional on whether a pipe is present.
 test('opaque deny message does not mention a pipe when the command has no pipe', async () => {

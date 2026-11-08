@@ -258,7 +258,7 @@ export function ignoredByPatterns(repo, pathspecs) {
 
 // stagedTreeSha writes the index to a tree object and returns its SHA, the same
 // value `git write-tree` produces in the commit-msg dispatcher. Used by the
-// pre-commit/commit-msg marker dedup (W5): pre-commit records this sha when it
+// pre-commit/commit-msg marker dedup: pre-commit records this sha when it
 // scans clean, and commit-msg skips its duplicate tree scan when the sha still
 // matches. The index is unchanged between the two hooks in a normal commit, so
 // the sha is stable; any staging mutation invalidates it automatically.
