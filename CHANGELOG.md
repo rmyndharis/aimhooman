@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The agent guard no longer refuses a command for an output redirect alone; a redirect into the hooks or `.git/config` still is.
+- A nested shell read in full, as in `bash -c 'npm test'`, is judged by what it runs.
+- A word holding a value in a push, as in `git push origin "$BRANCH"`, passes except on strict; a line that spells `--no-verify` stays refused.
+- A pager in a stored Git setting or in `GIT_PAGER` is no longer read as a pipeline.
+- Listings with an expanded pattern, `arr[0]=x`, `$GIT status` and `./$SCRIPT` are no longer refused.
+- Git behind `find -execdir`, `parallel` or `submodule foreach` is refused only when it skips the hooks.
+- Long chains of `env`, `nice`, `sudo` or assignments are decided quickly, and very large commands no longer crash the parser.
+
 ## [0.7.0] - 2026-11-08
 
 ### Security
