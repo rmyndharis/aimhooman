@@ -362,5 +362,11 @@ function collectLineRanges(repo, entries) {
             else byPath.set(currentPath, [range]);
         }
     }
+    // Ranges are kept per path, and a merge can add a path against one parent
+    // while it modifies it against another. Only modified files are narrowed,
+    // so a path any entry did not modify is scanned whole.
+    for (const entry of entries) {
+        if (entry.status !== 'M') byPath.delete(entry.path);
+    }
     return byPath;
 }
