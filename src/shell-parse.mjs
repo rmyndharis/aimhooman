@@ -124,6 +124,15 @@ export function normalizeAnsiCQuotes(command) {
     for (let i = 0; i < text.length; i += 1) {
         const char = text[i];
         if (quote) {
+            // A substitution inside double quotes reads its own quotes: it is passed
+            // on whole, and rewritten where it is parsed.
+            const end = quote === '"' ? nestedConstructEnd(text, i, 0, true) : null;
+            if (end !== null) {
+                if (end < 0) return out + text.slice(i);
+                out += text.slice(i, end + 1);
+                i = end;
+                continue;
+            }
             out += char;
             if (quote === '"' && char === '\\' && i + 1 < text.length) out += text[++i];
             else if (char === quote) quote = '';
@@ -131,6 +140,14 @@ export function normalizeAnsiCQuotes(command) {
         }
         if (char === '\\' && i + 1 < text.length) {
             out += char + text[++i];
+            continue;
+        }
+        // A comment holds quotes that open nothing; it is cut later, with the rest.
+        if (char === '#' && (i === 0 || /[\s;&|()<>]/.test(text[i - 1]))) {
+            const end = text.indexOf('\n', i);
+            if (end < 0) return out + text.slice(i);
+            out += text.slice(i, end);
+            i = end - 1;
             continue;
         }
         if (char === '$' && text[i + 1] === "'") {
@@ -178,6 +195,15 @@ export function stripShellComments(text) {
     for (let i = 0; i < text.length; i += 1) {
         const char = text[i];
         if (quote) {
+            // A substitution inside double quotes is a context of its own, with
+            // comments of its own: it is passed on whole, and cut where it is parsed.
+            const end = quote === '"' ? nestedConstructEnd(text, i, 0, true) : null;
+            if (end !== null) {
+                if (end < 0) return out + text.slice(i);
+                out += text.slice(i, end + 1);
+                i = end;
+                continue;
+            }
             out += char;
             if (char === '\\' && quote === '"' && i + 1 < text.length) out += text[++i];
             else if (char === quote) quote = '';
@@ -273,8 +299,13 @@ function parseGitLine(command, initialCwd, posix = true) {
             commands,
         };
     }
-    uncertainShell = hasUncertainShellSyntax(cmd);
     const substitutions = substitutionSpans(cmd, posix);
+    uncertainShell = hasUncertainShellSyntax(cmd) || substitutions.length > 0;
+    // The units are cut from the line with each substitution that holds a quote, a
+    // comment or a line break reduced to $(X): what is inside it is read on its
+    // own below, and must not change where the line around it splits or what is
+    // inside a quote.
+    const unitCmd = maskHazardousSubstitutions(cmd, substitutions);
     const substitutionRuns = substitutions.map(({ inner }) => (inner === null ? null : parseGit(dropDataHeredocs(inner), initialCwd)));
     // A substitution that was read, runs nothing that moves a ref or touches the
     // hooks, and feeds a program that takes data, as gh pr create --body "$(cat
@@ -282,14 +313,12 @@ function parseGitLine(command, initialCwd, posix = true) {
     // variable, when the line is asked what else in it is uncertain; the checks
     // that read the line one word at a time still see it.
     const settled = settledSubstitutions(cmd, substitutions, substitutionRuns);
-    const looseCmd = settled.size
-        ? maskSubstitutions(cmd, substitutions.filter((_, index) => settled.has(index)), '$AIMHSUB')
-        : cmd;
+    const looseCmd = settled.size ? looseLine(cmd, substitutions, settled) : unitCmd;
     // An output redirect cannot hide a commit, and a nested shell read in full
     // hides nothing. The line stays uncertain for the checks around a commit, but
     // only the rest of what makes it uncertain can make it opaque. A redirect
     // that lands on the hooks or the index is caught at the return below.
-    const redirectOnly = uncertainShell && !hasUnquotedPipe(cmd) && !hasUncertainShellSyntax(cmd, { payload: true });
+    const redirectOnly = uncertainShell && !hasUnquotedPipe(unitCmd) && !hasUncertainShellSyntax(unitCmd, { payload: true });
     let opaqueShell = uncertainShell && !redirectOnly;
     // What can run a command this parser never reads: a pipe into a program that
     // is not a text filter or tee, a script fed to one, a background job, eval. A
@@ -306,7 +335,7 @@ function parseGitLine(command, initialCwd, posix = true) {
     // the units go on to find marks both.
     const loose = { uncertain: uncertainShell, redirectOnly, opaque: opaqueShell, sink: opaqueSink };
     if (settled.size) {
-        loose.uncertain = hasUncertainShellSyntax(looseCmd);
+        loose.uncertain = hasUncertainShellSyntax(looseCmd) || substitutions.length > settled.size;
         loose.redirectOnly = loose.uncertain && !hasUnquotedPipe(looseCmd) && !hasUncertainShellSyntax(looseCmd, { payload: true });
         loose.opaque = loose.uncertain && !loose.redirectOnly;
         loose.sink = loose.opaque && hasUncertainShellSyntax(blankGroups(maskSubstitutions(looseCmd, substitutionSpans(looseCmd, posix))), {
@@ -344,7 +373,7 @@ function parseGitLine(command, initialCwd, posix = true) {
     const prefixTouchesHooks = (tokens, text, cwd) => commandMayTouchHooks(tokens, text)
         || (!FILE_READERS.has(shellExecutable(tokens[0])) && (insideGitDirectory(cwd)
             || (/[$`]/.test(text) && (assignedHooks ??= commandMayTouchHooks(
-                shellWords(cmd).filter(isAssignment).map((word) => word.slice(word.indexOf('=') + 1)),
+                shellWords(unitCmd).filter(isAssignment).map((word) => word.slice(word.indexOf('=') + 1)),
                 '',
             )))));
     let shellCwd = initialCwd;
@@ -393,11 +422,11 @@ function parseGitLine(command, initialCwd, posix = true) {
         // the program that runs it.
         if (kind === 'process' && ran.stdinCode) markUncertain();
     }
-    if (posix && heredocBodyLeaksQuote(cmd)) {
+    if (posix && heredocBodyLeaksQuote(unitCmd)) {
         markUncertain();
         commands.push(unreadableCommand(initialCwd));
     }
-    for (const unit of shellUnits(cmd)) {
+    for (const unit of shellUnits(unitCmd)) {
         const precedingOperator = previousOperator;
         previousOperator = unit.operator;
         const subshellState = shellSubshellState(unit.text);
@@ -1010,7 +1039,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         }
     }
     const indirectCommits = [
-        ...pipedShellCommitInvocations(cmd, initialCwd),
+        ...pipedShellCommitInvocations(unitCmd, initialCwd),
         ...dynamicLiteralCommitInvocations(cmd, initialCwd),
     ];
     for (const indirect of indirectCommits) {
@@ -1177,24 +1206,148 @@ function heredocBody(text, from, { delimiter, dash }) {
     return { end: text.length, after: text.length };
 }
 
+// How deep substitutions and expansions may nest inside quotes before the text
+// is given up on as unreadable, ahead of the stack.
+const MAX_NESTING = 64;
+
+// The index of the ` that closes a backtick substitution whose text starts at
+// `from`, or -1. The shell looks for the closing backtick first and reads what
+// is between afterwards, so a quote inside it opens nothing.
+function closingBacktick(text, from) {
+    for (let i = from; i < text.length; i += 1) {
+        if (text[i] === '\\') i += 1;
+        else if (text[i] === '`') return i;
+    }
+    return -1;
+}
+
+// The index of the ' that closes a $'...' string whose text starts at `from`, or
+// -1. Unlike a plain single quote it ends at the first ' no backslash escapes.
+function closingAnsiC(text, from) {
+    for (let i = from; i < text.length; i += 1) {
+        if (text[i] === '\\') i += 1;
+        else if (text[i] === "'") return i;
+    }
+    return -1;
+}
+
+// The index of the last character of the $( ), $(( )), ${ } or ` ` that starts
+// at text[at], or null when none does, or -1 when its end cannot be told. Inside
+// double quotes (and anywhere else) each is a context of its own: a quote in it
+// belongs to it.
+function nestedConstructEnd(text, at, nesting = 0, inDouble = false) {
+    if (text[at] === '`') return closingBacktick(text, at + 1);
+    if (text[at] !== '$') return null;
+    if (text[at + 1] === '{') return closingBrace(text, at + 2, inDouble, nesting + 1);
+    if (text[at + 1] !== '(') return null;
+    return text[at + 2] === '(' ? closingArithmetic(text, at + 3, nesting + 1) : closingParen(text, at + 2, nesting + 1);
+}
+
+// The index of the " that closes a double-quoted string whose text starts at
+// `from`, or -1. "$(echo "it's")" is one string, not a string, a word and an open
+// single quote.
+function closingQuote(text, from, nesting = 0) {
+    if (nesting > MAX_NESTING) return -1;
+    for (let i = from; i < text.length; i += 1) {
+        const char = text[i];
+        if (char === '\\') {
+            i += 1;
+            continue;
+        }
+        if (char === '"') return i;
+        const end = nestedConstructEnd(text, i, nesting, true);
+        if (end === null) continue;
+        if (end < 0) return -1;
+        i = end;
+    }
+    return -1;
+}
+
+// The index of the } that closes a ${ } expansion whose text starts at `from`, or
+// -1. A quote inside one that sits in double quotes is read differently from one
+// shell to the next ("${x:-"it's"}"), so it is given up on: the caller treats it
+// as unreadable.
+function closingBrace(text, from, inDouble, nesting = 0) {
+    if (nesting > MAX_NESTING) return -1;
+    for (let i = from; i < text.length; i += 1) {
+        const char = text[i];
+        if (char === '\\') {
+            i += 1;
+            continue;
+        }
+        if (char === '}') return i;
+        let end = nestedConstructEnd(text, i, nesting, inDouble);
+        if (char === '$' && text[i + 1] === "'" && !inDouble) end = closingAnsiC(text, i + 2);
+        if (char === "'" || char === '"') {
+            if (inDouble) return -1;
+            end = char === "'" ? text.indexOf("'", i + 1) : closingQuote(text, i + 1, nesting + 1);
+        }
+        if (end === null) continue;
+        if (end < 0) return -1;
+        i = end;
+    }
+    return -1;
+}
+
+// The index of the last ) of a $(( )) or (( )) whose text starts at `from`, just
+// after the two opening parentheses, or -1. Arithmetic holds no heredoc (1 << 2 is
+// a shift), and a line break in it is given up on: it may be two subshells.
+function closingArithmetic(text, from, nesting = 0) {
+    if (nesting > MAX_NESTING) return -1;
+    let depth = 2;
+    for (let i = from; i < text.length; i += 1) {
+        const char = text[i];
+        if (char === '\\') {
+            i += 1;
+            continue;
+        }
+        if (char === '\n') return -1;
+        let end = nestedConstructEnd(text, i, nesting, false);
+        if (char === '$' && text[i + 1] === "'") end = closingAnsiC(text, i + 2);
+        if (char === "'" || char === '"') end = char === "'" ? text.indexOf("'", i + 1) : closingQuote(text, i + 1, nesting + 1);
+        if (end === null) {
+            if (char === '(') depth += 1;
+            else if (char === ')') {
+                depth -= 1;
+                if (!depth) return i;
+            }
+            continue;
+        }
+        if (end < 0) return -1;
+        i = end;
+    }
+    return -1;
+}
+
 // The index of the ) that closes a substitution whose text starts at `from`, or
 // -1. A heredoc body is data to the matching: its quotes and parentheses open
-// and close nothing, so a commit message that says "don't" still closes.
-function closingParen(text, from) {
+// and close nothing, so a commit message that says "don't" still closes. A quote
+// opens a context of its own, with the substitutions in it, as the shell reads
+// it, and a comment ends at the line break whatever it holds.
+function closingParen(text, from, nesting = 0) {
+    if (nesting > MAX_NESTING) return -1;
     let depth = 1;
-    let quote = '';
     const pending = [];
     for (let i = from; i < text.length; i += 1) {
         const char = text[i];
-        if (quote) {
-            if (char === '\\' && quote === '"') i += 1;
-            else if (char === quote) quote = '';
-            continue;
-        }
         if (char === '\\') {
             i += 1;
         } else if (char === "'" || char === '"') {
-            quote = char;
+            const close = char === "'" ? text.indexOf("'", i + 1) : closingQuote(text, i + 1, nesting + 1);
+            if (close < 0) return -1;
+            i = close;
+        } else if (char === '$' && text[i + 1] === "'") {
+            const close = closingAnsiC(text, i + 2);
+            if (close < 0) return -1;
+            i = close;
+        } else if (char === '`' || (char === '$' && (text[i + 1] === '{' || (text[i + 1] === '(' && text[i + 2] === '(')))) {
+            const close = nestedConstructEnd(text, i, nesting, false);
+            if (close < 0) return -1;
+            i = close;
+        } else if (char === '(' && text[i + 1] === '(') {
+            const close = closingArithmetic(text, i + 2, nesting + 1);
+            if (close < 0) return -1;
+            i = close;
         } else if (char === '<' && text[i + 1] === '<') {
             const operator = heredocOperator(text, i);
             if (operator) {
@@ -1205,6 +1358,15 @@ function closingParen(text, from) {
             let at = i + 1;
             for (const operator of pending.splice(0)) at = heredocBody(text, at, operator).after;
             i = at - 1;
+        } else if (char === '#' && (i === from || /[\s;&|()<>]/.test(text[i - 1]))) {
+            const end = text.indexOf('\n', i);
+            if (end < 0) return -1;
+            i = end - 1;
+        } else if (char === 'c' && text.startsWith('case', i) && !/[\w-]/.test(text[i - 1] ?? ' ')
+            && CASE_STATEMENT.test(text.slice(i, i + 512))) {
+            // The ) that ends a case pattern closes nothing, and this count cannot
+            // tell which ) that is, so a case statement is given up on.
+            return -1;
         } else if (char === '(') {
             depth += 1;
         } else if (char === ')') {
@@ -1215,6 +1377,15 @@ function closingParen(text, from) {
     return -1;
 }
 
+const CASE_STATEMENT = /^case\s+\S+\s+in(?![\w-])/;
+
+// What follows the ( of a zsh glob qualifier that runs code: an e, then any
+// character that delimits the code. A function the qualifier calls, (+fn), is
+// defined in the line, where its body is read like any other command.
+const GLOB_QUALIFIER_CODE = /^[^)]*?(?:^|[^\w])e[^\w\s]/;
+// The flags of ${(...)x} when one of them is e, which evaluates the value.
+const ZSH_EVAL_FLAG = /^\([^)]*e[^)]*\)/;
+
 // The substitutions a line runs, $(...), `...`, <(...) and >(...), outermost
 // only: parsing each finds the ones inside it. A single quote keeps them text, a
 // double quote does not. Each is {start, end, inner} in the text, with inner null
@@ -1224,6 +1395,7 @@ function substitutionSpans(text, backticks = true) {
     const spans = [];
     const pending = [];
     let quote = '';
+    let arithmeticEnd = -1;
     for (let i = 0; i < text.length; i += 1) {
         const char = text[i];
         if (quote === "'") {
@@ -1275,8 +1447,30 @@ function substitutionSpans(text, backticks = true) {
             i = end;
             continue;
         }
+        // "${x:-"it's"}" is read differently from one shell to the next, and the
+        // quotes in it would pair differently here: it cannot be read.
+        if (char === '$' && text[i + 1] === '{' && quote === '"' && closingBrace(text, i + 2, true) < 0) {
+            spans.push({ start: i, end: text.length, inner: null, kind: 'command' });
+            break;
+        }
+        // Arithmetic is read for the substitutions in it, but 2*(e+1) in it is no
+        // glob qualifier.
+        if (!quote && ((char === '$' && text[i + 1] === '(' && text[i + 2] === '(')
+            || (char === '(' && text[i + 1] === '(' && (i === 0 || /[\s;&|(){]/.test(text[i - 1]))))) {
+            arithmeticEnd = closingArithmetic(text, i + (char === '$' ? 3 : 2));
+        }
+        // zsh runs the code of a glob qualifier, *(e:cmd:), and of the flag e in
+        // ${(e)x}. Neither is a command this parser reads.
+        if ((char === '(' && !quote && i > arithmeticEnd && /[*?\])]/.test(text[i - 1] ?? '')
+                && GLOB_QUALIFIER_CODE.test(text.slice(i + 1, i + 257)))
+            || (char === '$' && text[i + 1] === '{' && ZSH_EVAL_FLAG.test(text.slice(i + 2, i + 40)))) {
+            spans.push({ start: i, end: text.length, inner: null, kind: 'command' });
+            break;
+        }
+        // =( ) at the start of a word is zsh's process substitution into a file.
         const opens = text[i + 1] === '(' && text[i + 2] !== '('
-            && (char === '$' || (!quote && (char === '<' || char === '>')));
+            && (char === '$' || (!quote && (char === '<' || char === '>'
+                || (char === '=' && (i === 0 || /[\s;&|(){]/.test(text[i - 1]))))));
         if (!opens) continue;
         // $( ) and backticks hand their output to the line as text; <( ) and >( )
         // hand a file, or a pipe into a program.
@@ -1315,6 +1509,46 @@ function blankGroups(text) {
     return out;
 }
 
+// The line with each substitution whose text holds a quote, a backslash, a #
+// or a line break reduced to its delimiters around a plain word: $(X), `X`, <(X).
+// Such text changes how a splitter that tracks quotes without nesting reads the
+// rest of the line ("$(echo "it's")" leaves a single quote open). The others
+// are left as they are.
+function maskHazardousSubstitutions(text, spans) {
+    let out = '';
+    let at = 0;
+    for (const span of spans) {
+        if (span.inner === null || span.start < at || !/["'\\#\n]/.test(span.inner)) continue;
+        const ticks = text[span.start] === '`';
+        out += `${text.slice(at, span.start)}${ticks ? '`' : text.slice(span.start, span.start + 2)}X${ticks ? '`' : ')'}`;
+        at = span.end;
+    }
+    return at ? out + text.slice(at) : text;
+}
+
+// The line with each settled substitution replaced by a plain word, and each
+// other that holds a quote, a comment or a line break reduced to its delimiters.
+function looseLine(text, spans, settled) {
+    let out = '';
+    let at = 0;
+    for (const [index, span] of spans.entries()) {
+        if (span.inner === null || span.start < at) continue;
+        const hazardous = /["'\\#\n]/.test(span.inner);
+        if (!settled.has(index) && !hazardous) continue;
+        const ticks = text[span.start] === '`';
+        out += `${text.slice(at, span.start)}${settled.has(index) ? '$AIMHSUB' : `${ticks ? '`' : text.slice(span.start, span.start + 2)}X${ticks ? '`' : ')'}`}`;
+        at = span.end;
+    }
+    return at ? out + text.slice(at) : text;
+}
+
+// The units of a line as parseGit cuts them.
+export function lineUnits(command, posix = true) {
+    const normalized = normalizeAnsiCQuotes(command);
+    const text = posix ? stripShellComments(normalized) : normalized;
+    return shellUnits(maskHazardousSubstitutions(text, substitutionSpans(text, posix)));
+}
+
 // The line with every substitution that was read replaced by a plain word, to
 // ask what else in it is opaque.
 function maskSubstitutions(text, spans, word = 'X') {
@@ -1341,26 +1575,35 @@ function readsOnly(run) {
 // writes no file of its own: a redirect can name a path the substitution builds.
 function feedsData(unitText) {
     const words = unwrapShellControl(stripCommandGrouping(unwrapShellControl(shellWords(unitText.trim())).tokens)).tokens;
-    let at = 0;
-    while (at < words.length && isAssignment(words[at])) at += 1;
-    const program = words[at];
-    return Boolean(program) && !/[$`(]/.test(program) && DATA_ARGUMENT_PROGRAMS.has(shellExecutable(program))
+    // An assignment in front is an environment the program may act on (LESSOPEN,
+    // PAGER), not an argument.
+    const program = words[0];
+    return Boolean(program) && !isAssignment(program) && !/[$`(]/.test(program) && DATA_ARGUMENT_PROGRAMS.has(shellExecutable(program))
         && redirectTargets(unitText).every((target) => target === '/dev/null');
 }
 
-// The indexes of the substitutions that only supply text. A substitution that
-// no unit holds whole, because it spans a separator, is not one; nor is any in
-// a line with more substitutions or units than a command line has.
+// The indexes of the substitutions that only supply text. The units are read
+// with every substitution replaced by a marker word, so the quotes inside a
+// substitution cannot change what the line around it is: a substitution is
+// settled when every unit that holds it passes its words to a program that takes
+// data. None is settled in a line with more substitutions or units than a
+// command line has.
 function settledSubstitutions(cmd, spans, runs) {
     const settled = new Set();
     if (!spans.length || spans.length > 64) return settled;
-    const units = shellUnits(cmd);
+    let masked = '';
+    let at = 0;
+    for (const [index, span] of spans.entries()) {
+        if (span.inner === null || span.start < at) continue;
+        masked += `${cmd.slice(at, span.start)}$AIMHSUB${index}X`;
+        at = span.end;
+    }
+    const units = shellUnits(masked + cmd.slice(at));
     if (units.length > 2000) return settled;
     for (const [index, span] of spans.entries()) {
         const run = runs[index];
         if (span.kind !== 'command' || !run || !readsOnly(run)) continue;
-        const text = cmd.slice(span.start, span.end);
-        const holders = units.filter((unit) => unit.text.includes(text));
+        const holders = units.filter((unit) => unit.text.includes(`$AIMHSUB${index}X`));
         if (holders.length && holders.every((unit) => feedsData(unit.text))) settled.add(index);
     }
     return settled;
@@ -1458,6 +1701,13 @@ function dropDataHeredocs(text) {
     for (let i = 0; i < text.length; i += 1) {
         const char = text[i];
         if (quote) {
+            // A substitution inside double quotes reads its own quotes.
+            const end = quote === '"' ? nestedConstructEnd(text, i, 0, true) : null;
+            if (end !== null) {
+                if (end < 0) return text;
+                i = end;
+                continue;
+            }
             if (char === '\\' && quote === '"') i += 1;
             else if (char === quote) quote = '';
             continue;

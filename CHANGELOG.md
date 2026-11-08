@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A script written with `echo`, `printf` or `tee` and run in the same line, as in `echo '...' > r.sh && sh r.sh`, is read before it runs.
 - A process substitution that feeds a shell, as in `tee >(sh)` and `bash <(...)`, is refused beside a Git command.
 - A quote left open in a heredoc body, as in `echo it's`, no longer hides the commands after the terminator from the agent guard.
+- A quote, `#` comment or line break inside a `$( )` or backtick substitution no longer hides the commands after it from the agent guard, as in `echo "$(echo "it's")" ; git push --no-verify origin wip`. Text the guard cannot follow there (a `case` statement, a multi-line `$(( ))`, a quoted `${x:-"..."}`) is refused.
+- zsh code behind `=( )`, a glob qualifier such as `*(e:cmd:)` and the `e` flag of `${(e)x}` is read or refused, so it can no longer carry a push that skips the hooks past the agent guard.
 - A harmless Git command such as `git add` beside a pipe into a shell no longer lets that pipe through.
 - `-c hook.<name>.command`, `-c protocol.ext.allow` and `-c protocol.allow` are refused for every Git command, and a stored config hook stops Git commands until it is removed.
 - Hook and config paths count however they are spelled: `.git//hooks`, `.git/./hooks`, `.git/[h]ooks`, the `.git` directory, a global gitconfig, or a path after `cd .git`.
