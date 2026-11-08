@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--receive-pack` and `--exec`.
 - The agent guard reads a `$'...'` string the way the shell does, so an
   escaped quote inside one (`$'\''`) no longer hides the command after it.
+- The agent guard reads the command in a `case` branch, so
+  `case x in x) git push --no-verify origin main;; esac` is refused like the
+  command on its own.
 
 ### Fixed
 

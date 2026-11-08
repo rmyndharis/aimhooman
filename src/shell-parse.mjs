@@ -722,9 +722,17 @@ const CURRENT_SHELL_MUTATORS = new Set([
 export function unwrapShellControl(input) {
     const tokens = [...input];
     let uncertain = false;
-    while (SHELL_CONTROL_PREFIXES.has(tokens[0])) {
+    for (;;) {
+        if (SHELL_CONTROL_PREFIXES.has(tokens[0])) {
+            tokens.shift();
+        } else if (tokens[0] === 'case' && tokens[2] === 'in') {
+            // case WORD in PATTERN) COMMAND runs the command like any other.
+            tokens.splice(0, 3);
+        } else if (tokens.length > 1 && /^\(?[^()]*\)$/.test(tokens[0])) {
+            // A case pattern such as a), *) or x|y) ahead of its command.
+            tokens.shift();
+        } else break;
         uncertain = true;
-        tokens.shift();
     }
     return { tokens, uncertain };
 }
