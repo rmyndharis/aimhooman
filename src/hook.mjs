@@ -408,14 +408,22 @@ function hookPreToolUse(input) {
                 );
             }
             // The same holds for a push without pre-push: nothing after it sees
-            // the objects leave.
-            if (gitCommand.verb === 'push' && gitCommand.noVerify) {
+            // the objects leave. A word the shell expands counts when the line
+            // itself spells the option: X=--no-verify; git push origin "$X".
+            if (gitCommand.verb === 'push'
+                && (gitCommand.noVerify || (gitCommand.expansionMaySkipHooks && executorCommand.includes('--no-ver')))) {
                 return emitDecision(
                     'deny',
                     'aimhooman cannot verify a push that skips the managed pre-push guard (--no-verify); push without it.'
                 );
             }
             if (targetProfile !== 'strict') continue;
+            if (gitCommand.expansionMaySkipHooks) {
+                return emitDecision(
+                    'deny',
+                    `aimhooman strict profile cannot verify git ${gitCommand.verb} when a word the shell expands could become --no-verify; write the value out.`
+                );
+            }
             if (parsed.uncertainShell || gitCommand.classification === 'uncertain') {
                 return emitDecision(
                     'deny',
@@ -1007,6 +1015,7 @@ function resolveAliasCandidate(candidate) {
                     prefixMutationRisk,
                     noVerify: skip.noVerify,
                     bypassHooks,
+                    expansionMaySkipHooks: skip.expanded,
                     classification: skip.uncertain ? 'uncertain' : 'non-commit',
                 };
             }

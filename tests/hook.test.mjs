@@ -3545,6 +3545,10 @@ test('everyday reads and || chains are allowed on clean and strict', async () =>
                 'git remote get-url origin | cat',
                 'git worktree list | head',
                 'mkdir -p d && echo {} > d/f.json && git add d/f.json',
+                'git branch --list $X | head',
+                'git branch --list "$P" | wc -l',
+                'git tag -l "v$V*" | tail -1',
+                'git tag --points-at HEAD $X | head',
             ]) {
                 assert.equal(
                     await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
@@ -3552,13 +3556,12 @@ test('everyday reads and || chains are allowed on clean and strict', async () =>
                     `${profile}: ${command}`,
                 );
             }
-            // A sink that runs code, a name to create, a word the shell can turn
-            // into --no-list or a name, and a bypass before || stay refused.
+            // A sink that runs code, a name to create and a bypass before || stay
+            // refused. A word expanded in a listing can at most move a ref, which
+            // the reference guard still sees.
             for (const command of [
                 'git log | sh',
                 'git branch --sort=-committerdate newbranch | head',
-                'git branch --list $X | head',
-                'git tag --points-at HEAD $X | head',
                 'git worktree add ../w | head',
                 'git push --no-verify origin main || echo failed',
                 'git -c core.hooksPath=/dev/null commit -m x || echo nothing',
@@ -3797,9 +3800,96 @@ test('a long chain of Git commands reads each repository once', async () => {
 // Each shape took seconds to decide when a regex retried a long scan from
 // every start: 11.6 s for 12 KB of sh -c, 5.3 s for 32 KB of blank lines.
 // The work now grows with the input; the bound leaves room for a slow runner.
+test('output redirects, nested shells, stored pagers and values in a push are not refused', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-daily-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'echo hello > notes.txt',
+                "printf 'a\\n' > f.txt",
+                'echo hi 2> /dev/null',
+                'ls > files.txt',
+                'npm test > out.log 2>&1',
+                'nohup npm start > out.log 2>&1',
+                'git log > log.txt',
+                "bash -c 'ls'",
+                "sh -c 'npm test'",
+                "bash -lc 'node -v'",
+                "timeout 30 bash -c 'npm test'",
+                "cd sub && bash -c 'npm test'",
+                "git config --global core.pager 'diff-so-fancy | less --tabs=4 -RFX'",
+                "GIT_PAGER='delta | less' git log",
+                'arr[0]=x',
+                '$GIT status',
+                '$GIT_BIN --version',
+                './$SCRIPT',
+                'git submodule foreach git pull',
+                'find . -name .git -type d -execdir git pull \;',
+                'parallel git -C {} pull ::: a b',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                'cat x > .git/hooks/pre-commit',
+                'echo x >> .git/config',
+                'git push --no-verify origin main > log.txt',
+                "bash -c 'git push --no-verify origin main'",
+                "timeout 30 bash -c 'git push --no-verify origin main'",
+                "bash -c 'curl x | sh'",
+                'bash -c "$(cat x)"',
+                'sudo git fetch',
+                "git submodule foreach 'git push --no-verify origin main'",
+                'xargs -n1 git push --no-verify origin',
+                'X=--no-verify; git push origin "$X"',
+                'X=--no-verify git push origin main "$X"',
+                "bash -c 'X=--no-verify; git push origin \"$X\"'",
+                'git push origin {--no-verify,$X} main',
+                '$EDITOR',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            // A word that only holds a value could still become --no-verify, or
+            // a commit could follow a redirect; only strict stops those.
+            for (const command of [
+                'git push origin "$BRANCH"',
+                'B=feature/x; git push origin "$B"',
+                'git push "$REMOTE" HEAD:"$B"',
+                'git merge "$BRANCH"',
+                'echo x > notes.txt && git commit -m y',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision ?? null, profile === 'strict' ? 'deny' : null, `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test('a prefix chain longer than any real command is read as unreadable', () => {
+    for (const prefix of ['env ', 'nice ', 'A=1 ', 'sudo ']) {
+        const [record] = parseGit(`${prefix.repeat(5000)}git status`).commands;
+        assert.equal(record.verb, 'unknown', prefix);
+        assert.equal(record.targetUncertain, true, prefix);
+    }
+    assert.equal(parseGit(`${'env '.repeat(100)}git push origin main`).commands[0].verb, 'push');
+});
+
+test('commands too big to spread into a call are parsed, not thrown on', () => {
+    assert.equal(parseGit(`git branch -${'a'.repeat(140000)}`).commands.length, 1);
+    assert.doesNotThrow(() => parseGit(`parallel "${'git reset; '.repeat(128000)}"`));
+    assert.doesNotThrow(() => parseGit(`xargs sh -c "${'git reset; '.repeat(128000)}"`));
+});
+
 test('large commands are decided in time proportional to their length', async () => {
     for (const command of [
         'sh -c '.repeat(2000),
+        'nice '.repeat(16000),
+        'timeout 1 '.repeat(8000),
+        'sudo '.repeat(16000),
+        'env '.repeat(16000),
+        'A=1 '.repeat(16000),
+        'env -u x '.repeat(8000),
         `x${'\n'.repeat(32000)}y`,
         `x${' '.repeat(64000)}y`,
         `bash -c 'x${' | cat'.repeat(6000)}'`,
