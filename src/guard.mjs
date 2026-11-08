@@ -191,7 +191,9 @@ export function resolveIntroduced(repo, updates, { includeStagedContexts = true,
     const localAuthorTips = new Set();
     for (const update of updates) {
         const introduced = introducedCommits(repo, [update], { firstBranchFromRemotes });
+        // A forced move onto a fetched commit is not a commit made here.
         if (!/^0+$/.test(update.oldObjectId)
+            && !update.forced
             && introduced.length === 1
             && introduced[0] === update.newObjectId) {
             localAuthorTips.add(update.newObjectId);

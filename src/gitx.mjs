@@ -542,6 +542,12 @@ export function introducedCommits(repo, updates, { firstBranchFromRemotes = fals
             .trim()
             .split('\n')
             .filter(Boolean);
+        // Nothing guards refs/remotes, so the tip's own change is checked even
+        // when a remote-tracking ref holds it, as a clone always was.
+        if (firstBranchFromRemotes && !gated.length && /^0+$/.test(oldObjectId)
+            && !resolved.includes(newObjectId)) {
+            resolved.push(newObjectId);
+        }
         for (const commit of resolved) {
             if (!seen.has(commit)) {
                 seen.add(commit);
@@ -565,15 +571,17 @@ function objectExists(repo, oid) {
 }
 
 // refObjectId returns the object a ref holds, or null when the ref does not
-// exist. Any other failure throws, so callers stay closed.
+// exist. The name must match exactly: for a missing branch rev-parse goes on
+// to guess refs/tags/<ref> and the like. Any other failure throws.
 export function refObjectId(repo, ref) {
-    try {
-        return gitBuf(['rev-parse', '--verify', '--quiet', '--end-of-options', ref], repo.root)
-            .toString('utf8').trim();
-    } catch (error) {
-        if (error?.status === 1) return null;
-        throw error;
+    const listed = gitBuf(['for-each-ref', '--format=%(refname) %(objectname)', ref], repo.root)
+        .toString('utf8')
+        .split('\n');
+    for (const line of listed) {
+        const at = line.lastIndexOf(' ');
+        if (at > 0 && line.slice(0, at) === ref) return line.slice(at + 1);
     }
+    return null;
 }
 
 // gitConfig returns a git config value, or '' if unset.

@@ -1618,12 +1618,23 @@ test('a forced move or a recreation of the only branch scans every commit it bri
         assert.match(moved.stderr, /claude\.local-settings/);
         assert.equal(git(repo, ['rev-parse', branch]), base);
 
+        // A tag named after the missing branch must not stand in for it.
+        git(repo, ['update-ref', `refs/tags/refs/heads/${branch}`, artifact]);
         git(repo, ['update-ref', '-d', `refs/heads/${branch}`]);
         const recreated = spawnSync('git', ['update-ref', `refs/heads/${branch}`, tip], {
             cwd: repo.root, env: repo.env, encoding: 'utf8',
         });
         assert.notEqual(recreated.status, 0, 'recreating the only branch must still scan its commits');
         assert.match(recreated.stderr, /claude\.local-settings/);
+
+        // Nothing guards refs/remotes, so a branch created at a commit one holds
+        // still has its tip checked.
+        git(repo, ['update-ref', 'refs/remotes/origin/feature', artifact]);
+        const fromRemote = spawnSync('git', ['update-ref', `refs/heads/${branch}`, artifact], {
+            cwd: repo.root, env: repo.env, encoding: 'utf8',
+        });
+        assert.notEqual(fromRemote.status, 0, 'the tip of a first branch is always scanned');
+        assert.match(fromRemote.stderr, /claude\.local-settings/);
     } finally {
         cleanup(repo);
     }
