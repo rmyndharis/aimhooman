@@ -21,8 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `core.sshCommand`, `core.fsmonitor`, `credential.helper` and the like),
   variables such as `GIT_EXTERNAL_DIFF` and `GIT_SSH_COMMAND`, `ext::` URLs and
   values stored with `git config` the same way.
-- A credential helper written as a shell function on the command line is
-  refused, since the guard cannot read it.
 - The agent guard refuses a commit after a command that names `.git/config`,
   which can repoint the hooks.
 - The agent guard refuses a commit after `echo` or `printf` writes into the

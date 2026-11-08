@@ -6,9 +6,59 @@
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 
+// Each nested payload (sh -c, rebase --exec, a command-valued variable) is
+// parsed again. Real commands nest a few levels; past this many the line is
+// refused rather than read, before deep nesting exhausts the stack.
+const MAX_PARSE_DEPTH = 16;
+let parseDepth = 0;
+
 // parseGit inspects a shell command line for staged-path, commit, policy-transition,
 // and branch/reference operations that need an agent-side guard decision.
 export function parseGit(cmd, initialCwd = process.cwd()) {
+    if (parseDepth >= MAX_PARSE_DEPTH) {
+        return {
+            commit: false,
+            noVerify: false,
+            bypassHooks: false,
+            uncertainShell: true,
+            opaqueCommitHiding: true,
+            classification: 'uncertain',
+            environmentRisk: [],
+            prefixRisk: true,
+            prefixHooksRisk: true,
+            addPaths: [],
+            commands: [unreadableCommand(initialCwd)],
+        };
+    }
+    parseDepth += 1;
+    try {
+        return parseGitLine(cmd, initialCwd);
+    } finally {
+        parseDepth -= 1;
+    }
+}
+
+// A command the parser cannot read, refused wherever it appears.
+function unreadableCommand(cwd) {
+    return {
+        verb: 'unknown',
+        subcommand: '',
+        args: [],
+        cwd,
+        environmentRisk: [],
+        prefixRisk: true,
+        policyTransitionRisk: true,
+        targetUncertain: true,
+        classification: 'unknown',
+    };
+}
+
+// Shapes in a payload that run a command the parser never sees: a pipe into
+// a shell, an interpreter or xargs, command or process substitution, eval and
+// source. A plain nested sh -c or a redirect is read like any other line.
+const HIDDEN_COMMAND = /\$\(|`|[<>]\(|\|\s*(?:[^\s|;&]*\/)?(?:xargs|parallel|sh|bash|dash|zsh|ksh|fish|python[\d.]*|node|perl|ruby|php)\b|(?:^|[\s;&|(])(?:eval|source|\.)\s/;
+
+function parseGitLine(cmd, initialCwd) {
     let commit = false;
     let noVerify = false;
     let bypassHooks = false;
@@ -47,10 +97,12 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
     // environment variable) is read as a sh -c payload is. Git picks where it
     // runs, so a guarded Git command in it has no known target. Only what it
     // can do to Git counts against the rest of the line; a pager or a test
-    // run does not.
-    const mergeGitRun = (ran) => {
-        commands.push(...ran.commands.map((candidate) => ({ ...candidate, targetUncertain: true })));
-        uncertainShell ||= ran.opaqueCommitHiding;
+    // run does not, and neither does a read-only listing such as git branch.
+    const mergeGitRun = (ran, text, cwd) => {
+        commands.push(...ran.commands
+            .filter((candidate) => !gitReadOnlyRefCommand(candidate.verb, candidate.args || []))
+            .map((candidate) => ({ ...candidate, targetUncertain: true })));
+        if (HIDDEN_COMMAND.test(text)) commands.push(unreadableCommand(cwd));
         prefixRisk ||= ran.prefixHooksRisk;
         prefixHooksRisk ||= ran.prefixHooksRisk;
     };
@@ -70,7 +122,8 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
         if (updatePersistentEnvironment(words, persistentEnvironmentRisk)) {
             // An exported GIT_SSH_COMMAND runs under the Git commands after it.
             const exported = environmentCommands(words.filter(isAssignment));
-            if (exported.length) mergeGitRun(parseGit(exported.join('\n'), shellCwd));
+            const text = exported.join('\n');
+            if (exported.length) mergeGitRun(parseGit(text, shellCwd), text, shellCwd);
             continue;
         }
         const unwrapped = unwrapCommand(words, shellCwd);
@@ -557,7 +610,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             });
             policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         }
-        if (ran) mergeGitRun(ran);
+        if (ran) mergeGitRun(ran, gitRun.join('\n'), cwd);
     }
     const indirectCommits = [
         ...pipedShellCommitInvocations(cmd, initialCwd),
@@ -1264,12 +1317,14 @@ function optionValues(args, [short, long, shortest, attachedOnly = false]) {
 // word to the shell and the others to it as arguments), what `git config`
 // stores under a command-valued key, and the command of an ext:: URL.
 export function gitRunPayload(verb, args) {
-    const runs = args.filter((arg) => arg.startsWith('ext::')).flatMap(extCommands);
+    const runs = URL_VERBS.has(verb)
+        ? args.filter((arg) => arg.startsWith('ext::')).flatMap(extCommands)
+        : [];
     if (GIT_RUN_OPTIONS[verb]) runs.push(...optionValues(args, GIT_RUN_OPTIONS[verb]));
     if (verb === 'clone') runs.push(...optionValues(args, ['c', '--config', 3]).flatMap(configCommands));
     if (verb === 'config') {
         const at = args.findIndex(commandConfigKey);
-        if (at >= 0 && args[at + 1] !== undefined) runs.push(args[at + 1]);
+        if (at >= 0 && args[at + 1] !== undefined) runs.push(helperCommand(args[at + 1]));
     }
     let words = [];
     if (verb === 'bisect' && args[0] === 'run') words = args.slice(1);
@@ -1310,6 +1365,15 @@ function commandConfigKey(key) {
     return COMMAND_CONFIG_KEYS.some((pattern) => pattern.test(name));
 }
 
+// Verbs that take a remote URL, where ext:: names a command.
+const URL_VERBS = new Set(['archive', 'clone', 'fetch', 'ls-remote', 'pull', 'push', 'remote', 'submodule']);
+
+// A helper value that starts with ! is a shell snippet (credential.helper,
+// submodule.<name>.update); without it the rest is read the same way.
+function helperCommand(value) {
+    return String(value).replace(/^\s*!/, '');
+}
+
 // Whatever follows ext:: is a command Git runs to reach the remote.
 function extCommands(text) {
     const at = String(text).indexOf('ext::');
@@ -1320,7 +1384,7 @@ function extCommands(text) {
 function configCommands(setting) {
     const text = String(setting);
     const at = text.indexOf('=');
-    const value = at >= 0 && commandConfigKey(text.slice(0, at)) ? [text.slice(at + 1)] : [];
+    const value = at >= 0 && commandConfigKey(text.slice(0, at)) ? [helperCommand(text.slice(at + 1))] : [];
     return [...value, ...extCommands(text)];
 }
 

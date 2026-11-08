@@ -1588,7 +1588,9 @@ test('commands Git takes from options, config and the environment are read befor
                 `git fetch --upload-pack='${hidden} #' .`,
                 `git -c diff.external='${hidden} #' diff`,
                 `git -c core.fsmonitor='${hidden} #' status`,
-                `git -c credential.helper='!${hidden} #' fetch origin`,
+                "git -c credential.helper='!git commit --no-verify --allow-empty -m x' fetch origin",
+                "git submodule foreach 'echo Z2l0IGNvbW1pdA== | base64 -d | sh'",
+                'GIT_PAGER='.repeat(2000) + `cat ${hidden}`,
                 `git -c protocol.ext.allow=always ls-remote 'ext::sh -c "${hidden}"'`,
                 `GIT_EXTERNAL_DIFF='${hidden} #' git diff`,
                 `export GIT_SSH_COMMAND='${hidden} #'; git fetch origin`,
@@ -1605,6 +1607,11 @@ test('commands Git takes from options, config and the environment are read befor
                 "git difftool -y -x 'diff -u' HEAD",
                 "GIT_SSH_COMMAND='ssh -i ~/.ssh/id_deploy' git fetch origin",
                 'git config core.pager less',
+                "git -c credential.helper='!f() { echo password=$TOKEN; }; f' push origin main",
+                'git submodule foreach git branch',
+                "git bisect run sh -c 'make || exit 125; ./run-tests'",
+                "git rebase -x 'npm test > /dev/null' HEAD~1",
+                "git commit -m 'ext::git push origin main'",
             ]) {
                 const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
                 assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);

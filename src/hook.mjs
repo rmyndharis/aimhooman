@@ -101,7 +101,18 @@ export async function runHook(args) {
         }
     }
     if (event === 'session-start') return hookSessionStart();
-    if (event === 'pre-tool-use') return hookPreToolUse(input);
+    if (event === 'pre-tool-use') {
+        // A failed check has no decision to give, and a host runs the tool
+        // call on a hook error, so refuse instead.
+        try {
+            return hookPreToolUse(input);
+        } catch (error) {
+            return emitDecision(
+                'deny',
+                `aimhooman could not check this command (${error.message}); run it in simpler steps.`
+            );
+        }
+    }
     return 0;
 }
 
