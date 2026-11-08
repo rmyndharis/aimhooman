@@ -56,6 +56,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it; fetched history stays exempt.
 - The final ref guard scans a commit made while HEAD names a ref outside
   `refs/heads`. Run `aimhooman init` to update installed hooks.
+- The agent guard refuses a command word the shell can expand into Git:
+  `git${IFS}push`, `/usr/bin/gi? push`, `{git,push}`, zsh's `=git`, a variable
+  the same line sets, or `$G` before `push`, `commit` or another subcommand
+  that commits.
+- A glob that can match a file named like an option, such as `--no-ver*` or
+  `-*`, counts as a possible `--no-verify`.
+- The agent guard refuses a line where `printf -v` sets a variable Git runs or
+  reads config from, such as `GIT_SSH_COMMAND`.
+- The agent guard reads the Git command behind `sudo` and `doas`, with an
+  uncertain target, and a push or merge behind `su -c`, `xargs` and other
+  wrappers, so `sudo git push --no-verify` is refused.
+- Long command lines are decided in time proportional to their length, and
+  each repository is read once per line; 12 KB of `sh -c` took 10 s and 500
+  chained Git commands 4.8 s, past Copilot's 5-second hook timeout.
 
 ### Fixed
 
@@ -124,6 +138,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `init --global` and `uninstall --global` read `core.hooksPath` as Git applies
   it (`~`, a trailing slash, an included file), so uninstall no longer removes
   dispatchers the setting still names.
+- On `strict`, read-only pipelines such as `git log | head` and `npm test | tail`
+  are allowed.
+- `||` is no longer read as a pipe, so `git pull || echo failed` is allowed.
+- `git branch` and `git tag` listings with `--sort=`, `--format`, `--merged`,
+  `--contains`, `--points-at` or `-av`, plus `git remote get-url` and
+  `git worktree list`, count as read-only.
+- `echo {} > f.json` is no longer taken for a function definition.
+- A command line that ends in `|` no longer makes the agent guard fail with an
+  internal error.
 
 ### Changed
 

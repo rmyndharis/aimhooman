@@ -252,11 +252,12 @@ function hookPreToolUse(input) {
     // A command the parser flagged as uncertain shell syntax (nesting, a
     // pipeline, a background job, executable indirection, or an unresolved
     // wrapper) is denied under strict even when no commit was recognized,
-    // because a hidden commit + --no-verify could not be safely excluded. This
-    // only needs to catch commands the per-command loop below cannot reach
-    // (empty commands); when commands are present, that loop emits the more
-    // specific denial reason.
-    if (profile === 'strict' && parsed.uncertainShell && parsed.commands.length === 0) {
+    // because a hidden commit + --no-verify could not be safely excluded. A
+    // pipeline of read-only commands (git log | head) cannot hide one, which
+    // is what opaqueCommitHiding leaves out. This only needs to catch commands
+    // the per-command loop below cannot reach (empty commands); when commands
+    // are present, that loop emits the more specific denial reason.
+    if (profile === 'strict' && parsed.opaqueCommitHiding && parsed.commands.length === 0) {
         return emitDecision(
             'deny',
             'aimhooman cannot safely verify this command under the strict profile; ' +
@@ -266,7 +267,10 @@ function hookPreToolUse(input) {
     }
 
     // Evaluate bypass/future-index risk against each command's actual `git -C`
-    // repository, not merely the host tool's initial cwd.
+    // repository, not merely the host tool's initial cwd. Nothing on the line
+    // has run yet, so each directory's repository, policy and hooks are read
+    // once however many commands name it.
+    const targets = new Map();
     for (const gitCommand of parsed.commands.filter(isProtectedMutation)) {
         let targetRepo;
         try {
@@ -306,8 +310,20 @@ function hookPreToolUse(input) {
                     'aimhooman cannot determine the policy after an earlier Git state change; run the Git commit separately.'
                 );
             }
-            targetRepo = openRepo(gitCommand.cwd);
-            const targetProfile = enforcementPolicy(targetRepo).profile;
+            let target = targets.get(gitCommand.cwd);
+            if (!target) {
+                const opened = openRepo(gitCommand.cwd);
+                target = {
+                    repo: opened,
+                    profile: enforcementPolicy(opened).profile,
+                    hooks: null,
+                    prepareMessageHook: null,
+                    pushReceiver: null,
+                };
+                targets.set(gitCommand.cwd, target);
+            }
+            targetRepo = target.repo;
+            const targetProfile = target.profile;
             // An unresolved subcommand/alias may itself move a ref. When its
             // hook path or execution context is altered, there is no safe
             // content snapshot to fall back to, so treat it like a direct ref
@@ -323,7 +339,7 @@ function hookPreToolUse(input) {
                     + 'run a direct supported Git command.'
                 );
             }
-            if (gitCommand.verb === 'push' && configuredPushReceiver(targetRepo)) {
+            if (gitCommand.verb === 'push' && (target.pushReceiver ??= configuredPushReceiver(targetRepo))) {
                 return emitDecision(
                     'deny',
                     'aimhooman cannot prove that a configured remote receive-pack preserves the managed reference-transaction guard; remove remote.*.receivepack or run a direct push without receiver indirection.'
@@ -342,7 +358,8 @@ function hookPreToolUse(input) {
                     + 'after hook, environment, shell, or prefix indirection; run the Git command directly with the managed reference-transaction hook.'
                 );
             }
-            const activeHooks = installedHooks(targetRepo);
+            target.hooks ??= installedHooks(targetRepo);
+            const activeHooks = target.hooks;
             // A push moves no local branch, so reference-transaction does not see
             // what leaves; pre-push is the check that does.
             const requiredHooks = gitCommand.verb === 'commit'
@@ -407,7 +424,8 @@ function hookPreToolUse(input) {
                 );
             }
             if (gitCommand.verb === 'commit') {
-                const prepareMessageHook = activeGitHook(targetRepo, 'prepare-commit-msg');
+                target.prepareMessageHook ??= activeGitHook(targetRepo, 'prepare-commit-msg');
+                const prepareMessageHook = target.prepareMessageHook;
                 if (prepareMessageHook.active) {
                     return emitDecision(
                         'deny',

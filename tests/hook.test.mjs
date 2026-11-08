@@ -1454,7 +1454,8 @@ test('POSIX control forms cannot hide a no-verify commit from strict or clean', 
                 tool_input: { command },
             });
             assert.equal(decision.permissionDecision, 'deny', command);
-            assert.match(decision.permissionDecisionReason, /local\.blocked-secret/, command);
+            // A command name the shell expands is refused before the staged scan.
+            assert.match(decision.permissionDecisionReason, /local\.blocked-secret|shell expansion/, command);
             assert.equal(gitValue(clean, 'rev-parse', 'HEAD'), cleanHead, command);
             assert.equal(gitValue(clean, 'write-tree'), cleanIndex, command);
         }
@@ -3130,7 +3131,7 @@ test('clean denies a staged secret-category file or uncertain target under indir
     // Literal eval/pipeline payloads use the clean staged-content backstop.
     // Wrappers such as sudo can select cwd from external configuration, so they
     // fail closed before policy lookup instead of scanning the caller's
-    // repository.
+    // repository. sudo is read through like time, its target still uncertain.
     for (const [command, reason] of [
         ["eval 'git commit --no-verify -m leak'", /shell indirection|--no-verify/],
         ['sudo git commit --no-verify -m leak', /repository target|dynamic directory/],
@@ -3139,7 +3140,11 @@ test('clean denies a staged secret-category file or uncertain target under indir
     ]) {
         const parsed = parseGit(command);
         assert.equal(parsed.commit, true, `commit for: ${command}`);
-        assert.equal(parsed.uncertainShell, true, `uncertainShell for: ${command}`);
+        if (command.startsWith('sudo ')) {
+            assert.equal(parsed.commands.find((candidate) => candidate.verb === 'commit')?.targetUncertain, true);
+        } else {
+            assert.equal(parsed.uncertainShell, true, `uncertainShell for: ${command}`);
+        }
         const dir = mkdtempSync(join(tmpdir(), 'aim-indirect-noverify-'));
         try {
             execFileSync('git', ['init', '-q'], { cwd: dir });
@@ -3500,6 +3505,199 @@ test('read-only Git ref-command listings are allowed under strict too', async ()
                 command,
             );
         }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// None of these can hide a commit, yet each was refused: strict refused every
+// pipeline, the second | of || read as a pipe, --sort=x and -av were not
+// matched as listing options, and echo {} looked like a function definition.
+test('everyday reads and || chains are allowed on clean and strict', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-everyday-${profile}-`);
+        try {
+            for (const command of [
+                'git log | head',
+                'git status | grep modified',
+                'npm test | tail',
+                'cd . && git log | head',
+                'git status || true',
+                'git pull || echo failed',
+                'git add README.md && git commit -m x || echo nothing',
+                'git branch --sort=-committerdate | head',
+                'git branch --merged main | grep -v main',
+                "git branch --format='%(refname)' | head",
+                'git branch -av | head',
+                'git tag --points-at HEAD | head',
+                'git remote get-url origin | cat',
+                'git worktree list | head',
+                'mkdir -p d && echo {} > d/f.json && git add d/f.json',
+            ]) {
+                assert.equal(
+                    await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                    null,
+                    `${profile}: ${command}`,
+                );
+            }
+            // A sink that runs code, a name to create, a word the shell can turn
+            // into --no-list or a name, and a bypass before || stay refused.
+            for (const command of [
+                'git log | sh',
+                'git branch --sort=-committerdate newbranch | head',
+                'git branch --list $X | head',
+                'git tag --points-at HEAD $X | head',
+                'git worktree add ../w | head',
+                'git push --no-verify origin main || echo failed',
+                'git -c core.hooksPath=/dev/null commit -m x || echo nothing',
+            ]) {
+                const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(out?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// The shell rewrites each of these before Git starts: a glob matches a file
+// named --no-verify, ${IFS}, $G or zsh's =git turn a command word into git and
+// its arguments, and printf -v sets a variable Git runs or reads config from.
+test('shell spellings that expand into a hook bypass are refused', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-expand-${profile}-`);
+        try {
+            for (const command of [
+                'git push --no-ver* origin main',
+                'git push origin main -*',
+                'git${IFS}push${IFS}--no-verify',
+                'G=git; $G push --no-verify origin main',
+                'X="git -c core.hooksPath=/dev/null commit -m x"; $X',
+                '/usr/bin/gi? push --no-verify origin main',
+                '{git,push,--no-verify}',
+                '=git push --no-verify origin main',
+                "printf -v GIT_SSH_COMMAND '%s' x && git push origin main",
+                'printf -vGIT_CONFIG_PARAMETERS %s x; git commit -m x',
+                'printf -v GIT_PAGER %s x; git log',
+                'printf -v X y > .git/hooks/pre-commit && git commit -m x',
+            ]) {
+                const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(out?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git push origin main',
+                'git commit -m "fix *all* the [things]?"',
+                'git commit -m x -- "*.js"',
+                "printf -v now '%s' x; echo \"$now\"",
+            ]) {
+                assert.equal(
+                    await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                    null,
+                    `${profile}: ${command}`,
+                );
+            }
+            // Like --no-verify itself, a word that may become it stops a commit
+            // only under strict; clean leaves it to the reference guard.
+            const glob = await invokePreToolUse(dir, {
+                tool_name: 'Bash',
+                tool_input: { command: 'git commit -m x -*' },
+            });
+            assert.equal(glob?.permissionDecision ?? null, profile === 'strict' ? 'deny' : null, profile);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+    assert.equal(parseGit('git commit -m x src/*.js').commands[0].classification, 'future-index');
+});
+
+// A literal last path segment names the program, and an expansion that cannot
+// be Git runs another one; neither is refused. sudo, doas and other wrappers
+// show the Git command they run, which is read like the command itself.
+test('expanded command words and wrappers are refused only where they can run Git', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-expanded-word-${profile}-`);
+        try {
+            for (const command of [
+                '"$VENV/bin/python" -m pytest',
+                '$HOME/.cargo/bin/cargo build',
+                '${PYTHON:-python3} -m pip install requests',
+                '$PYTHON -m pytest -q',
+                'sudo git status',
+            ]) {
+                assert.equal(
+                    await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }),
+                    null,
+                    `${profile}: ${command}`,
+                );
+            }
+            for (const command of [
+                '$G push --no-verify origin main',
+                '$TOOL push origin main',
+                '$(which git) push origin main',
+                '$CMD',
+                'sudo git push --no-verify origin main',
+                'doas git push origin main',
+                "su -c 'git push --no-verify origin main' bob",
+                'xargs -n1 git push --no-verify origin',
+            ]) {
+                const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(out?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// The shell refuses a line that ends in a pipe; the parser used to throw on it.
+test('a trailing pipe is parsed, not thrown on', () => {
+    for (const command of ['git status |', 'git log | head |', 'git status |&', 'git commit -m x |']) {
+        assert.doesNotThrow(() => parseGit(command), command);
+    }
+});
+
+// Every command of a long chain repeated its repository, policy and hook
+// lookups: 500 chained add, commit and push commands took 4.8 s, at the edge
+// of Copilot's 5-second hook timeout. Each directory is now read once.
+test('a long chain of Git commands reads each repository once', async () => {
+    const dir = makeHookRepo('strict', 'aim-hook-chain-');
+    try {
+        const command = `${'git add a.txt && git commit -m x && git push origin main && '.repeat(400)}git status`;
+        const started = performance.now();
+        assert.equal(await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }), null);
+        const ms = performance.now() - started;
+        assert.ok(ms < 3000, `took ${Math.round(ms)} ms`);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// Each shape took seconds to decide when a regex retried a long scan from
+// every start: 11.6 s for 12 KB of sh -c, 5.3 s for 32 KB of blank lines.
+// The work now grows with the input; the bound leaves room for a slow runner.
+test('large commands are decided in time proportional to their length', async () => {
+    for (const command of [
+        'sh -c '.repeat(2000),
+        `x${'\n'.repeat(32000)}y`,
+        `x${' '.repeat(64000)}y`,
+        `bash -c 'x${' | cat'.repeat(6000)}'`,
+        `x ${'includeif.'.repeat(16000)}`,
+        `x ${'a='.repeat(32000)}`,
+    ]) {
+        const started = performance.now();
+        parseGit(command);
+        const ms = performance.now() - started;
+        assert.ok(ms < 1000, `${JSON.stringify(command.slice(0, 12))} x ${command.length} took ${Math.round(ms)} ms`);
+    }
+    const dir = makeHookRepo('clean', 'aim-hook-large-');
+    try {
+        const started = performance.now();
+        const out = await invokePreToolUse(dir, {
+            tool_name: 'Bash',
+            tool_input: { command: `${'sh -c '.repeat(2000)}; git -c core.hooksPath=/dev/null commit -m x` },
+        });
+        assert.equal(out?.permissionDecision, 'deny');
+        assert.ok(performance.now() - started < 3000);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
