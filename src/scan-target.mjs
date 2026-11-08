@@ -166,9 +166,10 @@ function scanCommit(repo, options) {
     const snapshot = commitSnapshot(repo, options.revision);
     // The final ref guard scans history the developer did not write, so a policy
     // this version cannot parse must not turn every pull, merge and reset into a
-    // refusal. It asks for tolerance; the profile then comes from local config
-    // and the reason is reported. Direct questions (check --commit, audit) still
-    // get the loud error.
+    // refusal. It asks for tolerance; the profile then comes from local config,
+    // floored to strict when a parent carries the unreadable policy, and the
+    // reason is reported. Direct questions (check --commit, audit) still get the
+    // loud error.
     const tolerant = Boolean(options.tolerateUnreadablePolicy);
     const unreadablePolicies = [];
     const resolvedPolicy = resolvePolicy(repo, { target: 'commit', revision: snapshot.commit, tolerant });
