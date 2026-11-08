@@ -282,6 +282,11 @@ function parseGitLine(command, initialCwd, posix = true) {
     let unreadable = payloadUnreadable(cmd);
     let setNames;
     let assignedHooks;
+    // Whether a unit reads its own input as code (a bare sh, python -), for the
+    // >( ) that holds one; and the text echo and printf units write to files.
+    let stdinCode = false;
+    const writtenFiles = new Map();
+    let echoedBefore = null;
     // A command before Git can take the hooks away when its words name them,
     // when it runs inside .git (cd .git && rm -rf hooks), or when it expands a
     // word and the line assigns a value that names them (H=.git/hooks; rm -rf $H).
@@ -323,7 +328,7 @@ function parseGitLine(command, initialCwd, posix = true) {
     // against the rest of the line: a substitution that reads (git branch
     // --show-current) or runs Git with its hooks is no reason to refuse. One
     // that cannot be read to its end is unreadable.
-    for (const { inner } of substitutions) {
+    for (const { inner, kind } of substitutions) {
         if (inner === null) {
             if (posix) {
                 markUncertain();
@@ -333,6 +338,9 @@ function parseGitLine(command, initialCwd, posix = true) {
         }
         const ran = parseGit(dropDataHeredocs(inner), initialCwd);
         mergeGitRun({ ...ran, unreadable: false, commands: ran.commands.filter(runsBeyondTheLine) }, initialCwd);
+        // tee >(sh) writes text into a shell: the substitution that was read is
+        // the program that runs it.
+        if (kind === 'process' && ran.stdinCode) markUncertain();
     }
     for (const unit of shellUnits(cmd)) {
         const precedingOperator = previousOperator;
@@ -518,11 +526,24 @@ function parseGitLine(command, initialCwd, posix = true) {
             }
         }
         if (SHELL_CONTROL_DECLARATIONS.has(toks[0])) continue;
+        // A shell or interpreter that takes its code from a file made by a process
+        // substitution, bash <(...), or reads it from its own input, runs text this
+        // parser cannot see.
+        if (isCodeReader(shellExecutable(toks[0]))
+            && toks.slice(1).some((word) => /^[<>]\(/.test(word))) markUncertain();
+        if (readsStdinAsCode(toks)) stdinCode = true;
+        // echo 'git push --no-verify' > r.sh writes a script that a later unit may
+        // run: the file is not there yet for the guard to read, but its text is here.
+        const written = writtenScript(toks, unit.text, unwrapped.cwd, precedingOperator === '|' ? echoedBefore : null);
+        if (written) {
+            for (const path of written.paths) writtenFiles.set(path, `${writtenFiles.get(path) ?? ''}\n${written.text}`);
+        }
+        echoedBefore = printedText(toks);
         const dynamicName = commandWordExpands(toks[0] ?? '');
         if (toks.length < 2 && !dynamicName) {
             // ./leak.sh or a bare make runs a file of its own.
             const script = toks.length ? executedScript(toks) : null;
-            if (script) commands.push({ verb: 'script', ...script, cwd: unwrapped.cwd });
+            if (script) commands.push({ verb: 'script', ...script, inline: inlineScriptTexts(script, writtenFiles, unwrapped.cwd), cwd: unwrapped.cwd });
             if (toks.length && (!READ_ONLY_SHELL_COMMANDS.has(basename(toks[0])) || hasFileRedirect(unit.text))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
                 prefixHooksRisk ||= prefixTouchesHooks(toks, unit.text, unwrapped.cwd);
@@ -589,7 +610,7 @@ function parseGitLine(command, initialCwd, posix = true) {
                     texts.push(...embeddedGitTexts([program.code, ...program.rest].join(' ')));
                 }
                 const script = executedScript(toks);
-                if (script) commands.push({ verb: 'script', ...script, cwd: unwrapped.cwd });
+                if (script) commands.push({ verb: 'script', ...script, inline: inlineScriptTexts(script, writtenFiles, unwrapped.cwd), cwd: unwrapped.cwd });
                 for (const text of texts) {
                     const ran = parseGit(text, unwrapped.cwd);
                     mergeGitRun({
@@ -964,6 +985,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         uncertainShell,
         opaqueCommitHiding,
         opaqueSink: opaqueCommitHiding && (opaqueSink || (redirectOnly && (prefixHooksRisk || prefixIndexMutationRisk))),
+        stdinCode,
         classification,
         environmentRisk: unique(commands.flatMap((candidate) => candidate.environmentRisk || [])),
         prefixRisk,
@@ -1173,22 +1195,25 @@ function substitutionSpans(text, backticks = true) {
             let end = i + 1;
             while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1;
             if (end >= text.length) {
-                spans.push({ start: i, end: text.length, inner: null });
+                spans.push({ start: i, end: text.length, inner: null, kind: 'command' });
                 break;
             }
-            spans.push({ start: i, end: end + 1, inner: text.slice(i + 1, end) });
+            spans.push({ start: i, end: end + 1, inner: text.slice(i + 1, end), kind: 'command' });
             i = end;
             continue;
         }
         const opens = text[i + 1] === '(' && text[i + 2] !== '('
             && (char === '$' || (!quote && (char === '<' || char === '>')));
         if (!opens) continue;
+        // $( ) and backticks hand their output to the line as text; <( ) and >( )
+        // hand a file, or a pipe into a program.
+        const kind = char === '$' ? 'command' : 'process';
         const close = closingParen(text, i + 2);
         if (close < 0) {
-            spans.push({ start: i, end: text.length, inner: null });
+            spans.push({ start: i, end: text.length, inner: null, kind });
             break;
         }
-        spans.push({ start: i, end: close + 1, inner: text.slice(i + 2, close) });
+        spans.push({ start: i, end: close + 1, inner: text.slice(i + 2, close), kind });
         i = close;
     }
     return spans;
@@ -2510,7 +2535,9 @@ function hasUncertainShellSyntax(command, {
             const sink = shellExecutable(first.split(/[;&|)]/)[0]);
             // The sink's own words end where the next command starts.
             const own = after.findIndex((word) => /^(?:\|\|?|&&?|;)$/.test(word));
-            if (safePipes.has(sink) || (programFilters && textFilterIsData(sink, own < 0 ? after : after.slice(0, own)))) continue;
+            if (safePipes.has(sink)
+                || (programFilters && (PIPE_INTO_READ_LOOP.has(sink)
+                    || textFilterIsData(sink, own < 0 ? after : after.slice(0, own))))) continue;
         }
         if (char === '`' || char === '(' || char === ')' || char === '<' || char === '>') return true;
         if (char === '|' || char === '&') return true;
@@ -2521,6 +2548,11 @@ function hasUncertainShellSyntax(command, {
         return SHELL_CONTROL_WORDS.has(words[0]);
     });
 }
+
+// A pipe into a loop or a group feeds the read in it: ls | while read f; do ...
+// The commands in the loop are read one by one, and a dynamic word among them is
+// refused on its own, so the pipe hides nothing.
+const PIPE_INTO_READ_LOOP = new Set(['while', 'until', 'for', 'if', 'case', 'select', 'read', '!']);
 
 // Whether a pipe into awk or sed only filters the text: the program is on the
 // command line, where it is read, and it neither starts a program nor takes its
@@ -3616,6 +3648,66 @@ const PACKAGE_MANAGER_COMMANDS = new Set([
     'outdated', 'owner', 'pack', 'prune', 'publish', 'rebuild', 'remove', 'rm', 'root', 'store',
     'unlink', 'up', 'update', 'upgrade', 'version', 'why', 'workspace', 'workspaces',
 ]);
+
+// Programs that run what they are given as code: the shells, the interpreters
+// with a code option, and the tools whose program or recipe is a file or a
+// command line, as make, awk and sed.
+const OTHER_CODE_READERS = new Set([
+    'fish', 'csh', 'tcsh', 'nu', 'elvish', 'pwsh', 'powershell', 'deno', 'bun', 'tclsh', 'osascript',
+    'awk', 'gawk', 'mawk', 'nawk', 'sed',
+]);
+
+function isCodeReader(program) {
+    return WRAPPED_SHELLS.has(program) || OTHER_CODE_READERS.has(program)
+        || /^python(?:\d+(?:\.\d+)*)?$/.test(program) || INTERPRETER_EVAL_OPTIONS.has(program);
+}
+
+// A shell or interpreter started with no code on its command line and no script
+// file reads the code from its input: sh, bash -s, python3 -, node -.
+function readsStdinAsCode(tokens) {
+    const program = shellExecutable(tokens[0]);
+    if (!isCodeReader(program) || program === 'make' || program === 'gmake' || OTHER_CODE_READERS.has(program)) return false;
+    const args = tokens.slice(1);
+    const evalOptions = INTERPRETER_EVAL_OPTIONS.get(program) ?? ['-c'];
+    if (args.some((arg) => evalOptions.includes(arg) || (WRAPPED_SHELLS.has(program) && /^-[a-zA-Z]*c/.test(arg)))) return false;
+    return !args.some((arg) => arg !== '-' && !arg.startsWith('-'));
+}
+
+// The text an echo or printf unit prints, or null. printf, and the echo of zsh
+// and sh -e, turn \n and \t into a newline and a tab; a recipe line of a makefile
+// needs the tab.
+function printedText(tokens) {
+    const program = shellExecutable(tokens[0]);
+    if (program !== 'echo' && program !== 'printf') return null;
+    const end = tokens.findIndex((word, index) => index > 0 && /^[0-9&]*>/.test(word));
+    const words = tokens.slice(1, end < 0 ? undefined : end);
+    return (program === 'printf' ? words.join('\n') : words.join(' ')).replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+}
+
+// A path as one place on disk, for telling a file the line writes from the file
+// it runs: relative to where the unit runs, and no ./ or // in it.
+function placeOf(cwd, path) {
+    return resolve(cwd, posix.normalize(String(path).replace(/\\/g, '/')));
+}
+
+// The script an echo or printf unit writes to a file, or tee writes after one in
+// a pipe: the file is not on disk yet for the guard to read, but its text is in
+// the line. Returns the places written and the text.
+function writtenScript(tokens, source, cwd, pipedText) {
+    const targets = shellExecutable(tokens[0]) === 'tee' && pipedText !== null
+        ? tokens.slice(1).filter((word) => !word.startsWith('-'))
+        : redirectTargets(source);
+    const text = pipedText !== null && shellExecutable(tokens[0]) === 'tee' ? pipedText : printedText(tokens);
+    const places = targets.filter((target) => target && !target.startsWith('/dev/')).map((target) => placeOf(cwd, target));
+    return text !== null && places.length ? { paths: places, text } : null;
+}
+
+// What a script that was written earlier in the same line will hold.
+function inlineScriptTexts(script, writtenFiles, cwd) {
+    if (!writtenFiles.size) return [];
+    const paths = script.kind === 'files' ? script.paths : script.kind === 'package' ? ['package.json'] : [];
+    return paths.map((path) => writtenFiles.get(placeOf(cwd, path))).filter(Boolean);
+}
 
 // The file a command runs shell text from, for the guard to read: the
 // makefiles of make, the package.json script npm, yarn, pnpm or bun runs, a

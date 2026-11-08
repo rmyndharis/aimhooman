@@ -4113,10 +4113,21 @@ test('a pipe, group or loop beside Git is refused only when it can run unread co
                 'git add -A && npm test | tail -5',
                 'git add -A && echo x | tee out.txt',
                 'npm test 2>&1 | tee log.txt && git add .',
+                'git add -A && ls | while read f; do echo $f; done',
+                'git add -A && ls | { read a; echo $a; }',
+                'ls | while read f; do git add "$f"; done',
+                'git add -A && diff <(echo a) <(echo b)',
+                'git add -A && cat <(echo x)',
             ]) {
                 assert.equal(await decide(command), null, `${profile}: ${command}`);
             }
             for (const command of [
+                'git add -A && while read c; do $c; done < cmds.txt',
+                'git add -A && echo x | while read c; do $c; done',
+                "git add -A && echo x | tee >(sh)",
+                "git add -A && bash <(echo 'git push --no-verify origin wip')",
+                "git add -A && python3 <(echo 'import os')",
+                "git add -A && make -f <(echo 'x:\\n\\tgit push --no-verify origin wip') x",
                 "git add -A && echo x | awk '{system($0)}'",
                 "git add -A && echo x | awk '{print | \"sh\"}'",
                 'git add -A && echo x | awk -f -',
@@ -4128,6 +4139,45 @@ test('a pipe, group or loop beside Git is refused only when it can run unread co
                 'git add -A && echo x | node',
             ]) {
                 assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// The script a line writes with echo or printf is not on disk when the guard
+// reads it, but its text is in the line, so a script made and run in one
+// command is read as one that already existed.
+test('a script written and run in the same line is read', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-inline-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                "echo 'git push --no-verify origin wip' > r.sh && sh r.sh",
+                "printf 'git push --no-verify origin wip\\n' > r.sh; bash r.sh",
+                "printf '#!/bin/sh\\ngit push --no-verify origin wip\\n' > r.sh && chmod +x r.sh && ./r.sh",
+                "echo git push --no-verify origin wip > r.sh && sh r.sh",
+                "echo 'git push --no-verify origin wip' >> r.sh && bash ./r.sh",
+                "echo 'git push --no-verify origin wip' > ./r.sh && ./r.sh",
+                "echo 'git push --no-verify origin wip' > r.sh && /bin/sh -x r.sh",
+                "mkdir -p sub && echo 'git push --no-verify origin wip' > sub/r.sh && cd sub && sh r.sh",
+                "echo 'x:\\n\\tgit push --no-verify origin wip' > Makefile && make x",
+                "printf 'x:\\n\\tgit push --no-verify origin wip\\n' > Makefile; make x",
+                "echo '{\"scripts\":{\"x\":\"git push --no-verify origin wip\"}}' > package.json && npm run x",
+                "git add -A && echo 'git push --no-verify origin wip' > r.sh && sh r.sh",
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                "echo 'echo hi' > r.sh && sh r.sh",
+                "printf '#!/bin/sh\\nnpm test\\n' > r.sh && chmod +x r.sh && ./r.sh",
+                "echo 'build:\\n\\techo ok' > Makefile && make build",
+                "mkdir -p sub && echo 'echo hi' > sub/r.sh && cd sub && sh r.sh",
+                "echo 'git push --no-verify origin wip' > notes.txt && cat notes.txt",
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
             }
         } finally {
             rmSync(dir, { recursive: true, force: true });

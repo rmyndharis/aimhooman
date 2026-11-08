@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent guard reads Git inside `( )` and `{ }` groups, `$( )` and `<( )` substitutions, and after programs that run another, such as `caffeinate`, `arch` or `xcrun`.
 - Git that skips or repoints the hooks is refused inside `python -c`, `node -e`, `perl -e`, `ruby -e`, `awk` and `make --eval` code.
 - A makefile, `package.json` script or shell script that a command runs is read, and refused when its Git skips or repoints the hooks.
+- A script written with `echo`, `printf` or `tee` and run in the same line, as in `echo '...' > r.sh && sh r.sh`, is read before it runs.
+- A process substitution that feeds a shell, as in `tee >(sh)` and `bash <(...)`, is refused beside a Git command.
 - A harmless Git command such as `git add` beside a pipe into a shell no longer lets that pipe through.
 - `-c hook.<name>.command`, `-c protocol.ext.allow` and `-c protocol.allow` are refused for every Git command, and a stored config hook stops Git commands until it is removed.
 - Hook and config paths count however they are spelled: `.git//hooks`, `.git/./hooks`, `.git/[h]ooks`, the `.git` directory, a global gitconfig, or a path after `cd .git`.

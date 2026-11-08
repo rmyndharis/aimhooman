@@ -892,20 +892,25 @@ function scriptTexts(script) {
             return null;
         }
     };
+    // What the same line wrote to the file before it runs it, as echo > r.sh && sh r.sh.
+    const inline = Array.isArray(script.inline) ? script.inline : [];
     if (script.kind === 'package') {
-        let scripts;
-        try {
-            scripts = JSON.parse(read('package.json') ?? '{}').scripts ?? {};
-        } catch {
-            return [];
-        }
-        return [`pre${script.name}`, script.name, `post${script.name}`]
-            .map((key) => scripts[key])
-            .filter((value) => typeof value === 'string');
+        const packages = [read('package.json') ?? '{}', ...inline];
+        return packages.flatMap((text) => {
+            let scripts;
+            try {
+                scripts = JSON.parse(text).scripts ?? {};
+            } catch {
+                return [];
+            }
+            return [`pre${script.name}`, script.name, `post${script.name}`]
+                .map((key) => scripts[key])
+                .filter((value) => typeof value === 'string');
+        });
     }
     // A file run by its path is shell text when its #! names a shell or it has none.
-    return script.paths.map(read).filter((text) => text !== null && (!script.shebang || !text.startsWith('#!')
-        || /^#!\s*(?:\S*\/)?(?:env\s+(?:-\S+\s+)*)?(?:ash|bash|dash|ksh|mksh|sh|zsh)\b/.test(text)));
+    return [...inline, ...script.paths.map(read).filter((text) => text !== null && (!script.shebang || !text.startsWith('#!')
+        || /^#!\s*(?:\S*\/)?(?:env\s+(?:-\S+\s+)*)?(?:ash|bash|dash|ksh|mksh|sh|zsh)\b/.test(text)))];
 }
 
 // The profile aimhooman enforces where it is installed at cwd, or null where it
