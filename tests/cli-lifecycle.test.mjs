@@ -946,6 +946,14 @@ test('the final ref guard lets a commit carry an unreadable policy forward uncha
         const committed = commitWithHooks(repo, ['--no-verify', '-m', 'Unrelated change']);
         assert.equal(committed.status, 0, committed.stderr);
         assert.doesNotMatch(committed.stderr, /cannot be downgraded/);
+
+        // The file might have said strict, so what such a commit brings is
+        // still judged as strict.
+        writeFileSync(join(repo.root, 'CLAUDE.md'), '# Agent notes\n');
+        git(repo, ['add', 'CLAUDE.md']);
+        const blocked = commitWithHooks(repo, ['--no-verify', '-m', 'Add agent notes']);
+        assert.notEqual(blocked.status, 0, 'an unreadable policy carried forward still floors to strict');
+        assert.match(blocked.stderr, /CLAUDE\.md/);
     } finally {
         cleanup(repo);
     }
