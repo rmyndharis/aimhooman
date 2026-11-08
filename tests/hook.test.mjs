@@ -1638,7 +1638,6 @@ test('everyday pushes, merges and git-<name> tools are not taken for hook bypass
             for (const command of [
                 'git merge --ff-only @{u}',
                 'git merge --no-ff -m "Merge feature {x}" feature',
-                'git push "https://x-access-token:${GITHUB_TOKEN}@github.com/o/r.git" HEAD:main',
                 'git push -o --no-verify origin main',
                 'git-lfs track "*.psd"',
                 'git --no-literal-pathspecs status',
@@ -1647,11 +1646,14 @@ test('everyday pushes, merges and git-<name> tools are not taken for hook bypass
                 const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
                 assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
             }
-            const expanded = await invokePreToolUse(dir, {
-                tool_name: 'Bash',
-                tool_input: { command: 'git push origin {--no-verify,} main' },
-            });
-            assert.equal(expanded?.permissionDecision, 'deny', `${profile}: an expansion can still become --no-verify`);
+            for (const command of [
+                'git push origin {--no-verify,} main',
+                'git push origin main$IFS--no-verify',
+                ...(profile === 'strict' ? ['git commit -m x --{no-verify,}'] : []),
+            ]) {
+                const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command} can still become --no-verify`);
+            }
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -1669,13 +1671,15 @@ test('hook-skipping options behind time, an alias or an abbreviation are still r
                 'git p --no-verify origin main',
                 'git push --rece=/tmp/receive origin main',
                 "time git -c core.fsmonitor='rm -rf .git/hooks #' commit --allow-empty -m x",
+                "time env GIT_SSH_COMMAND='git push --no-verify origin main #' git fetch origin",
+                "time sh -c 'git push --no-verify origin main'",
                 ...(profile === 'strict' ? ['git m --no-verify feature'] : []),
             ];
             for (const command of refused) {
                 const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
                 assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
             }
-            for (const command of ['time git push origin main', 'git p origin main']) {
+            for (const command of ['time git push origin main', 'git p origin main', 'timeout 10 grep -rn git src']) {
                 const decision = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
                 assert.notEqual(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
             }

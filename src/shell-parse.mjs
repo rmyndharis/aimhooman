@@ -135,9 +135,21 @@ function parseGitLine(cmd, initialCwd) {
             if (exported.length) mergeGitRun(parseGit(text, shellCwd), shellCwd);
             continue;
         }
-        const unwrapped = unwrapCommand(words, shellCwd);
-        const commandTokens = passthroughTarget(unwrapped.tokens) ?? unwrapped.tokens;
-        const toks = dashedGitInvocation(commandTokens) ?? commandTokens;
+        let unwrapped = unwrapCommand(words, shellCwd);
+        // time, timeout, nice and the like run the command after them with the
+        // same argv, so that command is unwrapped again, env and all.
+        for (let after = passthroughTarget(unwrapped.tokens); after; after = passthroughTarget(unwrapped.tokens)) {
+            const inner = unwrapCommand(after, unwrapped.cwd);
+            unwrapped = {
+                ...inner,
+                assignments: [...unwrapped.assignments, ...inner.assignments],
+                uncertain: unwrapped.uncertain || inner.uncertain,
+                pathDialectUncertain: unwrapped.pathDialectUncertain || inner.pathDialectUncertain,
+                targetUncertain: unwrapped.targetUncertain || inner.targetUncertain,
+                explicitTargetOption: unwrapped.explicitTargetOption || inner.explicitTargetOption,
+            };
+        }
+        const toks = dashedGitInvocation(unwrapped.tokens) ?? unwrapped.tokens;
         uncertainShell ||= unwrapped.uncertain;
         let commandPathDialectUncertain = shellPathDialectUncertain
             || unwrapped.pathDialectUncertain;
@@ -1014,11 +1026,12 @@ function dashedGitInvocation(tokens) {
     return ['git', match[1], ...tokens.slice(1)];
 }
 
-// A word the shell still expands can become an option only where it can
-// start one: $X, {--no-verify,} or a dash with an expansion after it. @{u},
-// origin/$BRANCH and a URL holding ${TOKEN} cannot.
+// A word the shell still expands can become an option. An unquoted $X or a
+// backtick splits into words wherever it stands, and the quotes are gone by
+// now; a brace expansion yields one only where it starts the word or follows
+// a dash ({--no-verify,}). @{u}, HEAD@{1} and {x} in a message cannot.
 function mayExpandToOption(word) {
-    return /^[-$`{]/.test(word) && /[$`{}]/.test(word);
+    return /[$`]/.test(word) || (/^[-{]/.test(word) && /[{}]/.test(word));
 }
 
 // push, merge and pull take --no-verify; pull hands it to merge. A push skips
@@ -1204,6 +1217,9 @@ export function inspectCommitOptions(args) {
                 uncertain,
             };
         }
+        // An option word the shell still expands (--{no-verify,}, --$X) can
+        // become --no-verify as well.
+        if (arg.startsWith('-') && mayExpandToOption(arg)) uncertain = true;
         if (arg.startsWith('--')) {
             const separator = arg.indexOf('=');
             const spelling = arg.slice(2, separator < 0 ? undefined : separator);
@@ -2318,17 +2334,39 @@ const UNCERTAIN_TARGET_INDIRECT_EXECUTORS = new Set([
 // judged like `git commit` instead of being refused as opaque indirection. The
 // carve-out only applies when nothing else is risky (no environment override,
 // no uncertain target); otherwise the wrapper falls back to the closed path.
-const PASSTHROUGH_PREFIX_EXECUTORS = new Set([
-    'time', 'timeout', 'nice', 'ionice', 'chrt', 'taskset', 'numactl',
-    'stdbuf', 'setsid', 'nohup', 'prlimit', 'faketime',
+// Prefixes that run the next command with the same argv: the options of
+// theirs that take a separate value, and how many operands come before it.
+const PASSTHROUGH_PREFIXES = new Map([
+    ['time', { values: ['-f', '--format', '-o', '--output'], operands: 0 }],
+    ['timeout', { values: ['-s', '--signal', '-k', '--kill-after'], operands: 1 }],
+    ['nice', { values: ['-n', '--adjustment'], operands: 0 }],
+    ['ionice', { values: ['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid'], operands: 0 }],
+    ['chrt', { values: [], operands: 1 }],
+    ['taskset', { values: [], operands: 1 }],
+    ['numactl', { values: ['-N', '-m', '-C', '-p', '-i'], operands: 0 }],
+    ['stdbuf', { values: ['-i', '-o', '-e'], operands: 0 }],
+    ['setsid', { values: [], operands: 0 }],
+    ['nohup', { values: [], operands: 0 }],
+    ['prlimit', { values: ['-p', '--pid'], operands: 0 }],
+    ['faketime', { values: ['-m', '-f'], operands: 1 }],
 ]);
+const PASSTHROUGH_PREFIX_EXECUTORS = new Set(PASSTHROUGH_PREFIXES.keys());
 
-// time, timeout, nice and the like run the command after them with the same
-// argv, so a Git command behind one is read where it stands.
+// The command a passthrough prefix runs: what follows the prefix's own
+// options, the values they take and its operands (timeout's duration).
 function passthroughTarget(tokens) {
-    if (!PASSTHROUGH_PREFIX_EXECUTORS.has(shellExecutable(tokens[0]))) return null;
-    const at = tokens.findIndex((token, index) => index > 0 && isGitExecutable(token));
-    return at > 0 ? tokens.slice(at) : null;
+    const prefix = PASSTHROUGH_PREFIXES.get(shellExecutable(tokens[0]));
+    if (!prefix) return null;
+    let i = 1;
+    while (i < tokens.length && tokens[i].startsWith('-') && tokens[i] !== '-') {
+        if (tokens[i] === '--') {
+            i += 1;
+            break;
+        }
+        i += prefix.values.includes(tokens[i]) ? 2 : 1;
+    }
+    i += prefix.operands;
+    return i < tokens.length ? tokens.slice(i) : null;
 }
 
 function indirectCommitInvocation(words, initialCwd) {
