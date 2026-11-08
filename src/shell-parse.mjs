@@ -11,10 +11,34 @@ import { basename, dirname, isAbsolute, posix, resolve } from 'node:path';
 // refused rather than read, before deep nesting exhausts the stack.
 const MAX_PARSE_DEPTH = 16;
 let parseDepth = 0;
+// The text echo, printf and tee write into files, shared by every parse of one
+// line: a script written in the line is run by a unit, a substitution, a nested
+// shell or a wrapper that parses on its own.
+let writtenInLine = null;
 
 // parseGit inspects a shell command line for staged-path, commit, policy-transition,
 // and branch/reference operations that need an agent-side guard decision.
 export function parseGit(cmd, initialCwd = process.cwd(), { posix = true } = {}) {
+    const outermost = writtenInLine === null;
+    if (outermost) writtenInLine = new Map();
+    try {
+        const parsed = parseGitNested(cmd, initialCwd, posix);
+        // A script's text is known once the whole line has been read, whatever
+        // came first: the file, or the unit that writes it.
+        if (outermost && writtenInLine.size) {
+            for (const [index, candidate] of parsed.commands.entries()) {
+                if (candidate.verb === 'script') {
+                    parsed.commands[index] = { ...candidate, inline: inlineScriptTexts(candidate, writtenInLine, candidate.cwd) };
+                }
+            }
+        }
+        return parsed;
+    } finally {
+        if (outermost) writtenInLine = null;
+    }
+}
+
+function parseGitNested(cmd, initialCwd, posix) {
     if (parseDepth >= MAX_PARSE_DEPTH) {
         return {
             commit: false,
@@ -285,7 +309,7 @@ function parseGitLine(command, initialCwd, posix = true) {
     // Whether a unit reads its own input as code (a bare sh, python -), for the
     // >( ) that holds one; and the text echo and printf units write to files.
     let stdinCode = false;
-    const writtenFiles = new Map();
+    const writtenFiles = writtenInLine;
     let echoedBefore = null;
     // A command before Git can take the hooks away when its words name them,
     // when it runs inside .git (cd .git && rm -rf hooks), or when it expands a
@@ -394,7 +418,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         if (mayChangeAimhoomanState(toks, unit.text, unwrapped.cwd)) {
             commands.push({ verb: 'aimhooman-state', cwd: unwrapped.cwd });
         }
-        const admin = aimhoomanInvocation(toks);
+        const admin = aimhoomanInvocation(toks) ?? expandedAimhoomanInvocation(toks, () => (setNames ??= namesSetIn(cmd)));
         if (admin) commands.push({ verb: 'aimhooman', ...admin, cwd: unwrapped.cwd });
         let commandPathDialectUncertain = shellPathDialectUncertain
             || unwrapped.pathDialectUncertain;
@@ -547,7 +571,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         if (toks.length < 2 && !dynamicName) {
             // ./leak.sh or a bare make runs a file of its own.
             const script = toks.length ? executedScript(toks) : null;
-            if (script) commands.push({ verb: 'script', ...script, inline: inlineScriptTexts(script, writtenFiles, unwrapped.cwd), cwd: unwrapped.cwd });
+            if (script) commands.push({ verb: 'script', ...script, cwd: unwrapped.cwd });
             if (toks.length && (!READ_ONLY_SHELL_COMMANDS.has(basename(toks[0])) || hasFileRedirect(unit.text))) {
                 prefixIndexMutationRisk ||= commandMayReplaceIndex(toks, unit.text);
                 prefixHooksRisk ||= prefixTouchesHooks(toks, unit.text, unwrapped.cwd);
@@ -603,24 +627,39 @@ function parseGitLine(command, initialCwd, posix = true) {
                 // may change. Only a skipped hook counts: Git run with its hooks
                 // is no reason to refuse, nor is a loop the wrapper's shell
                 // runs, or grep -l "git push" under find.
-                const rest = toks.slice(1);
+                const args = toks.slice(1);
                 const wholeLine = ['parallel', 'watch'].includes(shellExecutable(g0));
-                const texts = rest.filter((word, index) => /\s/.test(word)
-                    && (wholeLine || rest[index - 1] === '-c' || rest[index - 1] === '--command'));
+                const texts = args.filter((word, index) => /\s/.test(word)
+                    && (wholeLine || args[index - 1] === '-c' || args[index - 1] === '--command'));
+                // parallel gives its command the inputs after :::.
+                const rest = shellExecutable(g0) === 'parallel' ? args.filter((word) => !/^::::?\+?$/.test(word)) : args;
                 const at = rest.findIndex((word) => isGitExecutable(word) || WRAPPED_SHELLS.has(shellExecutable(word)));
                 if (at >= 0) texts.unshift(rest.slice(at).map(quoteShellWord).join(' '));
+                // aimhooman among the words is a command of its own, up to the
+                // next one: find -exec aimhooman allow x \;. Its subcommand is the
+                // next word, so gh --repo owner/aimhooman --label review is not
+                // one, and printed or searched for (xargs echo aimhooman allow) it
+                // is only text.
+                const adminAt = rest.flatMap((word, index) => (
+                    namesAimhooman(word) && !NON_EXECUTING_COMMANDS.has(shellExecutable(rest[index - 1])) ? [index] : []
+                ));
+                adminAt.forEach((from, next) => {
+                    const admin = aimhoomanInvocation(rest.slice(from, adminAt[next + 1]), { adjacent: true });
+                    if (admin) commands.push({ verb: 'aimhooman', ...admin, cwd: unwrapped.cwd });
+                });
+                for (const command of wrappedCommands(shellExecutable(g0), args)) texts.push(command.map(quoteShellWord).join(' '));
                 const program = interpreterCode(toks);
                 if (program && (SHELL_CODE_PROGRAMS.has(shellExecutable(g0)) || CODE_RUNS_COMMANDS.test(program.code))) {
                     texts.push(...embeddedGitTexts([program.code, ...program.rest].join(' ')));
                 }
                 const script = executedScript(toks);
-                if (script) commands.push({ verb: 'script', ...script, inline: inlineScriptTexts(script, writtenFiles, unwrapped.cwd), cwd: unwrapped.cwd });
+                if (script) commands.push({ verb: 'script', ...script, cwd: unwrapped.cwd });
                 for (const text of texts) {
                     const ran = parseGit(text, unwrapped.cwd);
                     mergeGitRun({
                         ...ran,
                         unreadable: false,
-                        commands: ran.commands.filter(skipsGitHooks),
+                        commands: ran.commands.filter((candidate) => (skipsGitHooks(candidate) || NOTE_VERBS.has(candidate.verb)) && !candidate.dynamic),
                     }, unwrapped.cwd);
                 }
             } else if (dynamicName && expandedWordMayRunGit(toks, () => (setNames ??= namesSetIn(cmd)), unwrapped.cwd)) {
@@ -936,7 +975,7 @@ function parseGitLine(command, initialCwd, posix = true) {
         // git submodule foreach git pull runs with each submodule's own hooks.
         if (ran) {
             mergeGitRun(verb === 'submodule'
-                ? { ...ran, commands: ran.commands.filter((candidate) => candidate.verb === 'commit' || skipsGitHooks(candidate)) }
+                ? { ...ran, commands: ran.commands.filter((candidate) => candidate.verb === 'commit' || skipsGitHooks(candidate) || NOTE_VERBS.has(candidate.verb)) }
                 : ran, cwd);
         }
     }
@@ -1679,27 +1718,41 @@ function redirectTargets(text, limit = Infinity) {
 // that says "run aimhooman allow", is not one.
 const AIMHOOMAN_LAUNCHERS = new Set(['bun', 'bunx', 'deno', 'node', 'nodejs', 'npm', 'npx', 'pnpm', 'pnpx', 'yarn']);
 
-function aimhoomanInvocation(tokens) {
-    const named = (word) => /^aimhooman(?:@\S*)?(?:\.[cm]?js)?$/i.test(String(word ?? '').replace(/\\/g, '/').split('/').at(-1));
+function namesAimhooman(word) {
+    return /^aimhooman(?:@\S*)?(?:\.[cm]?js)?$/i.test(String(word ?? '').replace(/\\/g, '/').split('/').at(-1));
+}
+
+// With adjacent, the subcommand is the word right after the name: the words of a
+// program that merely has aimhooman among its arguments follow it.
+function aimhoomanInvocation(tokens, { adjacent = false } = {}) {
     let at = 0;
-    if (!named(tokens[0])) {
+    if (!namesAimhooman(tokens[0])) {
         if (!AIMHOOMAN_LAUNCHERS.has(shellExecutable(tokens[0]))) return null;
         at = 1;
-        while (at < tokens.length && (tokens[at].startsWith('-') || ['dlx', 'exec', 'x'].includes(tokens[at]))) at += 1;
-        if (!named(tokens[at])) return null;
+        while (at < tokens.length && (tokens[at].startsWith('-') || ['dlx', 'exec', 'run', 'x'].includes(tokens[at]))) at += 1;
+        if (!namesAimhooman(tokens[at])) return null;
     }
     let args = tokens.slice(at + 1);
-    while (named(args[0])) args = args.slice(1);
-    const subcommand = args.find((arg) => !arg.startsWith('-')) ?? '';
+    while (namesAimhooman(args[0])) args = args.slice(1);
+    const subcommand = (adjacent ? args[0] : args.find((arg) => !arg.startsWith('-'))) ?? '';
     const option = args.findIndex((arg) => arg === '--profile' || arg.startsWith('--profile='));
     const profile = option < 0 ? null
         : args[option].startsWith('--profile=') ? args[option].slice('--profile='.length) : (args[option + 1] ?? '');
+    // A subcommand that expands (aimhooman $S x) is not known to be a harmless one.
+    if (!adjacent && /[$`*?[{]/.test(subcommand)) return { subcommand, profile, dynamic: true };
     if (['allow', 'review', 'policy-review', 'uninstall'].includes(subcommand)
         || (subcommand === 'override' && args.some((arg) => arg === 'remove' || arg === 'reset'))
         || (subcommand === 'init' && profile !== null)) {
         return { subcommand, profile };
     }
     return null;
+}
+
+// $A allow x where the line sets A to aimhooman: the variable is read as the
+// command. One set to a value the line does not show, or not set in it, is not.
+function expandedAimhoomanInvocation(tokens, setNames) {
+    const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(tokens[0] ?? '')?.[1];
+    return name && namesAimhooman(setNames().get(name)) ? aimhoomanInvocation(['aimhooman', ...tokens.slice(1)]) : null;
 }
 
 // Programs that change nothing in the files they name, so they change the
@@ -3814,20 +3867,51 @@ function executedScript(tokens) {
     return String(tokens[0] ?? '').includes('/') ? { kind: 'files', paths: [tokens[0]], shebang: true, label: tokens[0] } : null;
 }
 
-// The Git commands a program's code spells: the words after each git, read
-// once with the quotes that join string literals taken out ('core.hooks''Path',
-// 'comm''it') and once with every quote as a separator (['git','push']). Code
-// that builds a word at run time ('--no-ver' + 'ify', a decoded string) is not
-// seen; strict refuses a commit there, and CI stays the backstop.
+// xargs options that take the next word as their value.
+const XARGS_VALUE_OPTIONS = new Set([
+    '-a', '-d', '-E', '-I', '-J', '-L', '-n', '-P', '-R', '-S', '-s', '--arg-file', '--delimiter',
+    '--max-args', '--max-chars', '--max-lines', '--max-procs', '--process-slot-var',
+]);
+
+// The commands find and xargs run, as words: what follows each -exec, -execdir,
+// -ok or -okdir up to its ; or +, and what follows the options of xargs. Read as
+// a command line of their own, they show a script run by its path (xargs
+// ./r.sh) as well as Git and aimhooman.
+function wrappedCommands(program, args) {
+    const commands = [];
+    if (program === 'find') {
+        for (let at = 0; at < args.length; at += 1) {
+            if (!['-exec', '-execdir', '-ok', '-okdir'].includes(args[at])) continue;
+            let end = at + 1;
+            while (end < args.length && args[end] !== ';' && args[end] !== '+') end += 1;
+            commands.push(args.slice(at + 1, end));
+            at = end;
+        }
+    } else if (program === 'xargs') {
+        let at = 0;
+        while (at < args.length && args[at].startsWith('-') && args[at] !== '--') at += XARGS_VALUE_OPTIONS.has(args[at]) ? 2 : 1;
+        if (args[at] === '--') at += 1;
+        if (at < args.length) commands.push(args.slice(at));
+    }
+    return commands.filter((command) => command.length);
+}
+
+// The Git and aimhooman commands a program's code spells: the words after each
+// git or aimhooman, read once with the quotes that join string literals taken
+// out ('core.hooks''Path', 'comm''it') and once with every quote as a separator
+// (['git','push']). Code that builds a word at run time ('--no-ver' + 'ify', a
+// decoded string) is not seen; strict refuses a commit there, and CI stays the
+// backstop.
 function embeddedGitTexts(code) {
     const texts = [];
+    const starts = (word) => isGitExecutable(word) || namesAimhooman(word);
     for (const view of [code.replace(/['"`]/g, ''), code.replace(/['"`]/g, ' ')]) {
         const fragments = view.split(/[\s,;()[\]{}+]+/).filter(Boolean);
         for (let at = 0; at < fragments.length; at += 1) {
-            if (!isGitExecutable(fragments[at])) continue;
-            const words = ['git'];
+            if (!starts(fragments[at])) continue;
+            const words = [isGitExecutable(fragments[at]) ? 'git' : fragments[at]];
             for (let next = at + 1; next < fragments.length && words.length < 64; next += 1) {
-                if (/^(?:&&|\|\||\||&)$/.test(fragments[next]) || isGitExecutable(fragments[next])) break;
+                if (/^(?:&&|\|\||\||&)$/.test(fragments[next]) || starts(fragments[next])) break;
                 words.push(fragments[next]);
             }
             texts.push(words.map(quoteShellWord).join(' '));

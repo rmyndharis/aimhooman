@@ -4031,8 +4031,48 @@ test('aimhooman commands that loosen the policy and writes to its state are refu
                 'env FOO=1 aimhooman uninstall',
                 'sudo aimhooman uninstall',
                 'git add .git/aimhooman/config.json',
+                // Through a program that runs a command it is given.
+                'deno run -A npm:@rmyndharis/aimhooman allow x',
+                'find . -maxdepth 0 -exec aimhooman allow x \\;',
+                'find . -maxdepth 0 -exec git status \\; -exec aimhooman allow x \\;',
+                'xargs aimhooman allow',
+                'parallel aimhooman allow ::: x',
+                'watch aimhooman allow x',
+                "su -c 'aimhooman allow x'",
+                // Through the code of an interpreter.
+                `python3 -c "import os; os.system('aimhooman allow x')"`,
+                `node -e "require('child_process').execSync('npx aimhooman allow x')"`,
+                `perl -e 'system("aimhooman allow x")'`,
+                `ruby -e 'system("aimhooman uninstall")'`,
+                "make --eval='x: ; aimhooman allow x' x",
+                // Run by Git.
+                'git submodule foreach aimhooman allow x',
+                "git rebase --exec 'aimhooman allow x' HEAD~1",
+                "git -c alias.x='!aimhooman allow x' x",
+                // A subcommand or a command name held in a variable.
+                'aimhooman $SUB x',
+                'S=allow; aimhooman $S x',
+                'A=aimhooman; $A allow x',
+                'A=aimhooman; "${A}" uninstall',
             ]) {
                 assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'A=aimhooman; $A status',
+                'PM=npm; $PM uninstall left-pad',
+                // The name as a repository or package among another program's arguments.
+                "gh pr view 84 --repo rmyndharis/aimhooman --jq '.statusCheckRollup[0]'",
+                'gh issue list --repo rmyndharis/aimhooman --label review',
+                'npm install -g @rmyndharis/aimhooman@0.7.1',
+                'npm uninstall -g @rmyndharis/aimhooman',
+                // The name is text to a program that prints or searches it.
+                'xargs echo aimhooman allow x',
+                'find . -maxdepth 0 -exec echo aimhooman allow x \\;',
+                `python3 -c "print('aimhooman allow x')"`,
+                'xargs echo aimhooman',
+                'find . -maxdepth 0 -exec aimhooman status \\;',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
             }
         } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -4167,10 +4207,25 @@ test('a script written and run in the same line is read', async () => {
                 "printf 'x:\\n\\tgit push --no-verify origin wip\\n' > Makefile; make x",
                 "echo '{\"scripts\":{\"x\":\"git push --no-verify origin wip\"}}' > package.json && npm run x",
                 "git add -A && echo 'git push --no-verify origin wip' > r.sh && sh r.sh",
+                // Run by a nested shell, a substitution or a program that runs a command.
+                "echo 'git push --no-verify origin wip' > r.sh && bash -c 'sh r.sh'",
+                "echo 'git push --no-verify origin wip' > r.sh && echo $(sh r.sh)",
+                "echo 'git push --no-verify origin wip' > r.sh && x=$(bash r.sh)",
+                "echo 'git push --no-verify origin wip' > r.sh && env sh r.sh",
+                "echo 'git push --no-verify origin wip' > r.sh && find . -maxdepth 0 -exec sh r.sh \\;",
+                "echo 'git push --no-verify origin wip' > r.sh && xargs sh r.sh",
+                "echo 'git push --no-verify origin wip' > r.sh && chmod +x r.sh && xargs ./r.sh",
+                "echo 'git push --no-verify origin wip' > r.sh && chmod +x r.sh && find . -maxdepth 0 -exec ./r.sh {} \\;",
+                "echo 'git push --no-verify origin wip' > r.sh && su -c 'sh r.sh'",
+                "echo 'git push --no-verify origin wip' > r.sh && watch sh r.sh",
+                "echo 'git push --no-verify origin wip' > r.sh && parallel sh ::: r.sh",
+                "printf 'aimhooman allow x\\n' > r.sh && find . -maxdepth 0 -exec sh r.sh \\;",
             ]) {
                 assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
             }
             for (const command of [
+                "echo 'git status' > r.sh && find . -maxdepth 0 -exec sh r.sh \\;",
+                "echo 'git status' > r.sh && xargs sh r.sh",
                 "echo 'echo hi' > r.sh && sh r.sh",
                 "printf '#!/bin/sh\\nnpm test\\n' > r.sh && chmod +x r.sh && ./r.sh",
                 "echo 'build:\\n\\techo ok' > Makefile && make build",
@@ -4377,6 +4432,11 @@ test('large commands are decided in time proportional to their length', async ()
         '# note\n'.repeat(16000),
         "<<'".repeat(16000),
         "x=$(cat <<'EOF'\nline with 'quote and ( paren\nEOF\n)\n".repeat(1000),
+        `cp ${'aimhooman '.repeat(16000)}dest`,
+        `xargs ${'aimhooman '.repeat(16000)}`,
+        `find . ${'-exec aimhooman status \\; '.repeat(4000)}`,
+        `python3 -c "import os; ${"os.system('aimhooman status'); ".repeat(2000)}"`,
+        `${'echo x > r.sh; '.repeat(16000)}sh r.sh`,
     ]) {
         const started = performance.now();
         parseGit(command);

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `-c hook.<name>.command`, `-c protocol.ext.allow` and `-c protocol.allow` are refused for every Git command, and a stored config hook stops Git commands until it is removed.
 - Hook and config paths count however they are spelled: `.git//hooks`, `.git/./hooks`, `.git/[h]ooks`, the `.git` directory, a global gitconfig, or a path after `cd .git`.
 - An agent can no longer run `aimhooman allow`, `review`, `policy-review`, `uninstall`, `override remove` or `reset`, or `init` to a profile other than strict or the current one, nor change files in `.git/aimhooman`.
+- Those aimhooman commands, and a script written in the same line, are read behind `find -exec`, `xargs`, `su -c`, `watch`, `parallel` and in `python -c`, `node -e`, `perl -e`, `ruby -e` and `make --eval` code; a subcommand in a variable, as in `aimhooman $SUB`, is refused.
 
 ### Fixed
 

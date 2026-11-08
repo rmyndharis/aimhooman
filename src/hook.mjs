@@ -871,9 +871,10 @@ function scriptThatBypasses(commands) {
 }
 
 // Why an agent may not run this aimhooman command, or null. init may keep the
-// profile or raise it to strict. A script that sets the profile from a variable
-// is not judged: what it holds is not in the file.
+// profile or raise it to strict. A script that sets the profile or the
+// subcommand from a variable is not judged: what it holds is not in the file.
 function adminRefusal(admin, inScript) {
+    if (inScript && admin.dynamic) return null;
     if (admin.subcommand !== 'init') {
         return `aimhooman ${admin.subcommand} changes what this guard enforces; ask the user to run it.`;
     }
