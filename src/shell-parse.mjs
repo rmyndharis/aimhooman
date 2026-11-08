@@ -26,6 +26,7 @@ export function parseGit(cmd, initialCwd = process.cwd()) {
             environmentRisk: [],
             prefixRisk: true,
             prefixHooksRisk: true,
+            unreadable: true,
             addPaths: [],
             commands: [unreadableCommand(initialCwd)],
         };
@@ -53,10 +54,17 @@ function unreadableCommand(cwd) {
     };
 }
 
-// Shapes in a payload that run a command the parser never sees: a pipe into
-// a shell, an interpreter or xargs, command or process substitution, eval and
-// source. A plain nested sh -c or a redirect is read like any other line.
-const HIDDEN_COMMAND = /\$\(|`|[<>]\(|\|\s*(?:[^\s|;&]*\/)?(?:xargs|parallel|sh|bash|dash|zsh|ksh|fish|python[\d.]*|node|perl|ruby|php)\b|(?:^|[\s;&|(])(?:eval|source|\.)\s/;
+// eval, source or . where a command starts runs text the parser never sees.
+const SOURCED_COMMAND = /(?:^|[\n;&|(])\s*(?:eval|source|\.)\s/;
+
+// A payload the parser cannot read in full: substitution, a subshell, brace
+// group or function, control flow, an input redirect, a background job, a
+// pipe into anything but a read-only command, or a sourced file. Output
+// redirects are read like any other word, and a nested sh -c is judged by its
+// own parse.
+function payloadUnreadable(text) {
+    return SOURCED_COMMAND.test(text) || hasUncertainShellSyntax(text, { payload: true });
+}
 
 function parseGitLine(cmd, initialCwd) {
     let commit = false;
@@ -81,6 +89,7 @@ function parseGitLine(cmd, initialCwd) {
         };
     }
     uncertainShell = hasUncertainShellSyntax(cmd);
+    let unreadable = payloadUnreadable(cmd);
     let shellCwd = initialCwd;
     const directoryStack = [];
     let subshellDepth = 0;
@@ -98,11 +107,11 @@ function parseGitLine(cmd, initialCwd) {
     // runs, so a guarded Git command in it has no known target. Only what it
     // can do to Git counts against the rest of the line; a pager or a test
     // run does not, and neither does a read-only listing such as git branch.
-    const mergeGitRun = (ran, text, cwd) => {
+    const mergeGitRun = (ran, cwd) => {
         commands.push(...ran.commands
             .filter((candidate) => !gitReadOnlyRefCommand(candidate.verb, candidate.args || []))
             .map((candidate) => ({ ...candidate, targetUncertain: true })));
-        if (HIDDEN_COMMAND.test(text)) commands.push(unreadableCommand(cwd));
+        if (ran.unreadable) commands.push(unreadableCommand(cwd));
         prefixRisk ||= ran.prefixHooksRisk;
         prefixHooksRisk ||= ran.prefixHooksRisk;
     };
@@ -123,7 +132,7 @@ function parseGitLine(cmd, initialCwd) {
             // An exported GIT_SSH_COMMAND runs under the Git commands after it.
             const exported = environmentCommands(words.filter(isAssignment));
             const text = exported.join('\n');
-            if (exported.length) mergeGitRun(parseGit(text, shellCwd), text, shellCwd);
+            if (exported.length) mergeGitRun(parseGit(text, shellCwd), shellCwd);
             continue;
         }
         const unwrapped = unwrapCommand(words, shellCwd);
@@ -169,6 +178,7 @@ function parseGitLine(cmd, initialCwd) {
                     || candidate.pathDialectUncertain,
             })));
             sawAdd ||= parsed.addPaths.length > 0;
+            unreadable ||= parsed.unreadable;
             // What the nested shell runs is a prefix to every command after it.
             prefixRisk ||= parsed.prefixRisk;
             prefixHooksRisk ||= parsed.prefixHooksRisk;
@@ -610,7 +620,7 @@ function parseGitLine(cmd, initialCwd) {
             });
             policyTransitionRisk ||= raisesPolicyTransitionRisk(verb, verbArgs);
         }
-        if (ran) mergeGitRun(ran, gitRun.join('\n'), cwd);
+        if (ran) mergeGitRun(ran, cwd);
     }
     const indirectCommits = [
         ...pipedShellCommitInvocations(cmd, initialCwd),
@@ -663,6 +673,7 @@ function parseGitLine(cmd, initialCwd) {
         environmentRisk: unique(commands.flatMap((candidate) => candidate.environmentRisk || [])),
         prefixRisk,
         prefixHooksRisk,
+        unreadable,
         addPaths,
         commands,
     };
@@ -1281,14 +1292,14 @@ function nestedShellPayload(tokens) {
 // starts its --upload-pack itself, as archive does its --exec, and grep -O
 // opens the matching files with the command it is given.
 const GIT_RUN_OPTIONS = {
-    rebase: ['x', '--exec', 4],
-    difftool: ['x', '--extcmd', 8],
-    fetch: ['', '--upload-pack', 3],
-    pull: ['', '--upload-pack', 3],
-    'ls-remote': ['', '--upload-pack', 3],
-    clone: ['u', '--upload-pack', 3],
-    archive: ['', '--exec', 3],
-    grep: ['O', '--open-files-in-pager', 4, true],
+    rebase: [['x', '--exec', 4]],
+    difftool: [['x', '--extcmd', 8]],
+    fetch: [['', '--upload-pack', 3]],
+    pull: [['', '--upload-pack', 3]],
+    'ls-remote': [['', '--upload-pack', 3], ['', '--exec', 5]],
+    clone: [['u', '--upload-pack', 3]],
+    archive: [['', '--exec', 3]],
+    grep: [['O', '--open-files-in-pager', 4, true]],
 };
 
 // Values of an option written -xVALUE, -x VALUE, bundled as -ix VALUE,
@@ -1320,7 +1331,7 @@ export function gitRunPayload(verb, args) {
     const runs = URL_VERBS.has(verb)
         ? args.filter((arg) => arg.startsWith('ext::')).flatMap(extCommands)
         : [];
-    if (GIT_RUN_OPTIONS[verb]) runs.push(...optionValues(args, GIT_RUN_OPTIONS[verb]));
+    for (const spec of GIT_RUN_OPTIONS[verb] ?? []) runs.push(...optionValues(args, spec));
     if (verb === 'clone') runs.push(...optionValues(args, ['c', '--config', 3]).flatMap(configCommands));
     if (verb === 'config') {
         const at = args.findIndex(commandConfigKey);
@@ -1358,6 +1369,7 @@ const COMMAND_CONFIG_KEYS = [
     /^sendemail\.(?:sendmail|to|cc|header)cmd$/,
     /^(?:browser|man)\..+\.(?:cmd|path)$/,
     /^submodule\..+\.update$/,
+    /^tar\..+\.command$/,
 ];
 
 function commandConfigKey(key) {
@@ -1366,7 +1378,7 @@ function commandConfigKey(key) {
 }
 
 // Verbs that take a remote URL, where ext:: names a command.
-const URL_VERBS = new Set(['archive', 'clone', 'fetch', 'ls-remote', 'pull', 'push', 'remote', 'submodule']);
+const URL_VERBS = new Set(['archive', 'clone', 'config', 'fetch', 'ls-remote', 'pull', 'push', 'remote', 'submodule']);
 
 // A helper value that starts with ! is a shell snippet (credential.helper,
 // submodule.<name>.update); without it the rest is read the same way.
@@ -1441,7 +1453,7 @@ function nestedShellArgumentCommitInvocation(tokens, payload, initialCwd) {
 // cwd/execution scope in ways a non-executing parser cannot prove. A commit in
 // such a command is denied by the agent guard and can be retried as a direct
 // Git command, while ordinary `a && b`/`a || b` chains remain supported.
-function hasUncertainShellSyntax(command) {
+function hasUncertainShellSyntax(command, { payload = false } = {}) {
     let quote = '';
     let escaped = false;
     for (let i = 0; i < command.length; i++) {
@@ -1476,6 +1488,11 @@ function hasUncertainShellSyntax(command) {
             if (isBraceGroupToken(command, i)) return true;
             continue;
         }
+        if (payload && char === '>' && command[i + 1] !== '(') continue;
+        if (payload && char === '&' && (command[i - 1] === '>' || command[i + 1] === '>')) continue;
+        if (payload && char === '|' && (command[i - 1] === '|' || command[i + 1] === '|')) continue;
+        if (payload && char === '|' && command[i + 1] !== '|'
+            && SAFE_PIPE_EXECUTABLES.has(shellExecutable(shellWords(command.slice(i + 1))[0] ?? ''))) continue;
         if (char === '`' || char === '(' || char === ')' || char === '<' || char === '>') return true;
         if (char === '|' && command[i + 1] !== '|') return true;
         if (char === '&' && command[i + 1] !== '&' && command[i - 1] !== '&') return true;
