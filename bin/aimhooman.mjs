@@ -676,7 +676,8 @@ function cmdRefcheck(args) {
     for (const update of updates) {
         if (update.ref === 'HEAD' || !/^0+$/.test(update.oldObjectId)) continue;
         try {
-            update.oldObjectId = refObjectId(repo, update.ref) ?? update.oldObjectId;
+            const current = refObjectId(repo, update.ref);
+            if (current) Object.assign(update, { oldObjectId: current, forced: true });
         } catch (error) {
             console.error(`aimhooman: cannot read ${update.ref}: ${error.message}`);
             return 30;

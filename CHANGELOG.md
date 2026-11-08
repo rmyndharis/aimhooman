@@ -63,9 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hooks.
 - A chained hook keeps the options on its `#!` line, so `#!/bin/sh -e` stops at
   a failing command instead of letting the commit through.
-- A clone or first pull under global hooks no longer scans every commit ever
-  made, or fails on residue in an old one: a branch created with no other local
-  branch skips the commits a remote-tracking ref already holds.
+- A clone, or a first pull from a configured remote, under global hooks no
+  longer scans every commit ever made, or fails on residue in an old one: a
+  branch created with no other local branch skips the commits a remote-tracking
+  ref already holds, and checks its tip.
 - Files inside Aider's `.aider.tags.cache.v*/` directories are caught; the old
   `.aider.*` pattern matched only the directory name.
 - The pre-commit.com hook runs on every commit, including commits that only
