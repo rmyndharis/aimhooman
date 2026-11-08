@@ -453,7 +453,8 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
     const paths = Object.keys(MANAGED).flatMap((name) => [
         join(dir, name),
         join(chainedDir, name),
-    ]);
+        join(chainedDir, `${name}.legacy`),
+    ]).filter((path) => entry(path)?.isFile() ?? true);
     const snapshots = paths.map(snapshotFile);
     const writeHook = options.writeHook || atomicWrite;
     try {
@@ -475,12 +476,37 @@ function installHooksLocked(repo, cliPath, options, dir, warnings) {
             }
             writeHook(dest, hookScript(name, cmd, cliPath, join(chainedDir, name)), { mode: 0o755 });
             chmodSync(dest, 0o755);
+            if (entry(join(chainedDir, name))) linkLegacyHook(dir, chainedDir, name, writeHook);
             installed.push(name);
         }
     } catch (error) {
         rollbackFiles(snapshots, error);
     }
     return { installed: installed.sort(), chained: chained.sort(), warnings, shared: false };
+}
+
+// pre-commit.com runs <hook dir>/<name>.legacy, the hook it moved aside, and
+// reads the hook dir from $0, which for a chained hook is its backup slot. A
+// shim beside the backup runs the one in the hooks directory. An older
+// dispatcher left as .legacy would run this chain again, so it gets none.
+const LEGACY_SHIM_MARK = '# aimhooman: runs the .legacy hook beside the dispatcher';
+
+function linkLegacyHook(dir, chainedDir, name, writeHook) {
+    const legacy = join(dir, `${name}.legacy`);
+    const shim = join(chainedDir, `${name}.legacy`);
+    const present = entry(shim);
+    if (present && !isLegacyShim(shim, present)) return;
+    const target = entry(legacy);
+    if (!target?.isFile() || ownedHook(readFileSync(legacy, 'utf8'), name)) {
+        if (present) unlinkSync(shim);
+        return;
+    }
+    writeHook(shim, `#!/bin/sh\n${LEGACY_SHIM_MARK}\nexec ${shq(legacy)} "$@"\n`, { mode: 0o755 });
+    chmodSync(shim, 0o755);
+}
+
+function isLegacyShim(path, stat = entry(path)) {
+    return Boolean(stat?.isFile()) && readFileSync(path, 'utf8').includes(`\n${LEGACY_SHIM_MARK}\n`);
 }
 
 // uninstallHooks removes aimhooman hooks and restores any chained originals.
@@ -599,6 +625,8 @@ function uninstallHooksLocked(repo, dir, warnings) {
             } else {
                 unlinkSync(dest);
             }
+            const shim = join(chainedDir, `${name}.legacy`);
+            if (isLegacyShim(shim)) unlinkSync(shim);
             removed.push(name);
         } catch (error) {
             failures.push(`${name}: ${error.message}`);
