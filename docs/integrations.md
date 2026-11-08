@@ -13,7 +13,7 @@ aimhooman straight from Git. Add this to `.pre-commit-config.yaml` and run
 ```yaml
 repos:
   - repo: https://github.com/rmyndharis/aimhooman
-    rev: v0.7.0
+    rev: v0.7.1
     hooks:
       - id: aimhooman
 ```
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: rmyndharis/aimhooman@v0.7.0
+      - uses: rmyndharis/aimhooman@v0.7.1
         with:
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
@@ -80,10 +80,10 @@ it. Under `clean` those changes are notices and the check passes; under
 from its owner through CI scripts that the npm package does not carry and the
 action never runs ([docs/policy.md](policy.md#owner-authorization-in-ci)).
 
-Pinning the action tag (`@v0.7.0`) pins only the action's steps, not the CLI:
+Pinning the action tag (`@v0.7.1`) pins only the action's steps, not the CLI:
 the action npm-installs aimhooman at run time, and the `version` input
 defaults to `latest`. Set `version:` under `with:` (for example
-`version: 0.7.0`) to pin the CLI itself.
+`version: 0.7.1`) to pin the CLI itself.
 
 For `push` events, use `base: ${{ github.event.before }}` and
 `head: ${{ github.event.after }}`. On the first push to a branch `before` is
