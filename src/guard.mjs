@@ -5,7 +5,7 @@
 // exercised without spawning it.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GIT_TIMEOUT_MS } from './git-environment.mjs';
 import {
@@ -13,7 +13,9 @@ import {
     stagedPaths,
     stagedRenameSources,
     stagedTreeSha,
+    committedElsewhere,
     fetchedCommit,
+    onLocalBranch,
     unstagePaths,
 } from './gitx.mjs';
 import { installedHooks } from './githooks.mjs';
@@ -94,6 +96,7 @@ export function recordPrecommitClean(repo, profile) {
         return; // cannot compute the sha → do not record; commit-msg will scan
     }
     try {
+        mkdirSync(repo.stateDir, { recursive: true });
         writeFileSync(precommitCleanPath(repo), JSON.stringify({
             version: PRECOMMIT_CLEAN_VERSION,
             tree: treeSha,
@@ -115,6 +118,29 @@ export function precommitCleanMatches(repo, treeSha, profile) {
         && marker.complete === true
         && marker.tree === treeSha
         && marker.profile === profile;
+}
+
+// The tree whose reviews a hook has printed. The final guard prints a review
+// only where no hook did (--no-verify, a cherry-pick). Separate from the clean
+// marker, which stays unwritten for a repaired or incomplete scan that still
+// printed its reviews.
+function reviewsShownPath(repo) {
+    return join(repo.stateDir, 'reviews-shown.json');
+}
+export function recordReviewsShown(repo, tree = null) {
+    try {
+        mkdirSync(repo.stateDir, { recursive: true });
+        writeFileSync(reviewsShownPath(repo), JSON.stringify({ tree: tree ?? stagedTreeSha(repo) }));
+    } catch {
+        // best effort; the final guard then names the review once more
+    }
+}
+function reviewsShown(repo, tree) {
+    try {
+        return JSON.parse(readFileSync(reviewsShownPath(repo), 'utf8'))?.tree === tree;
+    } catch {
+        return false;
+    }
 }
 
 // repairStagedBlocks unstages every blocked path plus the rename sources that
@@ -232,21 +258,23 @@ export function resolveIntroduced(repo, updates, {
 }
 
 // authoredHere decides whether an update's new tip was written in this clone.
-// One new commit on top of a non-zero old tip (a plain commit, an --amend)
-// always is: a commit the final guard refused can be given a branch or a tag,
-// and nothing tells it apart from a fetched one. A merge on top of the old tip,
-// or a commit with no parent that starts a branch (an initial or orphan
-// commit), is unless it came from elsewhere (fetchedCommit). The commits a
-// merge brings in keep their own standing.
-// shortcut: a pull that fast-forwards exactly one fetched commit is read as
-// made here, so its message can stop the pull; tell fetches apart if that bites.
+// One new commit on top of a non-zero old tip (a plain commit, an --amend) is,
+// unless someone else committed it and a fetch holds it: a commit the final
+// guard refused can be given a local branch or a remote-tracking ref, but it
+// keeps the committer it was made with. A merge on top of the old tip, or a
+// commit with no parent that starts a branch (an initial or orphan commit), is
+// when this identity committed it and no fetch holds it. Fetched history can
+// outlive FETCH_HEAD and need not have a remote-tracking ref, so someone else's
+// is enough there. The commits a merge brings in keep their own standing.
 function authoredHere(repo, { oldObjectId, newObjectId }, introduced, fetchedTips) {
-    const created = /^0+$/.test(oldObjectId);
-    if (!created && introduced.length === 1 && introduced[0] === newObjectId) return true;
     if (!introduced.includes(newObjectId)) return false;
+    const created = /^0+$/.test(oldObjectId);
+    if (!created && introduced.length === 1) {
+        return !(committedElsewhere(repo, newObjectId) && fetchedCommit(repo, newObjectId, fetchedTips));
+    }
     const { parents } = commitParents(repo, newObjectId);
     const shaped = created ? !parents.length : parents.length > 1 && parents[0] === oldObjectId;
-    return shaped && !fetchedCommit(repo, newObjectId, fetchedTips);
+    return shaped && !committedElsewhere(repo, newObjectId) && !fetchedCommit(repo, newObjectId, fetchedTips);
 }
 
 // scanProposedCommits scans each introduced commit and returns the first
@@ -305,7 +333,7 @@ export function scanProposedCommits(repo, commits, {
         // ran it. Commits brought in from elsewhere are not the developer's to
         // review, and a tree pre-commit passed was reported there already.
         if (printReviews && authoredLocally && scan.findings.length
-            && !(afterPrecommit && precommitCleanMatches(repo, commitTree(repo, revision), scan.profile))) {
+            && !(afterPrecommit && (reviewsShown(repo, commitTree(repo, revision)) || onLocalBranch(repo, revision)))) {
             reviews.push(...scan.findings);
         }
         if (!scan.complete) {

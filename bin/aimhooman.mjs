@@ -22,6 +22,7 @@ import {
     precommitCleanMatches,
     recordPrecommitClean,
     repairStagedBlocks,
+    recordReviewsShown,
     resolveIntroduced,
     scanProposedCommits,
     warnIncompleteOnce,
@@ -328,7 +329,10 @@ function cmdPrecommit(args) {
     const blocks = allFindings
         .filter((f) => f.decision === 'block');
     if (!blocks.length) {
-        if (reviews.length) process.stderr.write(human(reviews, tone()));
+        if (reviews.length) {
+            process.stderr.write(human(reviews, tone()));
+            recordReviewsShown(repo);
+        }
         if (!scan.complete) {
             // Strict stops on an unchecked remainder. Clean/compliance go ahead
             // with a warning — printed once per tree across all of a commit's
@@ -406,6 +410,7 @@ function cmdPrecommit(args) {
     // not. The request was to commit the artifact, not to stamp the history with
     // its message and no content.
     if (emptied) return 10;
+    if (reviews.length) recordReviewsShown(repo);
     if (scan.complete) noticeIgnoredArtifacts(repo);
     return 0;
 }
@@ -526,20 +531,25 @@ function cmdCommitmsg(args) {
     }
     const removedLines = new Set(removed.map((finding) => finding.line));
     const remaining = findings.filter((finding) => !removedLines.has(finding.line));
-    if (remaining.length) process.stderr.write(human(remaining, tone()));
+    if (remaining.length) {
+        process.stderr.write(human(remaining, tone()));
+        if (options.tree) recordReviewsShown(repo, options.tree);
+    }
     return remaining.some((finding) => finding.decision === 'block') ? 10 : 0;
 }
 
 // Git cuts a message file at its scissors line, which `git commit -v` writes
 // above the diff it shows, so nothing from that line on reaches the commit. It
-// cuts only for a verbose commit (-v, which leaves the diff below the line, or
-// commit.verbose) or commit.cleanup=scissors; a scissors line typed into -F
-// text otherwise stays. The line opens with the comment string, which
-// core.commentChar and core.commentString both set; the last one read wins.
+// cuts for commit.verbose, and when the message is edited for -v (the diff is
+// below the line) or commit.cleanup=scissors. A scissors line typed into -F
+// text otherwise stays: without an editor, Git runs this hook with GIT_EDITOR=:.
+// The line opens with the comment string, which core.commentChar and
+// core.commentString both set; the last one read wins.
 function scissorsOffset(repo, bytes) {
     if (!bytes.includes(' >8 ')) return bytes.length;
     let comment = '#';
     let cuts = false;
+    const edited = process.env.GIT_EDITOR !== ':';
     try {
         const settings = execFileSync('git', [
             'config', '-z', '--get-regexp', '^(core\\.comment(char|string)|commit\\.(cleanup|verbose))$',
@@ -555,7 +565,7 @@ function scissorsOffset(repo, bytes) {
         const last = settings.filter(([key]) => key.startsWith('core.comment')).at(-1);
         if (last) comment = last[1];
         const value = (name) => settings.filter(([key]) => key === name).at(-1)?.[1] ?? '';
-        cuts = value('commit.cleanup').toLowerCase() === 'scissors'
+        cuts = (edited && value('commit.cleanup').toLowerCase() === 'scissors')
             || !/^(?:|false|no|off|0)$/i.test(value('commit.verbose'));
     } catch { /* none is set */ }
     // auto picks one of these per commit. Cutting at the latest of their first
@@ -566,7 +576,7 @@ function scissorsOffset(repo, bytes) {
         .filter((offset) => offset >= 0);
     if (!found.length) return bytes.length;
     const offset = Math.max(...found);
-    return cuts || framed.indexOf('\ndiff --git ', offset + 1) >= 0 ? offset : bytes.length;
+    return cuts || (edited && framed.indexOf('\ndiff --git ', offset + 1) >= 0) ? offset : bytes.length;
 }
 
 function cmdPushcheck(args) {

@@ -96,9 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incomplete, instead of being counted as binary.
 - Commit and range scans read UTF-16 files whole, so a marker on a changed line
   is no longer missed where Git's line numbers do not match the text.
-- The commit-msg hook ignores what Git cuts at the scissors line, the diff
-  `git commit -v` adds or text under `commit.cleanup=scissors`, honoring
-  `core.commentChar` and `core.commentString`.
+- The commit-msg hook ignores what Git cuts at the scissors line of an edited
+  message, the diff `git commit -v` adds or text under `commit.cleanup=scissors`,
+  honoring `core.commentChar` and `core.commentString`.
 - pre-push accepts a local ref with spaces, such as `main@{1 minute ago}`, and
   scans a push whose local ref holds two spaces in a row; run `aimhooman init`
   to update installed hooks.
@@ -147,6 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running.
 - `git clone --depth 1` succeeds under global hooks: the final ref guard no
   longer stops on the shallow tip it has no parent to diff against.
+- A pull that fast-forwards one commit someone else made no longer fails on
+  that commit's message; a commit by this identity is still read.
 - Branch switches, tags and the `preparing` phase of a ref update no longer
   start Node. Run `aimhooman init` to update installed hooks.
 - `doctor` reports dispatchers left pointing at a moved or renamed repository;

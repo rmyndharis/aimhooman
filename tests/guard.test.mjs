@@ -9,6 +9,7 @@ import {
     dispatchHooksChanged,
     precommitCleanMatches,
     recordPrecommitClean,
+    recordReviewsShown,
     repairStagedBlocks,
     resolveIntroduced,
     scanProposedCommits,
@@ -234,11 +235,30 @@ test('resolveIntroduced counts a merge made here and a commit with no history as
         git(dir, ['update-ref', 'refs/remotes/origin/pages', root]);
         assert.equal(authored(mergeUpdate).get(merge), false, 'a fast-forward to a fetched merge');
         assert.equal(authored(rootUpdate).get(root), false, 'a branch made from a fetched root');
-        // One commit on the old tip counts whatever holds it.
+        // One commit on the old tip counts whatever holds it, while this
+        // identity committed it: a refused commit can be given any ref.
         const lone = git(dir, ['commit-tree', tree, '-p', base, '-m', 'one more']);
         const one = { oldObjectId: base, newObjectId: lone, ref: branch };
         git(dir, ['update-ref', 'refs/remotes/origin/one', lone]);
-        assert.equal(fetched(one, [lone]).get(lone), true, 'one commit on the old tip');
+        assert.equal(fetched(one, [lone]).get(lone), true, 'one commit by this identity');
+        // Someone else's: a fetch has to hold one commit, while a merge or a
+        // root is theirs whatever holds it, since fetched history outlives FETCH_HEAD.
+        const mate = (...args) => execFileSync('git', ['commit-tree', tree, ...args], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { ...process.env, GIT_COMMITTER_NAME: 'Mate', GIT_COMMITTER_EMAIL: 'mate@example.com' },
+        }).trim();
+        const theirs = mate('-p', base, '-m', 'theirs');
+        const single = { oldObjectId: base, newObjectId: theirs, ref: branch };
+        assert.equal(authored(single).get(theirs), true, 'nothing fetched holds it');
+        git(dir, ['update-ref', 'refs/heads/mine', theirs]);
+        assert.equal(authored(single).get(theirs), true, 'a local branch is not a fetch');
+        git(dir, ['update-ref', 'refs/remotes/origin/theirs', theirs]);
+        assert.equal(authored(single).get(theirs), false, 'a pull of one commit someone else made');
+        const theirMerge = mate('-p', base, '-p', side, '-m', 'their merge');
+        assert.equal(authored({ oldObjectId: base, newObjectId: theirMerge, ref: branch }).get(theirMerge), false);
+        const theirRoot = mate('-m', 'their root');
+        assert.equal(authored({ oldObjectId: '0'.repeat(40), newObjectId: theirRoot, ref: 'refs/heads/o' }).get(theirRoot), false);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -251,8 +271,9 @@ test('scanProposedCommits names an advisory review for a commit made here, once'
         mkdirSync(repo.stateDir, { recursive: true });
         writeFileSync(join(dir, 'AGENTS.md'), '# Agent instructions\n');
         git(dir, ['add', 'AGENTS.md']);
-        git(dir, ['commit', '-q', '-m', 'agents']);
-        const head = git(dir, ['rev-parse', 'HEAD']);
+        // At the prepared phase a commit Git just wrote is on no branch yet.
+        const tree = git(dir, ['write-tree']);
+        const head = git(dir, ['commit-tree', tree, '-p', 'HEAD', '-m', 'agents']);
         const context = [{ head, storedTransition: head, scanTransition: head }];
         const notice = (authoredLocally, options = {}) => {
             let code;
@@ -264,9 +285,13 @@ test('scanProposedCommits names an advisory review for a commit made here, once'
         };
         assert.match(notice(true), /REVIEW +generic\.agent-instructions/);
         assert.equal(notice(false), '', 'a commit from elsewhere is not the developer\'s to review');
-        recordPrecommitClean(repo, 'clean');
-        assert.equal(notice(true, { afterPrecommit: true }), '', 'pre-commit already named this tree');
-        assert.match(notice(true), /REVIEW/, 'a push names it whatever pre-commit printed');
+        assert.match(notice(true, { afterPrecommit: true }), /REVIEW/, 'no hook printed it');
+        recordReviewsShown(repo, tree);
+        assert.equal(notice(true, { afterPrecommit: true }), '', 'a hook already named this tree');
+        recordReviewsShown(repo, 'another tree');
+        git(dir, ['update-ref', 'refs/heads/held', head]);
+        assert.equal(notice(true, { afterPrecommit: true }), '', 'a branch already holds this commit');
+        assert.equal(notice(true, { printReviews: false }), '');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
