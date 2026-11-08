@@ -114,8 +114,54 @@ export function normalizeAnsiCQuotes(command) {
     return out;
 }
 
+// f() { ...; }; f runs the body with the arguments after the call, the way a
+// credential helper written as a function runs. The body is read in its place.
+// A brace in the body other than ${...}, or more than plain arguments after the
+// call, leaves the text as it was. Scanned by hand: two optional blank runs in
+// one regex backtrack quadratically on a long run of spaces.
+const FUNCTION_HEAD = /^\s*(?:function[^\S\n]+([A-Za-z_][A-Za-z0-9_]*)(?:[^\S\n]*\(\))?|([A-Za-z_][A-Za-z0-9_]*)[^\S\n]*\([^\S\n]*\))[^\S\n]*\{/;
+
+function calledFunctionBody(text) {
+    const head = FUNCTION_HEAD.exec(text);
+    if (!head) return text;
+    let end = head[0].length;
+    for (; end < text.length && text[end] !== '}'; end += 1) {
+        if (text[end] === '{') return text;
+        if (text[end] === '$' && text[end + 1] === '{') {
+            const close = text.indexOf('}', end);
+            if (close < 0 || text.slice(end + 2, close).includes('{')) return text;
+            end = close;
+        }
+    }
+    if (end >= text.length) return text;
+    const call = /^\s*(?:;\s*)?([A-Za-z_][A-Za-z0-9_]*)/.exec(text.slice(end + 1));
+    if (!call || call[1] !== (head[1] ?? head[2])) return text;
+    const args = text.slice(end + 1 + call[0].length);
+    if (args && !/^[^\S\n]/.test(args)) return text;
+    return /[;&|<>()`$\n]/.test(args.trimEnd()) ? text : text.slice(head[0].length, end);
+}
+
+// The first setting in `git config --list -z` output whose command visibly
+// runs Git to commit, move refs or skip the hooks, or null. Config already in
+// files (an include, a hand edit) hands Git that command on a later call, even
+// one that only reads, such as a pager under git log.
+export function configuredGitRisk(listing, cwd) {
+    for (const entry of String(listing).split('\0')) {
+        const at = entry.indexOf('\n');
+        if (at < 0) continue;
+        const key = entry.slice(0, at);
+        for (const payload of configCommands(`${key}=${entry.slice(at + 1)}`)) {
+            if (/\bhookspath\b/i.test(payload)) return key;
+            if (parseGit(payload, cwd).commands.some((candidate) => (
+                EXPANDED_GIT_VERBS.has(candidate.verb) || candidate.bypassHooks || candidate.hooksPathOverride
+            ))) return key;
+        }
+    }
+    return null;
+}
+
 function parseGitLine(command, initialCwd) {
-    const cmd = normalizeAnsiCQuotes(command);
+    const cmd = calledFunctionBody(normalizeAnsiCQuotes(command));
     let commit = false;
     let noVerify = false;
     let bypassHooks = false;

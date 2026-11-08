@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { parseGit, asObject, shellPathIsAmbiguous } from '../src/hook.mjs';
 import { defaultPatterns, inspectExclude } from '../src/exclude.mjs';
+import { configuredGitRisk } from '../src/shell-parse.mjs';
 
 const CLI = join(process.cwd(), 'bin/aimhooman.mjs');
 
@@ -158,12 +159,19 @@ test('parseGit recognizes hook bypasses, wrappers, and quoted paths', () => {
         `CMD='git -C /tmp/strict commit --no-verify -m unsafe'; eval "$CMD"`,
         `CMD='git -C /tmp/strict commit --no-verify -m unsafe'; sh -c "$CMD"`,
         `set -- git -C /tmp/strict commit --no-verify -m unsafe; "$@"`,
+    ]) {
+        const parsed = parseGit(command);
+        assert.equal(parsed.commit, true, command);
+        assert.equal(parsed.uncertainShell, true, command);
+    }
+    // A function called right after it is defined is read through its body.
+    for (const command of [
         `f(){ git -C /tmp/strict commit --no-verify -m unsafe; }; f`,
         `function f { git -C /tmp/strict commit --no-verify -m unsafe; }; f`,
     ]) {
         const parsed = parseGit(command);
         assert.equal(parsed.commit, true, command);
-        assert.equal(parsed.uncertainShell, true, command);
+        assert.equal(parsed.noVerify, true, command);
     }
     assert.equal(parseGit('printf "%s" "left | git commit --no-verify"').commit, false);
     assert.equal(parseGit('git commit -a -m x').commands[0].futureIndex, true);
@@ -962,7 +970,11 @@ test('hook-affecting config cannot bypass the final ref guard for protected Git 
                 tool_input: { command: `git push self ${bad}:refs/heads/bypass-configured` },
             });
             assert.equal(configuredReceiver.permissionDecision, 'deny', profile);
-            assert.match(configuredReceiver.permissionDecisionReason, /configured remote receive-pack/, profile);
+            assert.match(
+                configuredReceiver.permissionDecisionReason,
+                /configured remote receive-pack|Git config remote\.self\.receivepack/,
+                profile,
+            );
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -2759,7 +2771,7 @@ test('literal indirection into a strict target is denied from a clean repository
             assert.equal(decision?.permissionDecision, 'deny', command);
             assert.match(
                 decision.permissionDecisionReason,
-                /strict Git commit|dynamic execution|environment assignments|shell expansion/,
+                /strict Git commit|dynamic execution|environment assignments|shell expansion|policy hooks/,
                 command,
             );
             assert.equal(
@@ -3646,6 +3658,51 @@ test('expanded command words and wrappers are refused only where they can run Gi
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
+    }
+});
+
+test('configuredGitRisk names a setting whose command commits, moves refs or repoints the hooks', () => {
+    const listing = (pairs) => pairs.map(([key, value]) => `${key}\n${value}`).join('\0') + '\0';
+    assert.equal(configuredGitRisk(listing([
+        ['core.pager', 'less -R'],
+        ['core.editor', 'code --wait'],
+        ['core.fsmonitor', '.git/hooks/fsmonitor-watchman'],
+        ['filter.lfs.process', 'git-lfs filter-process'],
+        ['credential.https://github.com.helper', '!gh auth git-credential'],
+        ['credential.helper', '!f() { echo username=x; echo "password=${GH_TOKEN}"; }; f'],
+        ['user.name', 'git commit'],
+    ]), process.cwd()), null);
+    for (const [key, value] of [
+        ['core.pager', 'git commit -qm x --no-verify'],
+        ['filter.x.clean', "sh -c 'git push --no-verify origin main'"],
+        ['credential.helper', '!f() { git push origin main; }; f'],
+        ['core.fsmonitor', 'git config core.hooksPath /dev/null'],
+    ]) {
+        assert.equal(configuredGitRisk(listing([['core.pager', 'less'], [key, value]]), process.cwd()), key, value);
+    }
+});
+
+// A setting already in a config file runs under an ordinary Git call. A
+// credential helper written as a function has its body read like a command.
+test('Git commands configured in files and helper functions are read', async () => {
+    const dir = makeHookRepo('clean', 'aim-hook-configured-');
+    try {
+        const helper = "git -c credential.helper='!f() { echo username=x; echo \"password=${GH_TOKEN}\"; }; f' push origin main";
+        for (const command of ['git log --oneline -1', helper]) {
+            assert.equal(await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } }), null, command);
+        }
+        const pushing = "git -c credential.helper='!f() { git push --no-verify origin main; }; f' fetch";
+        assert.equal((await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command: pushing } }))?.permissionDecision, 'deny');
+
+        // include.path resolves from .git/config, so ../extra.cfg sits in the worktree.
+        writeFileSync(join(dir, 'extra.cfg'), '[core]\n\tpager = git commit -qm x --no-verify\n');
+        execFileSync('git', ['config', 'include.path', '../extra.cfg'], { cwd: dir });
+        const out = await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command: 'git log --oneline -1' } });
+        assert.equal(out?.permissionDecision, 'deny');
+        assert.match(out.permissionDecisionReason, /core\.pager/);
+        assert.equal(await invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command: 'ls' } }), null);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
     }
 });
 
