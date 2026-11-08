@@ -9,7 +9,6 @@ import {
     mkdtempSync,
     mkdirSync,
     readFileSync,
-    realpathSync,
     renameSync,
     rmSync,
     symlinkSync,
@@ -2148,7 +2147,7 @@ test('a chained predecessor sees the original $0, so $(dirname "$0") resolves to
     }
 });
 
-test('a chained bash predecessor runs under bash and sees the original $0', (t) => {
+test('a chained bash predecessor runs as a program under bash', (t) => {
     if (process.platform === 'win32' || !existsSync('/bin/dash')) {
         t.skip('needs /bin/dash, the /bin/sh of Debian and Ubuntu');
         return;
@@ -2160,14 +2159,15 @@ test('a chained bash predecessor runs under bash and sees the original $0', (t) 
             const repo = openRepo(root);
             const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
             // The shape pre-commit.com installs: bash with arrays, which dash
-            // cannot parse, and a hook directory taken from $0, where it looks
-            // for the .legacy hook it moved aside.
+            // cannot parse, here behind the guard a bash script uses to run its
+            // body only when it is executed rather than sourced.
             writeFileSync(
                 join(hooks, 'pre-commit'),
                 '#!/usr/bin/env bash\n'
                 + 'ARGS=(hook-impl --hook-type=pre-commit)\n'
-                + 'HERE="$(cd "$(dirname "$0")" && pwd -P)"\n'
-                + 'printf \'%s %s\\n\' "${ARGS[1]}" "$HERE" > "$PWD/predecessor.ran"\n',
+                + 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then\n'
+                + '  printf \'%s\\n\' "${ARGS[1]}" > "$PWD/predecessor.ran"\n'
+                + 'fi\n',
                 { mode: 0o755 },
             );
             chmodSync(join(hooks, 'pre-commit'), 0o755);
@@ -2175,10 +2175,40 @@ test('a chained bash predecessor runs under bash and sees the original $0', (t) 
 
             const out = spawnSync('/bin/dash', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8' });
             assert.equal(out.status, 0, `dispatcher failed under dash: ${out.stderr}`);
-            assert.equal(
-                readFileSync(join(root, 'predecessor.ran'), 'utf8'),
-                `--hook-type=pre-commit ${realpathSync(hooks)}\n`,
+            assert.equal(readFileSync(join(root, 'predecessor.ran'), 'utf8'), '--hook-type=pre-commit\n');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('a chained sh predecessor that re-execs itself through $0 runs once', (t) => {
+    if (process.platform === 'win32' || !existsSync('/bin/dash')) {
+        t.skip('needs /bin/dash, the /bin/sh of Debian and Ubuntu');
+        return;
+    }
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-chained-reexec-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            // A hook that wants bash re-runs itself with it through "$0", which
+            // names the dispatcher.
+            writeFileSync(
+                join(hooks, 'pre-commit'),
+                '#!/bin/sh\n'
+                + '[ -n "$BASH_VERSION" ] || exec bash "$0" "$@"\n'
+                + 'echo ran >> "$PWD/predecessor.ran"\n',
+                { mode: 0o755 },
             );
+            chmodSync(join(hooks, 'pre-commit'), 0o755);
+            installHooks(repo, CLI);
+
+            const out = spawnSync('/bin/dash', [join(hooks, 'pre-commit')], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+            assert.equal(out.error, undefined, 'the dispatcher must not loop');
+            assert.equal(out.status, 0, out.stderr);
+            assert.equal(readFileSync(join(root, 'predecessor.ran'), 'utf8'), 'ran\n');
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

@@ -840,37 +840,36 @@ esac
 ) || exit $?
 `
         : '';
-    // Git runs the dispatcher with $0 set to the original hook path, and a
-    // chained hook may rely on it: husky resolves sibling scripts from
-    // $(dirname "$0"), and pre-commit.com looks for its .legacy hook there. A
-    // hook written for sh or bash is therefore read by its own interpreter,
-    // with $0 passed through (`sh -c '. file' "$0" "$@"`), which also keeps the
-    // options on its #! line such as -e. A file with no #! line is sourced in a
-    // subshell, as sh would run it; any other interpreter (python, node) runs
-    // the file as a program. The first line is read with the `read` builtin,
-    // and trailing blanks, a carriage return included, are cut from it.
+    // A hook written for sh (sh, dash or ash, also through env or busybox) or
+    // with no #! line is sourced in a subshell, which keeps $0 at the hook path:
+    // husky resolves sibling scripts from $(dirname "$0"), and a hook that
+    // re-execs itself through "$0" reaches the dispatcher, not a loop. An -e on
+    // its #! line is applied first. Any other interpreter (bash, python, node)
+    // runs the file as a program: dash cannot parse bash, and a sourced bash
+    // script would see BASH_SOURCE and $0 differ. Such a program sees the backup
+    // path as $0, so pre-commit.com does not find a .legacy hook beside the
+    // original. The first line is read with the `read` builtin.
     const feed = name === 'reference-transaction' || name === 'pre-push'
         ? `printf '%s\\n' "$AIMHOOMAN_REF_UPDATES" | `
         : '';
-    const shellShebangs = ['sh', 'dash', 'bash', 'ash'].flatMap((shell) => [
+    const shShebangs = ['sh', 'dash', 'ash'].flatMap((shell) => [
         `'#!'*/${shell}`, `'#!'*/${shell}[[:space:]]*`, `'#!'*[[:space:]]${shell}`, `'#!'*[[:space:]]${shell}[[:space:]]*`,
     ]).join('|');
     const chainedInvocation = `  AIMHOOMAN_SHEBANG=
   IFS= read -r AIMHOOMAN_SHEBANG < "$CHAINED" || :
   case "$AIMHOOMAN_SHEBANG" in
-    ${shellShebangs})
-      AIMHOOMAN_INTERPRETER=\${AIMHOOMAN_SHEBANG#'#!'}
-      while :; do
-        case "$AIMHOOMAN_INTERPRETER" in
-          *[[:space:]]) AIMHOOMAN_INTERPRETER=\${AIMHOOMAN_INTERPRETER%?} ;;
-          *) break ;;
-        esac
-      done
-      ${feed}AIMHOOMAN_CHAINED=$CHAINED $AIMHOOMAN_INTERPRETER -c '. "$AIMHOOMAN_CHAINED"' "$0" "$@" || exit $?
-      ;;
-    '#!'*) ${feed}"$CHAINED" "$@" || exit $? ;;
-    *) ${feed}( . "$CHAINED" ) || exit $? ;;
-  esac`;
+    ${shShebangs}) AIMHOOMAN_SOURCE=1 ;;
+    '#!'*) AIMHOOMAN_SOURCE= ;;
+    *) AIMHOOMAN_SOURCE=1 ;;
+  esac
+  if [ -z "$AIMHOOMAN_SOURCE" ]; then
+    ${feed}"$CHAINED" "$@" || exit $?
+  else
+    case "$AIMHOOMAN_SHEBANG" in
+      '#!'*[[:space:]]-*e*) ${feed}( set -e; . "$CHAINED" ) || exit $? ;;
+      *) ${feed}( . "$CHAINED" ) || exit $? ;;
+    esac
+  fi`;
     const aimCommand = name === 'commit-msg'
         ? 'commitmsg "$1" --tree "$AIMHOOMAN_COMMIT_TREE"'
         : name === 'reference-transaction'

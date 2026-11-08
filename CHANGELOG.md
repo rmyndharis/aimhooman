@@ -64,10 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code worktrees (`.claude/worktrees/`) and `CLAUDE.local.md` are kept
   out of commits.
 - A chained hook written for bash, Python or Node, such as the one pre-commit.com
-  installs, runs under its own interpreter; `/bin/sh` sourced it, which broke
-  every commit on Debian and Ubuntu. Run `aimhooman init` to update installed
-  hooks.
-- A chained hook keeps the options on its `#!` line, so `#!/bin/sh -e` stops at
+  installs, runs as a program; `/bin/sh` sourced it, which broke every commit on
+  Debian and Ubuntu. Run `aimhooman init` to update installed hooks.
+- A chained sh hook keeps the `-e` on its `#!` line, so `#!/bin/sh -e` stops at
   a failing command instead of letting the commit through.
 - A clone, or a first pull from a configured remote, under global hooks no
   longer scans every commit ever made, or fails on residue in an old one: a
@@ -92,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.specstory/cursorcloud/` are.
 - `.agent/` is no longer blocked or excluded: Google Antigravity still reads
   workspace rules and workflows from it.
+- A chained bash hook sees the backup path as `$0`, so pre-commit.com no longer
+  finds a `.legacy` hook it moved aside before aimhooman was installed.
 
 ## [0.6.0] - 2026-08-12
 
