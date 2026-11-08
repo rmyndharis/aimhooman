@@ -45,8 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code worktrees (`.claude/worktrees/`) and `CLAUDE.local.md` are kept
   out of commits.
 - A chained hook written for bash, Python or Node, such as the one pre-commit.com
-  installs, runs as a program; `/bin/sh` sourced it, which broke every commit on
-  Debian and Ubuntu. Run `aimhooman init` to update installed hooks.
+  installs, runs under its own interpreter; `/bin/sh` sourced it, which broke
+  every commit on Debian and Ubuntu. Run `aimhooman init` to update installed
+  hooks.
+- A chained hook keeps the options on its `#!` line, so `#!/bin/sh -e` stops at
+  a failing command instead of letting the commit through.
 - A clone or first pull under global hooks no longer scans every commit ever
   made, or fails on residue in an old one: a branch created with no other local
   branch to compare against is checked at its tip. A push still scans it all.
@@ -58,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier `init` installed.
 - `init` refuses, instead of deleting it, when another tool's hook was written
   over the dispatcher after the original was chained.
+- `init` refuses, instead of rewriting it, a dispatcher edited after install,
+  such as one with a `git lfs` line appended.
 
 ### Changed
 
