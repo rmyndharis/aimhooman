@@ -127,6 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such as one with a `git lfs` line appended.
 - The GitHub Action scans a new branch from its merge base with the default
   branch, not from the root commit, and passes when the branch adds nothing.
+- The GitHub Action scans from the root commit, instead of failing, when a
+  force-push left the event's base unreachable.
 - On Windows, taking a lock no longer fails with `EPERM` when another process
   deleted a lock file it still holds open.
 - `check --profile` names where the repository's profile comes from when it

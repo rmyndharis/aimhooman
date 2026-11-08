@@ -147,10 +147,12 @@ it tested, with npm build provenance, once the tag's commit is on `main` and the
 is `v` plus the `package.json` version.
 To cut a release, bump the version (keep `package.json`, `.claude-plugin/plugin.json`,
 `.codex-plugin/plugin.json`, and `.claude-plugin/marketplace.json` in sync), add the
-`## [version]` CHANGELOG entry and the matching README version badge, then:
+`## [version]` CHANGELOG entry and the matching README version badge, land that
+commit on `main` (the publish job refuses a tag whose commit is not there), then
+push the tag on its own:
 
 ```sh
-git tag -a v0.1.0 -m v0.1.0
+git tag -a v0.1.0 -m v0.1.0 <release commit on main>
 git push origin v0.1.0
 ```
 

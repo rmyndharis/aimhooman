@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -86,6 +86,48 @@ test('force push with an unreachable before object scans all reachable history',
         }), '0'.repeat(head.length));
     } finally {
         rmSync(root, { recursive: true, force: true });
+    }
+});
+
+// The action's own step, run the way a runner runs it, with the final check
+// echoed: each push shape gets the scan base the docs promise.
+test('the action step picks a scan base for each push shape', (t) => {
+    if (process.platform === 'win32') {
+        t.skip('runs the step under bash');
+        return;
+    }
+    const root = join(import.meta.dirname, '..');
+    const action = readFileSync(join(root, 'action.yml'), 'utf8').replace(/\r\n/g, '\n');
+    const block = action.split('- name: Check the introduced commits\n')[1].split('\n      shell: bash')[0];
+    const step = block.split('\n').slice(1).map((line) => line.replace(/^ {8}/, '')).join('\n')
+        .replace('aimhooman check --range', 'echo RANGE');
+    const dir = repository();
+    try {
+        const script = join(dir, '.git', 'step.sh');
+        writeFileSync(script, step);
+        const run = (base, head, refName) => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', script], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { ...process.env, GITHUB_ACTION_PATH: root, BASE: base, HEAD: head, PROFILE: 'strict', REF_NAME: refName, DEFAULT_BRANCH: 'main' },
+        });
+        const zero = '0'.repeat(40);
+        git(dir, ['commit', '-q', '--allow-empty', '-m', 'base']);
+        const main = git(dir, ['rev-parse', 'HEAD']);
+        git(dir, ['update-ref', 'refs/remotes/origin/main', main]);
+        git(dir, ['checkout', '-q', '-b', 'feature']);
+        git(dir, ['commit', '-q', '--allow-empty', '-m', 'feature']);
+        const feature = git(dir, ['rev-parse', 'HEAD']);
+
+        assert.match(run(zero, feature, 'feature').stdout, new RegExp(`RANGE ${main}\\.\\.\\.${feature}`));
+        const empty = run(zero, main, 'empty');
+        assert.equal(empty.status, 0);
+        assert.match(empty.stdout, /adds no commits outside main/);
+        assert.match(run('1'.repeat(40), feature, 'feature').stdout, new RegExp(`RANGE ${zero}\\.\\.\\.${feature}`));
+        const missing = run(zero, '2'.repeat(40), 'feature');
+        assert.equal(missing.status, 20);
+        assert.match(missing.stderr, /^aimhooman: Git revision/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
     }
 });
 

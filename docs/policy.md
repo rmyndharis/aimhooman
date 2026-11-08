@@ -34,8 +34,8 @@ outside the engine and clears only through a bound `policy-review` acknowledgmen
 
 This is how aimhooman's own repository accepts changes to protected paths (agent
 instruction files and `.aimhooman.json`) in CI. The scripts that do it pin this
-repository and its owner, and they ship with neither the npm package nor the GitHub
-Action. In any other repository nothing approves these changes in CI: a `strict` range
+repository and its owner; the npm package does not carry them and the GitHub Action
+never runs them. In any other repository nothing approves these changes in CI: a `strict` range
 check fails on them, and `clean` reports them as notices
 ([docs/integrations.md](integrations.md#github-actions)).
 

@@ -2,7 +2,7 @@ name: aimhooman
 description: keeps AI session files and attribution out of commits
 inputs:
   base:
-    description: base of the range to scan (triple-dot merge base applies); an all-zero object ID, as on the first push of a branch, scans from the merge base with origin/<default branch>, or from the root commit when there is none
+    description: base of the range to scan (triple-dot merge base applies). On a branch's first push (an all-zero base) the scan starts at the merge base with origin/<default branch> and passes when the branch adds no commits; without that ref, on the default branch itself, for an orphan branch, or when a force-push left the base unreachable, it starts at the root commit, which needs fetch-depth 0
     required: true
   head:
     description: head of the range to scan
@@ -29,22 +29,26 @@ runs:
         AIMHOOMAN_VERSION: ${{ inputs.version }}
     - name: Check the introduced commits
       run: |
-        # A push that creates a branch reports an all-zero base. Scan what the
-        # branch adds to the default branch, not every commit it inherits.
-        if [[ "$BASE" =~ ^(0{40}|0{64})$ ]]; then
-          BASE=$(node --input-type=module -e '
-            import { join } from "node:path";
-            import { pathToFileURL } from "node:url";
-            const { GITHUB_ACTION_PATH, BASE, HEAD, REF_NAME, DEFAULT_BRANCH } = process.env;
+        # A branch's first push reports an all-zero base; scan what the branch
+        # adds to the default branch, not every commit it inherits. A base a
+        # force-push left unreachable scans from the root instead of failing.
+        BASE=$(node --input-type=module -e '
+          import { join } from "node:path";
+          import { pathToFileURL } from "node:url";
+          const { GITHUB_ACTION_PATH, BASE, HEAD, REF_NAME, DEFAULT_BRANCH } = process.env;
+          try {
             const { selectPushBase } = await import(pathToFileURL(join(GITHUB_ACTION_PATH, "src", "history-scan.mjs")));
             process.stdout.write(selectPushBase({
               before: BASE, head: HEAD, refName: REF_NAME, defaultBranch: DEFAULT_BRANCH, cwd: process.cwd(),
             }) ?? "");
-          ')
-          if [ -z "$BASE" ]; then
-            echo "aimhooman: $HEAD adds no commits outside $DEFAULT_BRANCH"
-            exit 0
-          fi
+          } catch (error) {
+            console.error("aimhooman: " + error.message);
+            process.exit(20);
+          }
+        ')
+        if [ -z "$BASE" ]; then
+          echo "aimhooman: $HEAD adds no commits outside $DEFAULT_BRANCH"
+          exit 0
         fi
         aimhooman check --range "$BASE...$HEAD" --profile "$PROFILE"
       shell: bash
