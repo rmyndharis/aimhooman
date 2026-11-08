@@ -31,6 +31,7 @@ import {
     inspectCommitOptions,
     isGuardedCandidate,
     isProtectedMutation,
+    lineUnits,
     normalizeAnsiCQuotes,
     parseGit,
     shellExecutable,
@@ -241,7 +242,7 @@ function hookPreToolUse(input) {
     if (/(?<![.\w-])git(?!\w)/i.test(unquoted) || /(?:^|[;&|(\n])[^\S\n]*[$`]/.test(unquoted)) {
         const key = configuredGitRisk(configListing(), process.cwd());
         const repairs = key !== 'pager.config'
-            && shellUnits(executorCommand).every((unit) => /^\s*git\s+config\b/.test(unit.text));
+            && lineUnits(executorCommand, !nonPosixExecutor(executor.name)).every((unit) => /^\s*git\s+config\b/.test(unit.text));
         if (key && !repairs) {
             return emitDecision(
                 'deny',

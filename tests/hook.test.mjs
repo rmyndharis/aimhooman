@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { parseGit, asObject, shellPathIsAmbiguous } from '../src/hook.mjs';
 import { defaultPatterns, inspectExclude } from '../src/exclude.mjs';
-import { configuredGitRisk, normalizeAnsiCQuotes, stripShellComments } from '../src/shell-parse.mjs';
+import { configuredGitRisk, lineUnits, normalizeAnsiCQuotes, stripShellComments } from '../src/shell-parse.mjs';
 
 const CLI = join(process.cwd(), 'bin/aimhooman.mjs');
 
@@ -4399,6 +4399,216 @@ test('Git inside a substitution is refused only when it skips the hooks', async 
     }
 });
 
+// The splitters pair quotes without nesting, but a substitution reads its own:
+// "$(echo "it's")" is one string, and the push after it is a command. Read the
+// naive way it was a string, a word and an open single quote, and everything up to
+// the next apostrophe, a push that skips pre-push included, was never seen. Such
+// a line published a branch on every profile but strict; the heredoc message of
+// git commit -m "$(cat <<'EOF' ... "don't" ... EOF)" is the shape that comes up
+// without anyone trying.
+test('a quote inside a substitution does not hide the commands after it', async () => {
+    const push = 'git push --no-verify origin wip';
+    const lines = (...parts) => parts.join('\n');
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-nested-quotes-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                `echo "$(echo "it's")" ; ${push} ; echo 'x'`,
+                `echo "$(echo "it's")" && ${push} && echo 'x'`,
+                `echo "$(echo "it's")"\n${push}\necho 'x'`,
+                `pwd "$(echo "it's")" ; ${push} ; echo 'x'`,
+                `git status "$(echo "it's")" ; ${push} ; echo 'x'`,
+                `echo "$(echo "it's")" | cat ; ${push} ; echo 'x'`,
+                `echo "$(echo "it's")" & ${push} & echo 'x'`,
+                `echo "$(echo '"')" ; ${push} ; echo "x"`,
+                `echo "$(echo "$(echo "$(echo "it's")")")" ; ${push} ; echo 'x'`,
+                `echo "$(cat <<< "it's")" ; ${push} ; echo 'x'`,
+                `echo "$(echo "it's")" ; echo $'\\'' ; ${push} ; echo 'x'`,
+                `echo "$(echo "$(echo ")")")" ; ${push} ; echo 'x'`,
+                `echo "$(echo $'it\\'s')" ; ${push} ; echo 'x'`,
+                `echo $(echo $'\\'' x) ; ${push} ; echo 'x'`,
+                `echo "$(echo "it's")" ; ${push} ; echo "$(echo "it's")"`,
+                // a comment in the substitution ends at the line break
+                `echo "$(echo a # it's\n)" ; ${push} ; echo 'x' ; echo ')'`,
+                // and a quote in a comment opens nothing, so the $'...' after it is still one string
+                `echo a # it's\necho $'\\'' ; ${push} ; echo 'x'`,
+                `echo a # say "hi\necho $'\\'' ; ${push} ; echo 'x'`,
+                `pwd $(echo "a" # say "hi\n) $'\\'' ; ${push} ; echo 'x'`,
+                // a backtick substitution
+                `echo "\`echo "it's"\`" ; ${push} ; echo 'x'`,
+                // a heredoc message with a quoted word that holds an apostrophe
+                lines(`git commit -q --allow-empty -m "$(cat <<'EOF'`, `Fix "don't crash" error`, 'EOF', `)" && ${push}`),
+                lines(`git commit -q --allow-empty -m "$(cat <<'EOF'`, 'say "hi', 'EOF', `)"`, push),
+                lines(`echo $(cat <<'EOF'`, "echo it's", 'EOF', `) ; ${push} ; echo 'x'`),
+                // constructs this scan cannot follow are refused rather than guessed at
+                `echo "$(case x in x) echo "it's";; esac)" ; ${push} ; echo 'x'`,
+                `echo "\${x:-"it's"}" ; ${push} ; echo 'x'`,
+                `echo "\${x:-"it's"}" | sh ; echo 'x'`,
+                `(echo "$(echo $((1<<2))\n)" ; ${push} ; echo 'x'\n2\n)`,
+                // and the guard's own files stay out of reach behind a quote
+                `echo x "$(echo "it's")" > .git/aimhooman/config.json`,
+                lines(`git commit -q --allow-empty -m "$(cat <<'EOF'`, `Fix "don't"`, 'EOF', `)" --no-verify ; ${push}`),
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            if (profile === 'clean') {
+                for (const command of [
+                    lines(`git commit -m "$(cat <<'EOF'`, `Fix "don't crash" error`, 'EOF', ')"'),
+                    lines(`git commit -m "$(cat <<'EOF'`, 'say "hi', 'EOF', ')"'),
+                    `echo "it's $(date)"`,
+                    'echo "${HOME}/it\'s"',
+                    'echo "${x:-fallback}"',
+                    'echo "$(echo "a b")"',
+                    'echo "$((1 + 2))"',
+                ]) {
+                    assert.equal(await decide(command), null, `${profile}: ${command}`);
+                }
+            }
+            for (const command of [`ls "$(echo "it's")"`, 'echo "$(echo "a b")"', `echo "$(echo "it's")" ; git status`]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// zsh runs code in places bash does not: the text of =( ) like a process
+// substitution, a glob qualifier (e:cmd:) or (+fn), and the e flag of ${(e)x}.
+// A line led by a read-only command such as echo carried a push past the guard.
+test('zsh code behind =( ), a glob qualifier or the e flag is read or refused', async () => {
+    const push = 'git push --no-verify origin wip';
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-zsh-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                `echo =(${push})`,
+                `pwd =(${push})`,
+                `echo x =(echo a; ${push})`,
+                `echo *(e:'${push}':)`,
+                `echo ./*(N.e:"${push}":)`,
+                `echo *.txt(e|${push}|)`,
+                `echo *(e/${push}/)`,
+                `echo *(e+${push}+)`,
+                `x='$(${push})'; echo \${(e)x}`,
+                `echo "\${(e)x}"`,
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'echo ${x:-fallback}',
+                ...(profile === 'clean' ? ['echo ${(f)x}', 'echo *(.)', 'echo *(om[1])', 'echo $((2*(e+1)))', 'echo $(( (a+b)*(c+d) ))'] : []),
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+    assert.ok(parseGit('echo =(git push --no-verify origin wip)').commands.some((candidate) => candidate.verb === 'push' && candidate.noVerify));
+});
+
+test('parseGit reads the commands around a substitution that holds quotes', () => {
+    const push = 'git push --no-verify origin wip';
+    for (const command of [
+        `echo "$(echo "it's")" ; ${push} ; echo 'x'`,
+        `git commit -q -m "$(cat <<'EOF'\nFix "don't crash"\nEOF\n)" && ${push}`,
+        `echo "$(echo "$(echo "it's")")" ; ${push} ; echo 'x'`,
+        `echo "$(echo $'it\\'s')" ; ${push} ; echo 'x'`,
+    ]) {
+        assert.ok(parseGit(command).commands.some((candidate) => candidate.verb === 'push' && candidate.noVerify), command);
+    }
+    assert.deepEqual(
+        lineUnits(`echo "$(echo "it's")" ; git status`).map((unit) => unit.text.trim()),
+        ['echo "$(X)"', 'git status'],
+    );
+    // A text this scan cannot follow is unreadable, so the line is refused.
+    for (const command of [
+        `echo "\${x:-"it's"}" ; git status`,
+        `echo "$(case x in x) echo y;; esac)" ; git status`,
+        'echo "$(echo $((1 +\n2)))" ; git status',
+        'echo "$(echo "it\'s" ; git status',
+    ]) {
+        assert.equal(parseGit(command).commands.some((candidate) => candidate.verb === 'unknown'), true, command);
+    }
+});
+
+// A pull request body, a branch name or a list of files from a substitution is
+// text. It was read, it runs nothing that moves a ref, and the program it feeds
+// takes it as data, so it does not make the line opaque. What it runs, a file
+// its output is written to, and a program that runs its arguments still do.
+test('a substitution that only supplies text does not make a line opaque', async () => {
+    const lines = (...parts) => parts.join('\n');
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-text-substitution-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'gh pr create --title t --body "$(cat /tmp/body.md)"',
+                lines('gh pr create --title t --body "$(cat <<\'EOF\'', "Never run git push --no-verify, it's a rule.", 'EOF', ')"'),
+                lines('gh issue comment 5 --body "$(cat <<\'EOF\'', 'a > b and `code` with $HOME', 'EOF', ')"'),
+                'ls $(git rev-parse --show-toplevel)',
+                'wc -l $(git ls-files)',
+                'grep -rn foo $(git ls-files)',
+                'kill $(pgrep -f node)',
+                'docker run -v $(pwd):/app node:22 npm test',
+                'cd $(git rev-parse --show-toplevel) && ls',
+                'echo "now $(date)"',
+                'ls $(dirname $(pwd))',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                // What the substitution runs.
+                'ls $(git push --no-verify origin wip)',
+                'ls $(git -c core.hooksPath=/dev/null commit -qm x)',
+                'cat $(echo git push --no-verify origin wip | sh)',
+                'ls $(rm -rf .git/hooks)',
+                'ls $(aimhooman allow x)',
+                'ls $(rm $(pwd)/x)',
+                lines('gh pr create --title t --body "$(cat <<EOF', '$(git push --no-verify origin wip)', 'EOF', ')"'),
+                // A path it builds for a program that writes, and a program that runs its arguments.
+                'echo x > $(git rev-parse --git-dir)/hooks/pre-commit',
+                'tee $(git rev-parse --git-dir)/hooks/pre-commit',
+                'rm -rf $(git rev-parse --git-dir)/hooks',
+                'xargs $(echo git) push --no-verify',
+                'env $(echo git) push --no-verify origin wip',
+                'find . -exec $(echo git) push --no-verify \;',
+                '$(echo git) push --no-verify origin wip',
+                // The rest of the line is read as it was.
+                'ls $(pwd) && git push --no-verify origin wip',
+                'gh pr create --title t --body "$(cat /tmp/b.md)" && git -c core.hooksPath=/dev/null commit -qm x',
+                lines('gh pr create --title t --body "$(cat /tmp/b.md)"', 'git push --no-verify origin wip'),
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test('parseGit sets aside a substitution that only supplies text', () => {
+    for (const command of ['ls $(pwd)', 'gh pr view 1 --json x --jq "$(cat q)"', 'kill $(pgrep node)', 'ls $(echo a; echo b)']) {
+        const parsed = parseGit(command);
+        assert.equal(parsed.uncertainShell, false, command);
+        assert.equal(parsed.opaqueCommitHiding, false, command);
+    }
+    for (const command of [
+        'ls $(git push --no-verify origin wip)',
+        'echo x > $(pwd)/f',
+        'rm -rf $(pwd)/x',
+        'xargs $(echo git) status',
+    ]) {
+        assert.equal(parseGit(command).opaqueCommitHiding, true, command);
+    }
+    // A Git command keeps what it had: its words can become an option.
+    assert.equal(parseGit('git commit -m "$(date)"').uncertainShell, true);
+    assert.equal(parseGit('git push origin "$(git rev-parse HEAD)"').uncertainShell, true);
+});
+
 test('an ANSI-C quote that decodes in full reads as plain text', () => {
     assert.equal(normalizeAnsiCQuotes("core.hooks$'\\x50'ath"), 'core.hooks"P"ath');
     assert.equal(normalizeAnsiCQuotes("$'a\\nb'"), '$"a\\\\nb"');
@@ -4437,7 +4647,14 @@ test('large commands are decided in time proportional to their length', async ()
         `aimhooman ${'aimhooman '.repeat(8000)}`,
         `find . ${'-exec aimhooman status \\; '.repeat(2000)}`,
         `python3 -c "import os; ${"os.system('aimhooman status'); ".repeat(1000)}"`,
-        `${'echo x > r.sh; '.repeat(8000)}sh r.sh`,
+        `${'echo x > r.sh; '.repeat(4000)}sh r.sh`,
+        '"$('.repeat(20000),
+        '"${'.repeat(20000),
+        '$(('.repeat(20000),
+        'echo "$(echo "it\'s")" ; '.repeat(3000),
+        '$(case x in x) echo a;; esac) '.repeat(2000),
+        '$(echo a # c\n) '.repeat(4000),
+        'echo =(x) '.repeat(4000),
     ]) {
         const started = performance.now();
         parseGit(command);
