@@ -436,7 +436,7 @@ function parseGitLine(command, initialCwd, posix = true) {
             || precedingOperator === '&&'
             || precedingOperator === '||';
         subshellDepth = Math.max(0, subshellDepth + subshellState.delta);
-        const outer = unwrapShellControl(shellWords(unit.text.trim()));
+        const outer = unwrapShellControl(shellWords(unit.text.trim(), Infinity, { escape: posix }));
         const control = unwrapShellControl(stripCommandGrouping(outer.tokens));
         const words = control.tokens;
         if (outer.uncertain || control.uncertain) markRead();
@@ -2583,14 +2583,14 @@ const COMMIT_LONG_OPTIONS = new Map([
     ['branch', {}],
     ['cleanup', { value: 'required' }],
     ['date', { value: 'required' }],
-    ['dry-run', {}],
+    ['dry-run', { dryRun: true }],
     ['edit', { editor: 'open' }],
     ['file', { value: 'required', messageSource: true }],
     ['fixup', { value: 'required', fixup: true }],
     ['gpg-sign', { value: 'optional' }],
     ['include', { futureIndex: true }],
     ['interactive', { futureIndex: true }],
-    ['long', {}],
+    ['long', { dryRun: true }],
     ['message', { value: 'required', messageSource: true }],
     ['no-ahead-behind', {}],
     ['no-all', {}],
@@ -2631,13 +2631,13 @@ const COMMIT_LONG_OPTIONS = new Map([
     ['patch', { futureIndex: true }],
     ['pathspec-file-nul', {}],
     ['pathspec-from-file', { value: 'required', futureIndex: true }],
-    ['porcelain', {}],
+    ['porcelain', { dryRun: true }],
     ['post-rewrite', {}],
     ['quiet', {}],
     ['reedit-message', { value: 'required', editor: 'open', messageSource: true }],
     ['reset-author', {}],
     ['reuse-message', { value: 'required', messageSource: true }],
-    ['short', {}],
+    ['short', { dryRun: true }],
     ['signoff', {}],
     ['squash', { value: 'required' }],
     ['status', {}],
@@ -2674,6 +2674,8 @@ export function inspectCommitOptions(args) {
     // futureIndex from an option alone (-a, -i, --pathspec-from-file), and the
     // pathspec words, which also make the commit read the working tree.
     let optionIndex = false;
+    // --dry-run, and --short and --porcelain, which imply it: nothing is committed.
+    let dryRun = false;
     const paths = [];
     let messageSource = false;
     let editorOverride = null;
@@ -2685,6 +2687,7 @@ export function inspectCommitOptions(args) {
                 noVerify,
                 futureIndex: futureIndex || i + 1 < args.length,
                 optionIndex,
+                dryRun,
                 paths: [...paths, ...args.slice(i + 1)],
                 editorRisk: editorOverride ?? !messageSource,
                 uncertain,
@@ -2702,6 +2705,7 @@ export function inspectCommitOptions(args) {
             if (Object.hasOwn(option, 'noVerify')) noVerify = option.noVerify;
             futureIndex ||= Boolean(option.futureIndex);
             optionIndex ||= Boolean(option.futureIndex);
+            dryRun ||= Boolean(option.dryRun);
             messageSource ||= Boolean(option.messageSource);
             if (option.fixup && !/^(?:amend|reword):/.test(optionValue || '')) {
                 messageSource = true;
@@ -2732,7 +2736,7 @@ export function inspectCommitOptions(args) {
         futureIndex = true;
         paths.push(arg);
     }
-    return { noVerify, futureIndex, optionIndex, paths, editorRisk: editorOverride ?? !messageSource, uncertain };
+    return { noVerify, futureIndex, optionIndex, dryRun, paths, editorRisk: editorOverride ?? !messageSource, uncertain };
 }
 
 function resolveLongCommitOption(spelling) {
@@ -4502,7 +4506,9 @@ export function unique(values) {
 // expanding them. It preserves whitespace inside quotes and handles ordinary
 // backslash escapes; shell expansion remains intentionally out of scope.
 // limit stops it early for a caller that needs only the first words.
-export function shellWords(s, limit = Infinity) {
+// escape off reads a backslash outside quotes as an ordinary character, as
+// PowerShell and cmd do: it separates directories there.
+export function shellWords(s, limit = Infinity, { escape = true } = {}) {
     const out = [];
     let word = '';
     let started = false;
@@ -4525,7 +4531,7 @@ export function shellWords(s, limit = Infinity) {
                 started = true;
                 escaped = false;
             }
-        } else if (c === '\\' && quote !== "'") {
+        } else if (c === '\\' && quote !== "'" && escape) {
             started = true;
             escaped = true;
         } else if (quote) {
