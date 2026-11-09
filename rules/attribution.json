@@ -1,14 +1,14 @@
 [
     {
         "id": "attribution.claude-coauthor",
-        "version": 2,
+        "version": 3,
         "provider": "claude-code",
         "category": "ai-attribution",
         "confidence": "high",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*co-authored-by:[^<>]+<noreply@anthropic\\.com>\\s*$"
+                "(?i)^\\s*co-authored-by\\s*:[^<>]+<noreply@anthropic\\.com>.*$"
             ]
         },
         "actions": {
@@ -25,14 +25,14 @@
     },
     {
         "id": "attribution.copilot-coauthor",
-        "version": 1,
+        "version": 2,
         "provider": "copilot",
         "category": "ai-attribution",
         "confidence": "high",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*co-authored-by:\\s*(?:github\\s+)?copilot(?:\\[bot\\])?\\s*<(?:(?:[0-9]+\\+)?copilot(?:\\[bot\\])?@users\\.noreply\\.github\\.com|copilot@github\\.com)>\\s*$"
+                "(?i)^\\s*co-authored-by\\s*:\\s*(?:github\\s+)?copilot(?:\\[bot\\])?\\s*<(?:(?:[0-9]+\\+)?copilot(?:\\[bot\\])?@users\\.noreply\\.github\\.com|copilot@github\\.com)>.*$"
             ]
         },
         "actions": {
@@ -49,14 +49,14 @@
     },
     {
         "id": "attribution.codex-coauthor",
-        "version": 2,
+        "version": 3,
         "provider": "codex",
         "category": "ai-attribution",
         "confidence": "high",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*co-authored-by:[^<>]+<noreply@openai\\.com>\\s*$"
+                "(?i)^\\s*co-authored-by\\s*:[^<>]+<noreply@openai\\.com>.*$"
             ]
         },
         "actions": {
@@ -73,14 +73,14 @@
     },
     {
         "id": "attribution.bot-coauthor",
-        "version": 1,
+        "version": 2,
         "provider": "generic",
         "category": "ai-attribution",
         "confidence": "medium",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*co-authored-by:.*(\\[bot\\]|bot@users\\.noreply).*$"
+                "(?i)^\\s*co-authored-by\\s*:.*(\\[bot\\]|bot@users\\.noreply).*$"
             ]
         },
         "actions": {
@@ -95,15 +95,15 @@
     },
     {
         "id": "attribution.generated-with",
-        "version": 3,
+        "version": 4,
         "provider": "generic",
         "category": "ai-attribution",
         "confidence": "high",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*(?:🤖\\s*)?generated\\s+(?:with|by)\\s+(?:claude|(?:github\\s+)?copilot|chatgpt|gpt(?:-[0-9]+(?:\\.[0-9]+)?)?|(?:openai\\s+)?codex|cursor)(?:\\s+[A-Za-z0-9.]+){0,3}[.!]?\\s*(?:🤖\\s*)?$",
-                "(?i)^\\s*(?:🤖\\s*)?generated\\s+with\\s+\\[(?:claude|(?:github\\s+)?copilot|chatgpt|gpt(?:-[0-9]+(?:\\.[0-9]+)?)?|(?:openai\\s+)?codex|cursor)(?:\\s+[A-Za-z0-9.]+){0,3}\\]\\([^)]*\\)\\s*(?:🤖\\s*)?$"
+                "(?i)^\\s*(?:[-*>+]\\s+)*(?:🤖\\s*)?[*_]{0,2}generated\\s+(?:with|by)\\s+(?:claude|(?:github\\s+)?copilot|chatgpt|gpt(?:-[0-9]+(?:\\.[0-9]+)?)?|(?:openai\\s+)?codex|cursor)(?:\\s+[A-Za-z0-9.]+){0,3}[.!]?[*_]{0,2}(?:\\s*\\(https?://[^)\\s]*\\))?\\s*(?:🤖\\s*)?$",
+                "(?i)^\\s*(?:[-*>+]\\s+)*(?:🤖\\s*)?[*_]{0,2}generated\\s+with\\s+\\[(?:claude|(?:github\\s+)?copilot|chatgpt|gpt(?:-[0-9]+(?:\\.[0-9]+)?)?|(?:openai\\s+)?codex|cursor)(?:\\s+[A-Za-z0-9.]+){0,3}\\]\\([^)]*\\)[*_]{0,2}\\s*(?:🤖\\s*)?$"
             ]
         },
         "actions": {
@@ -119,14 +119,14 @@
     },
     {
         "id": "attribution.ai-noreply",
-        "version": 1,
+        "version": 2,
         "provider": "generic",
         "category": "ai-attribution",
         "confidence": "high",
         "kind": "message",
         "match": {
             "content": [
-                "(?i)^\\s*[a-z-]+-by:[^<>]+<noreply@(anthropic|openai)\\.com>\\s*$"
+                "(?i)^\\s*[a-z-]+-by\\s*:[^<>]+<noreply@(anthropic|openai)\\.com>.*$"
             ]
         },
         "actions": {

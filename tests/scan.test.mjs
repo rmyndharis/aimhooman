@@ -26,6 +26,53 @@ test('attribution: AI co-author blocked, human co-author allowed', () => {
     assert.equal(human.length, 0);
 });
 
+// Git reads a trailer with white space before the colon, with text after the
+// address, and folded over two lines (a line that starts with a space or a tab
+// continues the one before). A rule that wants the canonical line alone let all of
+// those through a commit-msg hook and a push, with the attribution intact.
+test('attribution: the forms of a trailer that Git reads are matched too', () => {
+    const variants = {
+        'folded with a space': 'Co-authored-by: Claude\n <noreply@anthropic.com>\n',
+        'folded with a tab': 'Co-authored-by: Claude\n\t<noreply@anthropic.com>\n',
+        'space before the colon': 'Co-authored-by : Claude <noreply@anthropic.com>\n',
+        'text after the address': 'Co-authored-by: Claude <noreply@anthropic.com> (AI)\n',
+        'zero-width space after the address': 'Co-authored-by: Claude <noreply@anthropic.com>​\n',
+        'copilot folded': 'Co-authored-by: Copilot\n <copilot@github.com>\n',
+        'codex, space before the colon': 'Co-authored-by : Codex <noreply@openai.com>\n',
+        'generated-with as a bullet': '- Generated with Claude Code\n',
+        'generated-with in italics': '*Generated with Claude Code*\n',
+        'generated-with as a quote': '> Generated with Claude Code\n',
+        'generated-with with a link': 'Generated with Claude Code (https://claude.com/claude-code)\n',
+    };
+    for (const [name, trailer] of Object.entries(variants)) {
+        const message = `feat: x\n\n${trailer}`;
+        const clean = newEngine('clean');
+        const found = clean.checkMessage(message);
+        assert.ok(found.length >= 1 && found.every((f) => f.decision === 'block'), `clean blocks ${name}`);
+        assert.equal(found[0].line, 3, `${name}: the finding is on the first line of the trailer`);
+        assert.equal(clean.fixMessage(message).cleaned, 'feat: x\n\n', `clean removes all of ${name}`);
+        assert.ok(newEngine('strict').checkMessage(message).some((f) => f.decision === 'block'), `strict blocks ${name}`);
+        assert.equal(newEngine('compliance').checkMessage(message).length, 0, `compliance allows ${name}`);
+    }
+    // A human's trailer, folded or not, and ordinary text with indented lines, are not touched.
+    const harmless = [
+        'feat: x\n\nCo-authored-by: Dewi <dewi@example.com>\n',
+        'feat: x\n\nCo-authored-by: Dewi\n <dewi@example.com>\n',
+        'feat: x\n\n- item one\n  continued here\n- item two\n',
+        'docs: x\n\nThe notes say the draft was generated with Claude Code and then edited.\n',
+    ];
+    for (const message of harmless) {
+        for (const profile of ['clean', 'strict', 'compliance']) {
+            const engine = newEngine(profile);
+            assert.equal(engine.checkMessage(message).length, 0, `${profile}: ${JSON.stringify(message)}`);
+            assert.equal(engine.fixMessage(message).cleaned, message, `${profile}: left as written`);
+        }
+    }
+    // Lines under a removed trailer are removed with it, and the lines around stay.
+    const around = 'feat: x\n\nBody line.\nCo-authored-by: Claude\n <noreply@anthropic.com>\n\nSigned-off-by: Dewi <dewi@example.com>\n';
+    assert.equal(newEngine('clean').fixMessage(around).cleaned, 'feat: x\n\nBody line.\n\nSigned-off-by: Dewi <dewi@example.com>\n');
+});
+
 test('content marker: block on strict, review on clean', () => {
     const marker = ['// pony' + 'tail:', 'hack'].join(' ') + '\n';
     assert.equal(newEngine('strict').checkContent('x.js', marker)[0].decision, 'block');

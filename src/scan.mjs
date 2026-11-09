@@ -117,12 +117,22 @@ export class Engine {
 
     checkMessage(text) {
         const out = [];
-        for (const record of lineRecords(String(text ?? ''))) {
+        const records = lineRecords(String(text ?? ''));
+        for (const record of records) {
             this.#markLocalInputSkip('message', '', record.text);
             const result = this.#evaluate('message', '', record.text);
             if (result) out.push(finding(result, { line: record.line, text: record.text }));
         }
-        return out;
+        // A trailer folded over two lines is one trailer to Git.
+        for (const { first, last } of foldedGroups(records)) {
+            const joined = joinedText(records, first, last);
+            this.#markLocalInputSkip('message', '', joined);
+            const result = this.#evaluate('message', '', joined);
+            if (!result) continue;
+            const found = finding(result, { line: records[first].line, text: joined });
+            if (!out.some((other) => other.line === found.line && other.ruleId === found.ruleId)) out.push(found);
+        }
+        return out.sort((left, right) => left.line - right.line);
     }
 
     checkContent(path, content, options = {}) {
@@ -162,7 +172,13 @@ export class Engine {
             .map((record) => record.line));
         const removed = candidates.filter((finding) => terminatedLines.has(finding.line));
         if (!removed.length) return { cleaned: value, removed: [] };
+        // The lines folded under a removed one are part of the same trailer.
+        const groups = foldedGroups(records);
         const drop = new Set(removed.map((f) => f.line));
+        for (const { first, last } of groups) {
+            if (!drop.has(records[first].line)) continue;
+            for (let index = first + 1; index <= last; index += 1) drop.add(records[index].line);
+        }
         const ranges = [];
         for (const record of records.filter((candidate) => drop.has(candidate.line))) {
             const previous = ranges.at(-1);
@@ -303,6 +319,27 @@ function pathDenyFinding(path) {
 
 function compareText(left, right) {
     return left < right ? -1 : left > right ? 1 : 0;
+}
+
+// Git reads a line that starts with a space or a tab as the continuation of the
+// line before it, so "Co-authored-by: Claude" with " <noreply@anthropic.com>"
+// under it is one trailer to Git and two lines to a rule that reads one at a time.
+// These are the runs of lines, as indexes into records, that read as one.
+function foldedGroups(records) {
+    const groups = [];
+    for (let first = 0; first < records.length; first += 1) {
+        let last = first;
+        while (last + 1 < records.length && /^[ \t]+\S/.test(records[last + 1].text)) last += 1;
+        if (last > first) {
+            groups.push({ first, last });
+            first = last;
+        }
+    }
+    return groups;
+}
+
+function joinedText(records, first, last) {
+    return records.slice(first, last + 1).map((record, index) => (index ? record.text.trim() : record.text)).join(' ');
 }
 
 function lineRecords(value) {
