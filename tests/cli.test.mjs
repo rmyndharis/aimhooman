@@ -1783,6 +1783,95 @@ test('a weaker policy file that history brings in does not wedge a strict clone,
     }
 });
 
+// A diverged pull is a merge. The policy it brings is the policy of a commit being merged,
+// which is history, and the merge commit is judged by both of its parents.
+test('a diverged pull and a merge finished by hand take the team policy into a strict clone', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-policy-floor-merge-'));
+    try {
+        const run = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+        const ok = (cwd, args, label) => {
+            const done = run(cwd, args);
+            assert.equal(done.status, 0, `${label}: ${done.stdout}${done.stderr}`);
+        };
+        const policy = (name) => `${JSON.stringify({ schema_version: 1, profile: name })}\n`;
+        const commitIn = (cwd, file, text, message) => {
+            writeFileSync(join(cwd, file), text);
+            run(cwd, ['add', file]);
+            ok(cwd, ['commit', '-q', '-m', message], message);
+        };
+        const remote = join(base, 'remote.git');
+        mkdirSync(remote);
+        run(remote, ['init', '-q', '--bare', '--initial-branch=main']);
+        const mate = join(base, 'mate');
+        run(base, ['clone', '-q', remote, mate]);
+        run(mate, ['config', 'user.email', 'm@m']);
+        run(mate, ['config', 'user.name', 'm']);
+        commitIn(mate, 'a.txt', '1\n', 'one');
+        run(mate, ['branch', '-M', 'main']);
+        run(mate, ['push', '-q', 'origin', 'main']);
+        const me = join(base, 'me');
+        run(base, ['clone', '-q', remote, me]);
+        run(me, ['config', 'user.email', 't@t']);
+        run(me, ['config', 'user.name', 't']);
+        assert.equal(result('init', ['--profile', 'strict'], me).status, 0);
+
+        // Both sides have a commit, so the pull has to merge.
+        commitIn(me, 'b.txt', 'b\n', 'local work');
+        commitIn(mate, '.aimhooman.json', policy('clean'), 'team policy');
+        run(mate, ['push', '-q', 'origin', 'main']);
+        ok(me, ['pull', '-q', '--no-rebase', '--no-edit', 'origin', 'main'], 'a diverged pull');
+        // The policy is in history now; ordinary work goes on.
+        commitIn(me, 'c.txt', 'c\n', 'work after the pull');
+
+        // A conflict resolved by hand and finished with git commit.
+        commitIn(mate, 'a.txt', '2\n', 'mate edits a');
+        run(mate, ['push', '-q', 'origin', 'main']);
+        commitIn(me, 'a.txt', '3\n', 'me edits a');
+        assert.notEqual(run(me, ['pull', '-q', '--no-rebase', '--no-edit', 'origin', 'main']).status, 0, 'a conflict');
+        writeFileSync(join(me, 'a.txt'), '23\n');
+        run(me, ['add', 'a.txt']);
+        ok(me, ['commit', '--no-edit'], 'a merge finished by hand');
+
+        // The team changes its policy later and the clone merges that as well.
+        commitIn(mate, '.aimhooman.json', policy('compliance'), 'team policy again');
+        run(mate, ['push', '-q', 'origin', 'main']);
+        commitIn(me, 'd.txt', 'd\n', 'more local work');
+        ok(me, ['pull', '-q', '--no-rebase', '--no-edit', 'origin', 'main'], 'a later policy change');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+// The final guard prints the same text for this, so only the staged scan on its own shows
+// whether the check before the commit holds.
+test('the staged scan alone holds the strict profile against a weaker policy file', () => {
+    const dir = makeRepo('strict');
+    try {
+        writeFileSync(join(dir, '.aimhooman.json'), `${JSON.stringify({ schema_version: 1, profile: 'clean' })}\n`);
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: dir });
+        const scan = spawnSync('node', [CLI, 'check', '--staged'], { cwd: dir, encoding: 'utf8' });
+        assert.equal(scan.status, 10, `${scan.stdout}${scan.stderr}`);
+        assert.match(`${scan.stdout}${scan.stderr}`, /strict profile this clone chose/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// init is the repair command the guards name. Re-running it must not hand the clone
+// the profile of a policy file it was asked to keep strict against.
+test('a plain init keeps the strict profile this clone chose under a weaker policy file', () => {
+    const dir = makeRepo('strict');
+    try {
+        writeFileSync(join(dir, '.aimhooman.json'), `${JSON.stringify({ schema_version: 1, profile: 'clean' })}\n`);
+        const init = spawnSync('node', [CLI, 'init'], { cwd: dir, encoding: 'utf8' });
+        assert.equal(init.status, 0, `${init.stdout}${init.stderr}`);
+        assert.match(init.stdout, /initialised \(profile: strict\)/);
+        assert.match(init.stdout, /project policy file names clean; this clone keeps the strict profile it chose/);
+        const saved = JSON.parse(readFileSync(join(dir, '.git', 'aimhooman', 'config.json'), 'utf8'));
+        assert.equal(saved.profile, 'strict');
+        // A policy file at the profile the clone chose changes nothing.
+        writeFileSync(join(dir, '.aimhooman.json'), `${JSON.stringify({ schema_version: 1, profile: 'strict' })}\n`);
+        assert.equal(spawnSync('node', [CLI, 'init'], { cwd: dir, encoding: 'utf8' }).status, 0);
+        assert.equal(JSON.parse(readFileSync(join(dir, '.git', 'aimhooman', 'config.json'), 'utf8')).profile, 'strict');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // Git canonicalises a path through the OS; Node's realpathSync only follows
 // symlinks and echoes the spelling it was handed. Where the two disagree, the
 // hooks directory Git reports and the one Node builds from homedir() are the

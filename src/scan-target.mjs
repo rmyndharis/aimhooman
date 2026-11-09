@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Engine, newEngineWithDiagnostics } from './scan.mjs';
 import { loadConfig, loadOverrides } from './state.mjs';
 import { applyExplicitProfile, applyStrictFloor, localFallback, resolvePolicy } from './policy-resolver.mjs';
@@ -145,7 +147,11 @@ export function resolveStagedPolicy(repo, explicitProfile) {
         ? 'head-strict-floor'
         : null;
     // A versioned strict (or unreadable) policy at HEAD has its own floor and its own bound review.
-    const localFloor = !floorPolicy && lowersChosenStrict(repo, rawPolicy, [baseline?.policy_object_id].filter(Boolean));
+    // A merge brings the policy of the commit it merges: that one is history, and the
+    // merge commit is judged by both parents in the final guard. Before the merge is
+    // written, as in pre-merge-commit, it cannot be told from a new one.
+    const localFloor = !floorPolicy && process.env.AIMHOOMAN_ACTIVE_HOOK !== 'pre-merge-commit'
+        && lowersChosenStrict(repo, rawPolicy, [baseline?.policy_object_id, ...mergedPolicies(repo)].filter(Boolean));
     const floor = headFloor ?? (localFloor ? 'local-strict-floor' : null);
     return {
         rawPolicy,
@@ -609,6 +615,17 @@ function headPolicy(repo, tolerant = false) {
     } catch (error) {
         if (error instanceof GitRevisionError) return null;
         throw error;
+    }
+}
+
+// The policy objects of the commits a merge waiting for its commit brings in
+// (MERGE_HEAD lists them), or none.
+function mergedPolicies(repo) {
+    try {
+        return readFileSync(join(repo.gitDir, 'MERGE_HEAD'), 'utf8').split(/\s+/).filter(Boolean)
+            .map((revision) => resolvePolicy(repo, { target: 'commit', revision, tolerant: true }).policy_object_id);
+    } catch {
+        return [];
     }
 }
 

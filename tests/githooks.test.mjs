@@ -1606,18 +1606,24 @@ test('reference transaction ignores attribution on imported commits but still sc
             execFileSync(process.execPath, [CLI, 'init', '--profile', 'clean'], { cwd: root });
 
             // A commit carrying AI attribution, authored out-of-band (as a PR
-            // commit would be) and imported into a new branch for review.
+            // commit would be) in another repository and fetched into a new branch
+            // for review. A fetch from this very repository is not an import.
             const before = git(root, ['rev-parse', 'HEAD']);
             const tree = git(root, ['rev-parse', 'HEAD^{tree}']);
+            const elsewhere = join(base, 'elsewhere');
+            git(base, ['clone', '-q', root, elsewhere]);
+            git(elsewhere, ['config', 'user.email', 'contributor@example.com']);
+            git(elsewhere, ['config', 'user.name', 'Contributor']);
             const imported = execFileSync(
                 'git',
                 ['commit-tree', tree, '-p', before, '-m', 'fix\n\nCo-authored-by: Claude <noreply@anthropic.com>'],
-                { cwd: root, encoding: 'utf8' },
+                { cwd: elsewhere, encoding: 'utf8' },
             ).trim();
+            git(elsewhere, ['update-ref', 'refs/heads/pr', imported]);
             const fetchBranch = 'pr-under-review';
             const fetched = spawnSync(
                 'git',
-                ['fetch', '.', `${imported}:refs/heads/${fetchBranch}`],
+                ['fetch', elsewhere, `refs/heads/pr:refs/heads/${fetchBranch}`],
                 { cwd: root, encoding: 'utf8' },
             );
             assert.equal(fetched.status, 0, fetched.stderr);
@@ -1955,6 +1961,127 @@ test('the final guard lets history from elsewhere in, however many commits move 
             empty(own, 'own two');
             const ownPull = spawnSync('git', ['pull', '-q', '--ff-only'], { cwd: copy, encoding: 'utf8' });
             assert.equal(ownPull.status, 0, ownPull.stderr);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// What was fetched from this repository itself, and an address given to the update
+// alone, say nothing about who made a commit: the commits are still the ones made here.
+test('the final guard does not take its own repository or an address given to the update for someone else', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-own-fetch-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    try {
+        isolatedGitConfig(base, () => {
+            for (const profile of ['clean', 'strict']) {
+                const root = join(base, `repo-${profile}`);
+                mkdirSync(root);
+                git(root, ['init', '-q']);
+                // Upper case on purpose: addresses are compared without regard to case.
+                git(root, ['config', 'user.email', 'T@Example.INVALID']);
+                git(root, ['config', 'user.name', 'Test']);
+                writeFileSync(join(root, 'README.md'), 'initial\n');
+                git(root, ['add', 'README.md']);
+                git(root, ['commit', '-q', '-m', 'initial']);
+                execFileSync(process.execPath, [CLI, 'init', '--profile', profile], { cwd: root });
+                const main = git(root, ['branch', '--show-current']);
+                const ref = `refs/heads/${main}`;
+                // Two commits made with the hooks off, the first with the trailer.
+                const off = ['-c', 'core.hooksPath=/dev/null'];
+                git(root, ['checkout', '-q', '-b', 'side']);
+                writeFileSync(join(root, 's1.txt'), 's1\n');
+                git(root, ['add', 's1.txt']);
+                git(root, [...off, 'commit', '-q', '-m', `feat: x\n\n${trailer}`]);
+                writeFileSync(join(root, 's2.txt'), 's2\n');
+                git(root, ['add', 's2.txt']);
+                git(root, [...off, 'commit', '-q', '-m', 'chore: s2']);
+                git(root, ['checkout', '-q', main]);
+                const run = (args, environment = {}) => spawnSync('git', args, {
+                    cwd: root,
+                    encoding: 'utf8',
+                    env: { ...process.env, ...environment },
+                });
+                const tip = () => run(['rev-parse', '-q', '--verify', ref]).stdout.trim();
+                const stays = (label, move) => {
+                    const before = tip();
+                    const result = move();
+                    assert.notEqual(result.status, 0, `${profile}: ${label}`);
+                    assert.match(result.stderr, /attribution\.claude-coauthor/, `${profile}: ${label}`);
+                    assert.equal(tip(), before, `${profile}: ${label} moved ${ref}`);
+                    run(['merge', '--abort']);
+                    run(['reset', '-q', '--hard', 'HEAD']);
+                    return result;
+                };
+
+                const first = stays('a pull from this repository', () => run(['pull', '--ff-only', '.', 'side']));
+                // The refused move may have left the files; the note says how to get back.
+                assert.match(first.stderr, /git merge --abort/, profile);
+                assert.match(first.stderr, /git reset --hard HEAD/, profile);
+                stays('a fetch from this repository and a merge of FETCH_HEAD', () => {
+                    run(['fetch', '-q', '.', 'side']);
+                    return run(['merge', '--no-ff', '--no-edit', 'FETCH_HEAD']);
+                });
+                stays('an address given with -c to the update', () => run(['-c', 'user.email=other@example.com', 'merge', '--ff-only', 'side']));
+                stays('an address given in the environment to the update', () => run(['merge', '--ff-only', 'side'], {
+                    GIT_COMMITTER_EMAIL: 'other@example.com',
+                    GIT_COMMITTER_NAME: 'Other',
+                }));
+                stays('reset --hard under another address', () => run(['-c', 'user.email=other@example.com', 'reset', '--hard', 'side']));
+                // The commits are not the ones in the way, only how they arrive.
+                const merged = run(['merge', '--ff-only', 'HEAD']);
+                assert.equal(merged.status, 0, `${profile}: ${merged.stderr}`);
+            }
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// Without an identity nothing tells a teammate's commit from one made here, so a fetch
+// that holds it decides. A commit a fetch brought in is not put on the list of what was
+// refused: it can only be reworded where it was made, and the other routes stay open.
+test('a clone with no identity takes a teammate commit, and a fetched commit is not listed as refused', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-no-identity-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    try {
+        isolatedGitConfig(base, () => {
+            const upstream = makeRepo(base);
+            git(upstream, ['config', 'user.email', 'mate@example.com']);
+            git(upstream, ['config', 'user.name', 'Mate']);
+            const clone = join(base, 'clone');
+            git(base, ['clone', '-q', upstream, clone]);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: clone });
+            // No name or address in any file and none to be guessed.
+            git(clone, ['config', 'user.useConfigOnly', 'true']);
+            assert.notEqual(spawnSync('git', ['var', 'GIT_COMMITTER_IDENT'], { cwd: clone }).status, 0, 'no identity');
+            git(upstream, ['commit', '-q', '--allow-empty', '-m', `teammate\n\n${trailer}`]);
+            const pull = spawnSync('git', ['pull', '-q', '--ff-only'], { cwd: clone, encoding: 'utf8' });
+            assert.equal(pull.status, 0, pull.stderr);
+
+            // The same user, on another machine with no hooks, made one commit with the trailer.
+            const own = join(base, 'own');
+            mkdirSync(own);
+            git(own, ['init', '-q']);
+            git(own, ['config', 'user.email', 'test@example.com']);
+            git(own, ['config', 'user.name', 'Test']);
+            writeFileSync(join(own, 'README.md'), 'own\n');
+            git(own, ['add', 'README.md']);
+            git(own, ['commit', '-q', '-m', 'initial']);
+            const copy = join(base, 'copy');
+            git(base, ['clone', '-q', own, copy]);
+            git(copy, ['config', 'user.email', 'test@example.com']);
+            git(copy, ['config', 'user.name', 'Test']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: copy });
+            git(own, ['commit', '-q', '--allow-empty', '-m', `own\n\n${trailer}`]);
+            const branch = git(own, ['branch', '--show-current']);
+            const refused = spawnSync('git', ['pull', '--ff-only'], { cwd: copy, encoding: 'utf8' });
+            assert.notEqual(refused.status, 0, 'one commit under the local address is read');
+            assert.match(refused.stderr, /came in with a fetch/);
+            const ledger = join(copy, '.git', 'aimhooman', 'refused-commits');
+            assert.equal(existsSync(ledger) ? readFileSync(ledger, 'utf8').trim() : '', '', 'not listed as refused');
+            const merge = spawnSync('git', ['merge', '--no-ff', '--no-edit', `origin/${branch}`], { cwd: copy, encoding: 'utf8' });
+            assert.equal(merge.status, 0, merge.stderr);
         });
     } finally {
         rmSync(base, { recursive: true, force: true });

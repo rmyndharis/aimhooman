@@ -648,29 +648,62 @@ export function fetchedCommit(repo, oid, tips = []) {
     }
 }
 
-// localCommitter is the address Git would commit with here, or '' without an
-// identity, when nothing can be told apart.
-export function localCommitter(repo) {
-    try {
-        return /<([^<>]*)>/.exec(gitStr(['var', 'GIT_COMMITTER_IDENT'], repo.root))?.[1].toLowerCase() ?? '';
-    } catch {
-        return '';
+// What changes the identity for one command: -c user.email, GIT_COMMITTER_EMAIL, EMAIL.
+const IDENTITY_OVERRIDE = /^(?:GIT_(?:COMMITTER|AUTHOR)_|GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$|EMAIL$)/;
+
+// localCommitters are the addresses Git commits with here: the one in the
+// configuration and, when the command being checked carries its own (git -c
+// user.email=x merge, GIT_COMMITTER_EMAIL=x git merge), the one in effect for
+// it. A commit made by either was made here, so an address given to the update
+// does not turn the commits made here into someone else's. Without an identity
+// there is none, and nothing can be told apart.
+export function localCommitters(repo) {
+    const environment = gitEnvironment();
+    const configured = Object.fromEntries(Object.entries(environment).filter(([name]) => !IDENTITY_OVERRIDE.test(name)));
+    const runs = Object.keys(configured).length === Object.keys(environment).length ? [environment] : [environment, configured];
+    const addresses = new Set();
+    for (const env of runs) {
+        try {
+            const ident = execFileSync('git', ['var', 'GIT_COMMITTER_IDENT'], {
+                cwd: repo.root,
+                env,
+                encoding: 'utf8',
+                timeout: GIT_TIMEOUT_MS,
+                stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            const address = /<([^<>]*)>/.exec(ident)?.[1];
+            if (address) addresses.add(address.toLowerCase());
+        } catch { /* no identity here */ }
     }
+    return addresses;
 }
 
-// committedElsewhere reports whether someone else committed it: the address Git
-// would commit with here differs from the commit's. Without a local identity
-// nothing can be told apart.
-export function committedElsewhere(repo, oid) {
-    assertOid(oid);
+// fetchHeld names the commits among oids that a fetch holds, in one call: an update
+// can bring in hundreds. old, when the update has one, bounds what the walk lists to
+// what the update introduces. A ref or a tip Git cannot walk only narrows what counts
+// as fetched, as it does for one commit.
+export function fetchHeld(repo, oids, tips = [], old = null) {
+    oids.forEach(assertOid);
+    if (!oids.length) return new Set();
+    // The commits and the tips go in on stdin, so a pull of thousands cannot run out
+    // of argument space (about 780 commits on Windows).
+    const lists = (extra) => gitBuf(
+        ['rev-list', '--stdin', ...(old ? [`^${old}`] : []), '--not', '--remotes'],
+        repo.root,
+        Buffer.from(`${[...oids, ...extra.map((tip) => `^${tip}`)].join('\n')}\n`),
+    ).toString('utf8').split('\n').filter(Boolean);
+    let unfetched;
     try {
-        const local = localCommitter(repo);
-        // log.showSignature would print the signature check before the address.
-        return Boolean(local)
-            && gitStr(['log', '-1', '--no-show-signature', '--format=%ce', oid], repo.root).toLowerCase() !== local;
+        unfetched = lists(tips);
     } catch {
-        return false;
+        try {
+            unfetched = lists([]);
+        } catch {
+            return new Set();
+        }
     }
+    const left = new Set(unfetched);
+    return new Set(oids.filter((oid) => !left.has(oid)));
 }
 
 // committerAddresses reads the address each commit was committed under, lower
@@ -707,10 +740,29 @@ export function onLocalBranch(repo, oid) {
     }
 }
 
-// fetchHeadObjects lists the object IDs FETCH_HEAD records, or none.
+// Whether a fetch came from this repository itself (git pull . side, git fetch
+// ../here): what it brings was made here, not fetched.
+function fetchedFromHere(repo, line) {
+    const at = line.lastIndexOf(' of ');
+    if (at < 0) return false;
+    const location = line.slice(at + 4).trim();
+    const path = location.startsWith('file://') ? decodeURIComponent(location.slice('file://'.length)) : location;
+    // A host name or a scheme is another machine.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path) || /^[^/\\:]+@[^:]+:/.test(path)) return false;
+    try {
+        const there = realpathSync.native(resolve(repo.root, path));
+        return [repo.root, repo.gitDir, repo.commonDir].some((own) => realpathSync.native(own) === there);
+    } catch {
+        return false;
+    }
+}
+
+// fetchHeadObjects lists the object IDs FETCH_HEAD records for what another
+// repository sent, or none.
 export function fetchHeadObjects(repo) {
     try {
         return readFileSync(join(repo.gitDir, 'FETCH_HEAD'), 'utf8').split('\n')
+            .filter((line) => !fetchedFromHere(repo, line))
             .map((line) => /^([0-9a-f]{40}|[0-9a-f]{64})\t/.exec(line)?.[1])
             .filter(Boolean);
     } catch {

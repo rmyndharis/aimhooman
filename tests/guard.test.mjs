@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openRepo, stagedPaths, stagedTreeSha } from '../src/gitx.mjs';
 import {
+    authoredHere,
     dispatchHooksChanged,
     precommitCleanMatches,
     recordPrecommitClean,
@@ -270,6 +271,50 @@ test('resolveIntroduced counts a merge made here and a commit with no history as
         assert.equal(authored({ oldObjectId: base, newObjectId: theirMerge, ref: branch }).get(theirMerge), false);
         const theirRoot = mate('-m', 'their root');
         assert.equal(authored({ oldObjectId: '0'.repeat(40), newObjectId: theirRoot, ref: 'refs/heads/o' }).get(theirRoot), false);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('authoredHere reads what it cannot place, and lets a fetch decide when there is no identity', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        const zero = '0'.repeat(40);
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const by = (email, ...args) => execFileSync('git', ['commit-tree', tree, ...args], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { ...process.env, GIT_COMMITTER_NAME: 'N', GIT_COMMITTER_EMAIL: email },
+        }).trim();
+        const mine = by('t@t', '-p', base, '-m', 'mine');
+        const mine2 = by('t@t', '-p', mine, '-m', 'mine two');
+        const theirs = by('mate@example.com', '-p', mine2, '-m', 'theirs');
+        const theirs2 = by('mate@example.com', '-p', theirs, '-m', 'theirs two');
+
+        assert.deepEqual(authoredHere(repo, { oldObjectId: base }, [], []), []);
+        // Several commits: someone else's committer is enough, this identity's is read.
+        assert.deepEqual(authoredHere(repo, { oldObjectId: base }, [mine, mine2, theirs], []), [mine, mine2]);
+        // A fetch holds mine and mine2 here, as a pull from another machine would.
+        git(dir, ['update-ref', 'refs/remotes/origin/main', mine2]);
+        assert.deepEqual(authoredHere(repo, { oldObjectId: zero }, [mine, mine2, theirs], []), []);
+        // One commit needs both: the committer and a fetch.
+        assert.deepEqual(authoredHere(repo, { oldObjectId: base }, [theirs2], []), [theirs2], 'no fetch holds it');
+        assert.deepEqual(authoredHere(repo, { oldObjectId: base }, [theirs2], [theirs2]), []);
+        // A commit Git cannot read leaves every committer unread: all of them are read, none skipped.
+        const missing = 'c'.repeat(40);
+        assert.deepEqual(
+            authoredHere(repo, { oldObjectId: zero }, [mine, missing, theirs2], []).sort(),
+            [mine, missing, theirs2].sort(),
+        );
+
+        // Without a name or an address nothing is told apart by committer, so a fetch decides.
+        git(dir, ['config', 'user.useConfigOnly', 'true']);
+        git(dir, ['config', 'user.email', '']);
+        git(dir, ['config', 'user.name', '']);
+        assert.deepEqual(authoredHere(repo, { oldObjectId: base }, [theirs2], []), [theirs2]);
+        assert.deepEqual(authoredHere(repo, { oldObjectId: base }, [theirs2], [theirs2]), []);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
