@@ -4109,6 +4109,16 @@ test('a script the command runs is read for Git that skips the hooks', async () 
             writeFileSync(join(dir, 'Makefile'), 'leak:\n\tgit -c core.hooksPath=/dev/null commit -qm leak\n');
             assert.equal((await decide('make -s leak'))?.permissionDecision, 'deny', profile);
 
+            // A plain editor in a script is not a skipped hook; one that is a script of
+            // its own, or a command that pushes, still is.
+            writeFileSync(join(dir, 'continue.sh'), '#!/bin/sh\nGIT_EDITOR=true git rebase --continue\nGIT_SEQUENCE_EDITOR=: git rebase -i --autosquash main\ngit -c core.editor=true commit --amend --no-edit\n', { mode: 0o755 });
+            writeFileSync(join(dir, 'edit.sh'), '#!/bin/sh\nGIT_EDITOR=./edit-message.sh git rebase --continue\n', { mode: 0o755 });
+            writeFileSync(join(dir, 'Makefile'), 'release:\n\tGIT_EDITOR=true git rebase --continue\nbuild:\n\techo build\n');
+            for (const command of ['./continue.sh', 'bash continue.sh', 'make -s build', 'make release']) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            assert.equal((await decide('./edit.sh'))?.permissionDecision, 'deny', `${profile}: ./edit.sh`);
+
             // What a script holds of aimhooman is judged like the command: init may
             // keep the profile, and one that sets it from a variable is not judged.
             const lowered = profile === 'strict' ? 'clean' : 'compliance';
@@ -4125,6 +4135,109 @@ test('a script the command runs is read for Git that skips the hooks', async () 
             // A script run beside a substitution is still a line the strict
             // profile cannot read, as it was before scripts were read.
             for (const command of ['npm test $(date)', './ok.sh $(date)', '(npm test)']) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// An editor named as a program, or the no-ops true and :, edits a message or a
+// todo list and the hooks run after it, so GIT_EDITOR=true git rebase --continue
+// is how an agent continues a rebase. An editor that is a script of its own, a
+// path, or a command that pushes is still read and refused.
+test('a plain editor is not a skipped hook', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-editor-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'GIT_EDITOR=true git rebase --continue',
+                'GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash main',
+                "GIT_EDITOR='code --wait' git rebase --continue",
+                'export GIT_EDITOR=true; git rebase --continue',
+                'git -c core.editor=true commit --amend --no-edit',
+                'git -c sequence.editor=: rebase -i main',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                'GIT_EDITOR=./edit.sh git rebase --continue',
+                'export GIT_EDITOR=./evil.sh; git rebase --continue',
+                "GIT_EDITOR='git push --no-verify origin wip' git rebase --continue",
+                `GIT_EDITOR='sh -c "git push --no-verify origin wip"' git commit --amend`,
+                'GIT_EDITOR=vim PATH=/tmp/evil:$PATH git rebase --continue',
+                'GIT_EDITOR=true GIT_CONFIG_GLOBAL=/tmp/x git rebase --continue',
+                'GIT_EDITOR=true HOME=/tmp/x git rebase --continue',
+                `git -c 'core.editor=sh -c "git push --no-verify"' commit --amend`,
+                'GIT_EDITOR=$EDITOR git rebase --continue',
+                'GIT_EDITOR="vim -c !sh" git rebase --continue',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// git branch --merged | xargs git branch -d is the usual way to tidy branches.
+// xargs appends words this scan never sees, so it stays unreadable unless what it
+// runs cannot do harm with any words: a program that reads or prints names, or
+// Git deleting branches, tags or stashes. A Git log or show takes --output=FILE,
+// so those stay refused, as do a push, a fetch, a commit and anything that writes.
+test('xargs after a Git listing passes only when it runs something harmless', async () => {
+    for (const profile of ['clean', 'strict']) {
+        const dir = makeHookRepo(profile, `aim-hook-xargs-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'git branch --merged | grep -v main | xargs git branch -d',
+                'git branch --merged | xargs git branch -D',
+                'git branch --merged | grep -v main | xargs -n 1 git branch -d',
+                'git branch --merged | xargs -I{} git branch -d {}',
+                'git branch -r | grep -v HEAD | xargs -I {} git branch -d -r {}',
+                "git tag -l 'v0.*' | xargs git tag -d",
+                'git stash list | cut -d: -f1 | xargs -n1 git stash drop',
+                'git branch --merged | xargs echo',
+                'git branch -r | xargs -n1 echo',
+                "git branch | sed 's/^..//' | xargs",
+                "git remote -v | awk '{print $2}' | xargs echo",
+                "git worktree list | awk '{print $1}' | xargs -n1 ls",
+                'git branch --merged | xargs -I{} echo {}',
+                'git branch --merged | xargs',
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git branch --merged | xargs git push origin --delete',
+                'git branch --merged | xargs git push --no-verify origin',
+                'git branch --merged | xargs -n1 git fetch',
+                'git branch --merged | xargs git show',
+                'git tag --list | sort -V | tail -1 | xargs git show',
+                'git branch --merged | xargs git log --output=.git/hooks/pre-commit',
+                'git branch --merged | xargs git -c core.hooksPath=/dev/null branch -d',
+                'git branch --merged | xargs git branch -m',
+                'git branch --merged | xargs git branch -d --set-upstream-to=x',
+                'git branch --merged | xargs git tag -d -a x',
+                'git branch --merged | xargs git stash pop',
+                'git branch --merged | xargs git commit -m x',
+                "git branch --merged | xargs sh -c 'cat'",
+                'git branch --merged | xargs sort -o .git/hooks/pre-commit',
+                'git branch --merged | xargs uniq',
+                'git branch --merged | xargs xxd -r',
+                'git branch --merged | xargs rm -rf',
+                'git branch --merged | xargs git branch -d $(git push --no-verify origin wip)',
+                'git branch --merged | xargs -I{} sh -c "git push --no-verify origin {}"',
+                'git branch --merged | xargs -I{} rm -rf .git/hooks/{}',
+                'git branch --merged | python3 -c "import sys; exec(sys.stdin.read())"',
+                'git branch --merged | sh',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            // With no Git listing in front, xargs is as unreadable as it was.
+            for (const command of ['echo x | xargs git branch -d', 'ls | xargs rm']) {
                 assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
             }
         } finally {

@@ -321,7 +321,7 @@ function hookPreToolUse(input) {
             'deny',
             'aimhooman cannot safely verify this command under the strict profile; ' +
             'it uses shell nesting, a pipeline, a background job, or indirection the guard cannot fully resolve. ' +
-            'Run the Git commit as a direct, supported command.'
+            'Run the Git command as a direct, supported command.'
         );
     }
 
