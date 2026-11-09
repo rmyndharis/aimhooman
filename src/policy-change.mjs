@@ -16,8 +16,24 @@ const POLICY_CHANGE_REASON =
     "aimhooman does not let an agent stage or commit .aimhooman.json: the project policy decides what every "
     + "later commit is judged by, so a change to it is the user's to make. Ask the user to commit it.";
 
+// Git takes any unambiguous prefix of a long option, so --al is --all.
+const BROAD_ADD_LONG = ['all', 'update', 'patch', 'interactive', 'edit', 'no-ignore-removal', 'pathspec-from-file', 'pathspec-file-nul'];
+
+function longOption(word) {
+    return /^--([a-z][a-z-]*)(?:=.*)?$/.exec(word)?.[1] ?? null;
+}
+
 // An add option that can stage a file it does not name.
-const BROAD_ADD_OPTION = /^-(?:[a-zA-Z]*[Aupie][a-zA-Z]*|-(?:all|update|patch|interactive|edit|no-ignore-removal|pathspec-from-file(?:=.*)?|pathspec-file-nul))$/;
+function isBroadAddOption(word) {
+    const name = longOption(word);
+    return name ? BROAD_ADD_LONG.some((long) => long.startsWith(name)) : /^-[a-zA-Z]*[Aupie][a-zA-Z]*$/.test(word);
+}
+
+// An add option that lets it stage a file the ignore rules cover.
+function isForceAddOption(word) {
+    const name = longOption(word);
+    return name ? 'force'.startsWith(name) : /^-[a-zA-Z]*f[a-zA-Z]*$/.test(word);
+}
 
 // Git names the repository in its own spelling: symlinks resolved and, on Windows,
 // 8.3 names lengthened. A path typed in the shell is compared in that spelling, so
@@ -48,25 +64,26 @@ function namesPolicy(word, cwd, root) {
     return file === target || target.startsWith(directory.endsWith(sep) ? directory : directory + sep);
 }
 
-// Whether a pathspec may select the policy file without naming it: magic, a glob
-// or a directory that holds it.
+// Whether a pathspec may select the policy file without naming it: magic, a glob,
+// a word the shell has yet to expand ($f, $(...), `...`, {a,b}, ~) or a directory
+// that holds it.
 function pathspecMayMatch(word, cwd, root) {
-    return /^:|[*?[\\]/.test(word) || namesPolicy(word, cwd, root);
+    return /^[:~]|[*?[\\$`{}]/.test(word) || namesPolicy(word, cwd, root);
 }
 
 function addMayStage(candidate, root) {
     const args = candidate.args ?? [];
     const end = args.indexOf('--');
-    const options = (end < 0 ? args : args.slice(0, end)).filter((word) => word.startsWith('-'));
-    const paths = [...(end < 0 ? args.filter((word) => !word.startsWith('-')) : []), ...(end < 0 ? [] : args.slice(end + 1))];
-    return options.some((option) => BROAD_ADD_OPTION.test(option))
+    const before = end < 0 ? args : args.slice(0, end);
+    const paths = [...before.filter((word) => !word.startsWith('-')), ...(end < 0 ? [] : args.slice(end + 1))];
+    return before.some((word) => word.startsWith('-') && isBroadAddOption(word))
         || paths.some((word) => pathspecMayMatch(word, candidate.cwd, root));
 }
 
 function commitMayStage(candidate, root) {
     if (!candidate.args) return Boolean(candidate.futureIndex);
-    return inspectCommitOptions(candidate.args).futureIndex
-        || candidate.args.some((word) => !word.startsWith('-') && namesPolicy(word, candidate.cwd, root));
+    const { optionIndex, paths } = inspectCommitOptions(candidate.args);
+    return optionIndex || paths.some((word) => pathspecMayMatch(word, candidate.cwd, root));
 }
 
 // A staged policy change that the user reviewed: the migration is bound to the
@@ -87,9 +104,15 @@ function writesPolicy(command) {
     return WRITES_POLICY.test(String(command ?? ''));
 }
 
-function pending(repo) {
+// find -exec git add {} \; leaves no add to read, because the paths come from find.
+const WRAPPED_ADD = /-(?:exec|execdir|ok|okdir)\s+(?:\S*[/\\])?git(?:\.exe)?\b[^;&|\n]*?\sadd\b/;
+
+// Whether the policy file has a change a commit could take. An ignored file has
+// none, unless an add forces it in.
+function pending(repo, ignored) {
+    const flags = ignored ? ['--ignored'] : [];
     try {
-        return gitBuf(['status', '--porcelain', '-z', '--untracked-files=all', '--', POLICY_FILE], repo.root).length > 0;
+        return gitBuf(['status', '--porcelain', '-z', '--untracked-files=all', ...flags, '--', POLICY_FILE], repo.root).length > 0;
     } catch {
         return true;
     }
@@ -100,7 +123,8 @@ export function policyChangeReason(parsed, primaryRepo, command) {
     const adds = parsed.commands.filter((candidate) => candidate.verb === 'add');
     const commits = parsed.commands.filter((candidate) => candidate.verb === 'commit');
     const potentialCommit = Boolean(parsed.commit) || commits.length > 0 || parsed.opaqueCommitHiding;
-    if (!adds.length && !potentialCommit) return null;
+    const wrappedAdd = WRAPPED_ADD.test(String(command ?? ''));
+    if (!adds.length && !potentialCommit && !wrappedAdd) return null;
     const repos = new Map();
     const repoAt = (cwd) => {
         if (!repos.has(cwd)) {
@@ -109,9 +133,10 @@ export function policyChangeReason(parsed, primaryRepo, command) {
         return repos.get(cwd);
     };
     const pendingIn = new Map();
-    const isPending = (repo) => {
-        if (!pendingIn.has(repo.root)) pendingIn.set(repo.root, writesPolicy(command) || pending(repo));
-        return pendingIn.get(repo.root);
+    const isPending = (repo, ignored = false) => {
+        const key = `${repo.root}\0${ignored}`;
+        if (!pendingIn.has(key)) pendingIn.set(key, writesPolicy(command) || pending(repo, ignored));
+        return pendingIn.get(key);
     };
     const touched = new Set([primaryRepo, ...commits.map((candidate) => repoAt(candidate.cwd))].filter(Boolean));
     if (potentialCommit) {
@@ -127,11 +152,17 @@ export function policyChangeReason(parsed, primaryRepo, command) {
         const repo = repoAt(candidate.cwd);
         if (!repo) continue;
         const stages = candidate.verb === 'add' ? addMayStage(candidate, repo.root) : commitMayStage(candidate, repo.root);
-        if (stages && isPending(repo)) return POLICY_CHANGE_REASON;
+        const forced = candidate.verb === 'add'
+            && (candidate.args ?? []).some((word) => word.startsWith('-') && isForceAddOption(word));
+        if (stages && isPending(repo, forced)) return POLICY_CHANGE_REASON;
     }
-    // A commit this scan cannot read to its end may stage anything.
+    if (wrappedAdd) {
+        const repo = repoAt(process.cwd());
+        if (repo && isPending(repo, true)) return POLICY_CHANGE_REASON;
+    }
+    // A commit this scan cannot read to its end may stage anything, forced or not.
     if (parsed.opaqueCommitHiding && (parsed.commit || commits.length)) {
-        for (const repo of touched) if (isPending(repo)) return POLICY_CHANGE_REASON;
+        for (const repo of touched) if (isPending(repo, true)) return POLICY_CHANGE_REASON;
     }
     return null;
 }

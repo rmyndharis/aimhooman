@@ -2671,6 +2671,10 @@ const COMMIT_SHORT_OPTIONS = new Map([
 export function inspectCommitOptions(args) {
     let noVerify = false;
     let futureIndex = false;
+    // futureIndex from an option alone (-a, -i, --pathspec-from-file), and the
+    // pathspec words, which also make the commit read the working tree.
+    let optionIndex = false;
+    const paths = [];
     let messageSource = false;
     let editorOverride = null;
     let uncertain = false;
@@ -2680,6 +2684,8 @@ export function inspectCommitOptions(args) {
             return {
                 noVerify,
                 futureIndex: futureIndex || i + 1 < args.length,
+                optionIndex,
+                paths: [...paths, ...args.slice(i + 1)],
                 editorRisk: editorOverride ?? !messageSource,
                 uncertain,
             };
@@ -2695,6 +2701,7 @@ export function inspectCommitOptions(args) {
             const optionValue = separator < 0 ? args[i + 1] : arg.slice(separator + 1);
             if (Object.hasOwn(option, 'noVerify')) noVerify = option.noVerify;
             futureIndex ||= Boolean(option.futureIndex);
+            optionIndex ||= Boolean(option.futureIndex);
             messageSource ||= Boolean(option.messageSource);
             if (option.fixup && !/^(?:amend|reword):/.test(optionValue || '')) {
                 messageSource = true;
@@ -2709,6 +2716,7 @@ export function inspectCommitOptions(args) {
                 if (!option) continue;
                 if (Object.hasOwn(option, 'noVerify')) noVerify = option.noVerify;
                 futureIndex ||= Boolean(option.futureIndex);
+                optionIndex ||= Boolean(option.futureIndex);
                 messageSource ||= Boolean(option.messageSource);
                 if (option.editor) editorOverride = option.editor === 'open';
                 if (option.value) {
@@ -2722,8 +2730,9 @@ export function inspectCommitOptions(args) {
         // become an option such as --no-verify; read as a pathspec it hid one.
         uncertain ||= mayExpandToOption(arg);
         futureIndex = true;
+        paths.push(arg);
     }
-    return { noVerify, futureIndex, editorRisk: editorOverride ?? !messageSource, uncertain };
+    return { noVerify, futureIndex, optionIndex, paths, editorRisk: editorOverride ?? !messageSource, uncertain };
 }
 
 function resolveLongCommitOption(spelling) {
