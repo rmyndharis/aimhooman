@@ -54,7 +54,9 @@ triple-dot merge base is available.
 `reference-transaction` hook therefore checks introduced commits during Git's prepared
 phase and can abort the local ref update. Git 2.54's earlier `preparing` callback is
 accepted for compatibility and checks guard integrity; scanning remains in `prepared`,
-after references are locked.
+after references are locked. It reads the message of each commit made in this clone,
+however the branch moves (one commit, several, a merge, a forced move), and not the
+messages of history a fetch brought in or that someone else committed.
 CI still scans the exact pushed or PR history:
 local hooks do not govern another clone, server-side updates, or history created before
 the guard was installed.

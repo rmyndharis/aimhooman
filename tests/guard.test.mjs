@@ -186,7 +186,17 @@ test('resolveIntroduced separates locally authored tips from imported history', 
             { oldObjectId: '0'.repeat(40), newObjectId: head, ref: branch },
         ], { includeStagedContexts: false });
         assert.deepEqual(creation.map(([oid]) => oid).sort(), [parent, head].sort());
-        assert.equal(creation.every(([, , local]) => local === false), true);
+        assert.equal(
+            creation.every(([, , local]) => local === true),
+            true,
+            'commits this identity made, held by no fetch, are read whatever the shape of the update',
+        );
+        // What a fetch holds is imported history, whoever committed it.
+        git(dir, ['update-ref', 'refs/remotes/origin/main', head]);
+        const imported = resolveIntroduced(repo, [
+            { oldObjectId: '0'.repeat(40), newObjectId: head, ref: branch },
+        ], { includeStagedContexts: false });
+        assert.equal(imported.every(([, , local]) => local === false), true, 'a branch made from fetched history');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -213,9 +223,9 @@ test('resolveIntroduced counts a merge made here and a commit with no history as
 
         const merged = authored(mergeUpdate);
         assert.equal(merged.get(merge), true, 'a merge on the old tip is written here');
-        assert.equal(merged.get(side), false, 'the merged commits keep their own authorship');
+        assert.equal(merged.get(side), true, 'a commit this identity made is read when a merge brings it in');
         assert.equal(authored(rootUpdate).get(root), true, 'an initial or orphan commit enters alone');
-        assert.equal(authored({ ...mergeUpdate, forced: true }).get(merge), false, 'a forced move is not a commit made here');
+        assert.equal(authored({ ...mergeUpdate, forced: true }).get(merge), true, 'a forced move is read like any other');
 
         // A local branch or tag proves nothing: a refused commit can be given one.
         git(dir, ['update-ref', 'refs/heads/keep', merge]);
@@ -234,6 +244,7 @@ test('resolveIntroduced counts a merge made here and a commit with no history as
         git(dir, ['update-ref', 'refs/remotes/origin/main', merge]);
         git(dir, ['update-ref', 'refs/remotes/origin/pages', root]);
         assert.equal(authored(mergeUpdate).get(merge), false, 'a fast-forward to a fetched merge');
+        assert.equal(authored(mergeUpdate).get(side), false, 'the commits a fetched merge brings in are fetched too');
         assert.equal(authored(rootUpdate).get(root), false, 'a branch made from a fetched root');
         // One commit on the old tip counts whatever holds it, while this
         // identity committed it: a refused commit can be given any ref.

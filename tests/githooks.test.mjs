@@ -1828,6 +1828,139 @@ test('someone else\'s fetched commit comes in and a refused one made here stays 
     }
 });
 
+// The final guard used to read a message only when the update had the shape of a
+// commit made here: one new commit on the tip, a merge, a root. Commits made by
+// plumbing or with the hooks off reached a branch in any other shape unread.
+test('the final guard reads every commit made here, whatever shape moves the branch', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-shapes-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    const message = `feat: x\n\n${trailer}`;
+    try {
+        isolatedGitConfig(base, () => {
+            for (const profile of ['clean', 'strict']) {
+                const root = join(base, `repo-${profile}`);
+                mkdirSync(root);
+                git(root, ['init', '-q']);
+                git(root, ['config', 'user.email', 'test@example.com']);
+                git(root, ['config', 'user.name', 'Test']);
+                writeFileSync(join(root, 'README.md'), 'initial\n');
+                git(root, ['add', 'README.md']);
+                git(root, ['commit', '-q', '-m', 'initial']);
+                execFileSync(process.execPath, [CLI, 'init', '--profile', profile], { cwd: root });
+                const main = git(root, ['branch', '--show-current']);
+                const tree = git(root, ['rev-parse', 'HEAD^{tree}']);
+                const initial = git(root, ['rev-parse', 'HEAD']);
+                const run = (args) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+                const tip = (ref) => run(['rev-parse', '-q', '--verify', ref]).stdout.trim();
+                const stays = (label, ref, move) => {
+                    const before = tip(ref);
+                    const result = move();
+                    assert.notEqual(result.status, 0, `${profile}: ${label}`);
+                    assert.match(result.stderr, /attribution\.claude-coauthor/, `${profile}: ${label}`);
+                    assert.equal(tip(ref), before, `${profile}: ${label} moved ${ref}`);
+                    // The refused move may have left the work tree and index half way.
+                    run(['merge', '--abort']);
+                    run(['reset', '-q', '--hard', 'HEAD']);
+                };
+                const first = git(root, ['commit-tree', tree, '-p', initial, '-m', message]);
+                const second = git(root, ['commit-tree', tree, '-p', first, '-m', 'chore: second']);
+                const ref = `refs/heads/${main}`;
+
+                stays('two commits in one update', ref, () => run(['update-ref', ref, second, initial]));
+                stays('a branch made at the commit', 'refs/heads/made', () => run(['update-ref', 'refs/heads/made', first]));
+                stays('git branch at the commit', 'refs/heads/also', () => run(['branch', 'also', first]));
+                stays('update-ref with no old value', ref, () => run(['update-ref', ref, first]));
+                stays('checkout -B', ref, () => run(['checkout', '-q', '-B', main, first]));
+                stays('reset --hard', ref, () => run(['reset', '-q', '--hard', second]));
+
+                // Two commits made with the hooks off, then brought in with the hooks on.
+                const off = ['-c', 'core.hooksPath=/dev/null'];
+                git(root, ['checkout', '-q', '-b', 'side']);
+                writeFileSync(join(root, 's1.txt'), 's1\n');
+                git(root, ['add', 's1.txt']);
+                git(root, [...off, 'commit', '-q', '-m', message]);
+                writeFileSync(join(root, 's2.txt'), 's2\n');
+                git(root, ['add', 's2.txt']);
+                git(root, [...off, 'commit', '-q', '-m', 'chore: s2']);
+                git(root, ['checkout', '-q', main]);
+                stays('a fast-forward over two commits made with the hooks off', ref, () => run(['merge', '--ff-only', 'side']));
+                stays('a merge of a commit made with the hooks off', ref, () => run(['merge', '--no-ff', '-m', 'merge side', 'side']));
+
+                // Work that carries no attribution moves in every one of those shapes.
+                const clean = git(root, ['commit-tree', tree, '-p', initial, '-m', 'feat: plain']);
+                const cleanSecond = git(root, ['commit-tree', tree, '-p', clean, '-m', 'feat: plain two']);
+                const moved = run(['update-ref', ref, cleanSecond, initial]);
+                assert.equal(moved.status, 0, `${profile}: ${moved.stderr}`);
+                assert.equal(tip(ref), cleanSecond, profile);
+            }
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+// History that came from elsewhere is not the developer's to word, so it comes in
+// however many commits move the branch.
+test('the final guard lets history from elsewhere in, however many commits move a branch', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-ref-elsewhere-'));
+    const trailer = 'Co-authored-by: Claude <noreply@anthropic.com>';
+    try {
+        isolatedGitConfig(base, () => {
+            const upstream = makeRepo(base);
+            git(upstream, ['config', 'user.email', 'mate@example.com']);
+            git(upstream, ['config', 'user.name', 'Mate']);
+            const clone = join(base, 'clone');
+            git(base, ['clone', '-q', upstream, clone]);
+            git(clone, ['config', 'user.email', 'test@example.com']);
+            git(clone, ['config', 'user.name', 'Test']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: clone });
+            const run = (args) => spawnSync('git', args, { cwd: clone, encoding: 'utf8' });
+            const main = git(upstream, ['branch', '--show-current']);
+            const empty = (cwd, subject) => git(cwd, ['commit', '-q', '--allow-empty', '-m', `${subject}\n\n${trailer}`]);
+
+            for (const subject of ['one', 'two', 'three']) empty(upstream, subject);
+            const pull = run(['pull', '-q', '--ff-only']);
+            assert.equal(pull.status, 0, pull.stderr);
+
+            git(upstream, ['checkout', '-q', '-b', 'feat']);
+            empty(upstream, 'feat one');
+            empty(upstream, 'feat two');
+            git(upstream, ['checkout', '-q', main]);
+            git(clone, ['fetch', '-q', 'origin']);
+            const checkout = run(['checkout', '-q', '-b', 'feat', 'origin/feat']);
+            assert.equal(checkout.status, 0, checkout.stderr);
+            run(['checkout', '-q', main]);
+
+            git(clone, ['commit', '-q', '--allow-empty', '-m', 'local work']);
+            empty(upstream, 'four');
+            empty(upstream, 'five');
+            const merge = run(['pull', '-q', '--no-rebase', '--no-edit']);
+            assert.equal(merge.status, 0, merge.stderr);
+
+            // Two commits this identity made on another machine come in as well.
+            const own = join(base, 'own');
+            mkdirSync(own);
+            git(own, ['init', '-q']);
+            git(own, ['config', 'user.email', 'test@example.com']);
+            git(own, ['config', 'user.name', 'Test']);
+            writeFileSync(join(own, 'README.md'), 'own\n');
+            git(own, ['add', 'README.md']);
+            git(own, ['commit', '-q', '-m', 'initial']);
+            const copy = join(base, 'copy');
+            git(base, ['clone', '-q', own, copy]);
+            git(copy, ['config', 'user.email', 'test@example.com']);
+            git(copy, ['config', 'user.name', 'Test']);
+            execFileSync(process.execPath, [CLI, 'init', '--profile', 'strict'], { cwd: copy });
+            empty(own, 'own one');
+            empty(own, 'own two');
+            const ownPull = spawnSync('git', ['pull', '-q', '--ff-only'], { cwd: copy, encoding: 'utf8' });
+            assert.equal(ownPull.status, 0, ownPull.stderr);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 // The guard keeps a list of what it refused. Committing under another address,
 // or a pull from the repository itself that leaves the commit in FETCH_HEAD,
 // only changes who seems to have made it.
