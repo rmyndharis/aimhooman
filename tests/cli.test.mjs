@@ -1616,6 +1616,90 @@ test('global reference dispatcher stays transparent in unsupported bare reposito
     }
 });
 
+// core.bare is one line in .git/config. A repository with a worktree that says
+// true has no top level for the guard to open, and the carve-out for bare
+// repositories let every ref update and push through unscanned, with status still
+// saying healthy. The control directory of a repository with a worktree is named
+// .git, so that is what decides, not the setting.
+test('core.bare in the config does not switch off the final ref guard or pre-push', () => {
+    for (const profile of ['clean', 'strict', 'compliance']) {
+        const dir = makeRepo(profile);
+        const remote = mkdtempSync(join(tmpdir(), 'aim-bare-flip-remote-'));
+        try {
+            const gitIn = (args, cwd = dir) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+            execFileSync('git', ['init', '--bare', '-q'], { cwd: remote });
+            execFileSync('git', ['remote', 'add', 'origin', remote], { cwd: dir });
+            const branch = gitIn(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+            // A commit with an artifact, built by plumbing so that no hook ever saw it.
+            writeFileSync(join(dir, 'CLAUDE.local.md'), 'private\n');
+            execFileSync('git', ['add', '-f', 'CLAUDE.local.md'], { cwd: dir });
+            const tree = gitIn(['write-tree']).stdout.trim();
+            execFileSync('git', ['reset', '-q'], { cwd: dir });
+            rmSync(join(dir, 'CLAUDE.local.md'));
+            const evil = gitIn(['commit-tree', tree, '-p', 'HEAD', '-m', 'feat: x']).stdout.trim();
+            assert.match(evil, /^[0-9a-f]{40,64}$/, profile);
+
+            const refused = gitIn(['update-ref', `refs/heads/${branch}`, evil]);
+            assert.notEqual(refused.status, 0, `${profile}: control, the guard refuses the move`);
+
+            execFileSync('git', ['config', 'core.bare', 'true'], { cwd: dir });
+            const flipped = gitIn(['update-ref', `refs/heads/${branch}`, evil]);
+            assert.notEqual(flipped.status, 0, `${profile}: still refused with core.bare=true: ${flipped.stderr}`);
+            const moved = gitIn(['--git-dir', join(dir, '.git'), 'rev-parse', `refs/heads/${branch}`]).stdout.trim();
+            assert.notEqual(moved, evil, `${profile}: the branch did not move`);
+            const pushed = gitIn(['push', remote, `${evil}:refs/heads/leak`]);
+            assert.notEqual(pushed.status, 0, `${profile}: and the push is refused`);
+            const arrived = gitIn(['--git-dir', remote, 'rev-parse', '--verify', '-q', 'refs/heads/leak']);
+            assert.notEqual(arrived.status, 0, `${profile}: nothing arrived at the remote`);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(remote, { recursive: true, force: true });
+        }
+    }
+});
+
+// The hooks refuse while the saved profile cannot be read, and the message sends
+// the developer to init. A plain init used to write the default over it, so a
+// strict clone became a clean one without a word. It asks for the profile now.
+test('a plain init does not reset a profile it cannot read', () => {
+    const dir = makeRepo('strict');
+    try {
+        const file = join(dir, '.git', 'aimhooman', 'config.json');
+        for (const broken of ['', '{"schema_version":2,"profile":"strict"}', '{"schema_version":1,"profile":"strict","extra":1}']) {
+            writeFileSync(file, broken);
+            const plain = result('init', [], dir);
+            assert.equal(plain.status, 20, `${JSON.stringify(broken)}: ${plain.stderr}`);
+            assert.match(plain.stderr, /--profile/, 'and names how to set it');
+            assert.equal(readFileSync(file, 'utf8'), broken, 'the file is left as it was');
+            const repaired = result('init', ['--profile', 'strict'], dir);
+            assert.equal(repaired.status, 0, repaired.stderr);
+            assert.equal(JSON.parse(readFileSync(file, 'utf8')).profile, 'strict');
+        }
+        // A clone that has no saved profile yet still gets the default.
+        rmSync(file);
+        assert.equal(result('init', [], dir).status, 0);
+        assert.equal(JSON.parse(readFileSync(file, 'utf8')).profile, 'clean');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// git symbolic-ref refs/heads/alias refs/heads/main hands the hook a ref: value
+// where it expects an object ID, and the update was stopped as malformed. A
+// symbolic ref holds no commit of its own.
+test('a branch that is a symbolic ref can be made, moved and deleted', () => {
+    const dir = makeRepo('clean');
+    try {
+        const gitIn = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+        const branch = gitIn(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+        gitIn(['branch', 'other']);
+        const made = gitIn(['symbolic-ref', 'refs/heads/alias', `refs/heads/${branch}`]);
+        assert.equal(made.status, 0, made.stderr);
+        const moved = gitIn(['symbolic-ref', 'refs/heads/alias', 'refs/heads/other']);
+        assert.equal(moved.status, 0, moved.stderr);
+        const removed = gitIn(['symbolic-ref', '--delete', 'refs/heads/alias']);
+        assert.equal(removed.status, 0, removed.stderr);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // Git canonicalises a path through the OS; Node's realpathSync only follows
 // symlinks and echoes the spelling it was handed. Where the two disagree, the
 // hooks directory Git reports and the one Node builds from homedir() are the

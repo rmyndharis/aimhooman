@@ -44,7 +44,7 @@ and the final ref boundary independently scans every commit introduced to `HEAD`
 branch. A block that survives repair stops the commit; an incomplete scan warns on
 `clean`/`compliance` and still vetoes at the final ref guard, unless the only gap is a
 file over the per-file size budget. `pre-push` scans what a push would send, so a commit
-pushed by raw object ID cannot bypass the local guards.
+pushed by raw object ID with `git push` cannot bypass the local guards.
 
 ```mermaid
 flowchart TD

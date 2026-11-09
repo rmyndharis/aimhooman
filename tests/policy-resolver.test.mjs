@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GitRevisionError, openRepo } from '../src/gitx.mjs';
+import { GitRevisionError, GitTargetReadError, openRepo } from '../src/gitx.mjs';
 import {
     applyExplicitProfile,
     applyStrictFloor,
@@ -225,6 +225,45 @@ test('a commit policy this version cannot parse resolves tolerantly instead of t
         assert.match(tolerant.unparseable, /unsupported field/, 'and the reason travels with the result');
     } finally {
         rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// A teammate's clone without the hooks can commit .aimhooman.json as a directory
+// or as a submodule entry. Both used to throw past the tolerance that a symlink
+// gets, so every pull, reset and checkout that carried the commit was refused and
+// the only way out was to switch the guard off.
+test('a commit whose policy path is a directory or a submodule resolves tolerantly', () => {
+    for (const kind of ['directory', 'submodule']) {
+        const dir = freshRepo();
+        try {
+            const repo = openRepo(dir);
+            if (kind === 'directory') {
+                mkdirSync(join(dir, '.aimhooman.json'));
+                writeFileSync(join(dir, '.aimhooman.json', 'x'), 'x\n');
+                execFileSync('git', ['add', '.aimhooman.json/x'], { cwd: dir });
+            } else {
+                const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+                execFileSync('git', ['update-index', '--add', '--cacheinfo', `160000,${head},.aimhooman.json`], { cwd: dir });
+            }
+            execFileSync('git', ['commit', '-q', '-m', `policy as a ${kind}`], { cwd: dir });
+
+            assert.throws(
+                () => resolvePolicy(repo, { target: 'commit', revision: 'HEAD' }),
+                GitTargetReadError,
+                `${kind}: the direct question still gets the loud answer`,
+            );
+            const tolerant = resolvePolicy(repo, { target: 'commit', revision: 'HEAD', tolerant: true });
+            assert.equal(tolerant.profile, null, kind);
+            assert.match(tolerant.unparseable, /must be a regular Git file/, kind);
+            assert.match(tolerant.policy_object_id, /^[0-9a-f]{40,64}$/, kind);
+
+            const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+            const scan = scanGitTarget(repo, { kind: 'commit', revision: head, tolerateUnreadablePolicy: true });
+            assert.ok(scan.profile, `${kind}: the scan runs under a profile it could reach`);
+            assert.ok(scan.diagnostics.some((d) => d.level === 'warning'), `${kind}: and warns`);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     }
 });
 

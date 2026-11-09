@@ -1064,8 +1064,19 @@ AIMHOOMAN_CLI=${shq(resolvedCliPath)}
 AIMHOOMAN_NODE=${shq(nodePath)}
 AIMHOOMAN_PATH=${shq(shellPathValue)}
 AIMHOOMAN_COMPILE_CACHE=${shq(compileCacheDir)}
-${captureTree}${captureTransaction}run_aimhooman() {
+${captureTree}${captureTransaction}aimhooman_strict() {
+  AIMHOOMAN_COMMON_DIR=$(PATH="$AIMHOOMAN_PATH" git rev-parse --git-common-dir 2>/dev/null) || return 1
+  PATH="$AIMHOOMAN_PATH" grep -Eq '"profile"[[:space:]]*:[[:space:]]*"strict"' "$AIMHOOMAN_COMMON_DIR/aimhooman/config.json" 2>/dev/null
+}
+run_aimhooman() {
   if [ ! -f "$AIMHOOMAN_CLI" ]; then
+    # A cleaned npx cache or a switched Node version moves the CLI without anyone
+    # meaning to disable the guard, so clean and compliance warn and go on. Strict
+    # cancels instead of trusting, as it does for a missing interpreter below.
+    if aimhooman_strict; then
+      echo "aimhooman: the aimhooman CLI is missing; the operation was stopped under the strict profile. Reinstall aimhooman and run 'aimhooman init', or remove the managed hooks." >&2
+      return 20
+    fi
     echo "aimhooman: guard unavailable (aimhooman CLI is missing); allowing this operation without protection. Reinstall aimhooman or remove the managed hooks." >&2
     return 0
   fi
