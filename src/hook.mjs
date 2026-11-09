@@ -259,8 +259,13 @@ function hookPreToolUse(input) {
     // The project policy is the user's to change, on every profile. It turns an
     // allow into a refusal where this function would allow, so every older refusal
     // and its reason stay as they were.
-    const policyChange = policyChangeReason(parsed, null, executorCommand);
-    const allowed = () => (policyChange ? emitDecision('deny', policyChange) : 0);
+    // It is asked only where this function would allow, since it starts git.
+    let policyVerdict;
+    const policyChange = () => {
+        policyVerdict ??= { reason: policyChangeReason(parsed, executorCommand, { posix: !nonPosixExecutor(executor.name) }) };
+        return policyVerdict.reason;
+    };
+    const allowed = () => (policyChange() ? emitDecision('deny', policyChange()) : 0);
     if (!commit && !protectedMutation && addPaths.length === 0 && !parsed.uncertainShell) return allowed();
     // The loop below visits what moves refs and passes over a listing such as
     // git branch, so only those leave nothing hidden unvisited.
@@ -752,7 +757,7 @@ function hookPreToolUse(input) {
     const guarded = repo && !bypassed && installedHooks(repo).includes('pre-commit');
     const advisory = advisoryReason(blocks, guarded, bypassed ? bypassContext : '');
     const notes = [diagnosticWarning, hygieneWarning].filter(Boolean).join('; ');
-    if (policyChange) return emitDecision('deny', policyChange);
+    if (policyChange()) return emitDecision('deny', policyChange());
     return emitAdvisory(notes ? `${advisory} Warning: ${notes}.` : advisory);
 }
 
@@ -1092,6 +1097,7 @@ function resolveAliasCandidate(candidate) {
             return {
                 ...candidate,
                 verb: 'commit',
+                args,
                 alias: candidate.subcommand,
                 aliasExpansion: alias,
                 noVerify: options.noVerify,
@@ -1107,7 +1113,7 @@ function resolveAliasCandidate(candidate) {
         }
         if (verb === 'add') {
             const paths = args.filter((value) => !value.startsWith('-'));
-            return { ...candidate, verb: 'add', addPaths: paths, classification: 'add' };
+            return { ...candidate, verb: 'add', args, addPaths: paths, classification: 'add' };
         }
         // Git would run part of the expansion through a shell this check never
         // reads, so it stays unresolved, as an expansion that starts with an

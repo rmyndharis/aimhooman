@@ -30,11 +30,20 @@ is blocked until the user sets the clone's profile with `init --profile`, which 
 the user does. A commit a fetch brought in was not made there, whoever committed it, so
 a pull of the user's own commits from another machine still lands. Clean and compliance are not ordered, so a clone on one of them takes
 the policy file's profile (there the file's action is `review`); an agent is refused when
-it stages or commits `.aimhooman.json` at all, because a policy change is the user's to make.
-That refusal reads `git add` and `git commit`, ignored files forced in with `add -f` included.
-Another command that stages the file (`apply --index`, `checkout <rev> -- .aimhooman.json`)
-is refused at the next commit, not within the line that runs it; the floor above for a
-clone that chose `strict` judges the commit, not the command that staged the file.
+it stages or commits `.aimhooman.json`, because a policy change is the user's to make.
+The refusal reads `git add` and `git commit` for what they would take of the file in the
+state it is in: `add -A`, `add .` and a pathspec that reaches it take a new file, `add -u`
+and `commit -a` only a tracked change, `add -f` an ignored one; a dry run, an exclusion
+such as `':!.aimhooman.json'` and a path that cannot reach the file take nothing. A line
+that writes the file with a redirect, `tee`, `cp`, `mv`, `sed -i` or `rm` and then stages it
+is refused too, and so is a commit while a change to the file is staged, a rename away from
+it included. A staged change the user reviewed with `policy-review` may be committed, and a
+commit whose message comes from a substitution is refused while the file has a change,
+since the substitution is not read to its end. Code that writes the file (`python -c`,
+`node -e`) is not read, and another command that stages it in the same line as a commit
+(`apply --index`, `checkout <rev> -- .aimhooman.json`) is refused at the next commit, not
+within that line; the floor above for a clone that chose `strict` judges the commit, not
+the command that staged the file.
 Under `strict`, policy files and agent instructions are blocking findings (exit 10):
 both rules' strict action is `block`, not review. The product's `review` and
 `policy-review` commands record local, object-bound decisions. An ordinary path or

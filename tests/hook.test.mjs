@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-    chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, mkdtempSync, symlinkSync, unlinkSync,
-    writeFileSync,
+    appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, mkdtempSync, symlinkSync,
+    unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -4522,69 +4522,234 @@ test('Git inside a substitution is refused only when it skips the hooks', async 
 // .aimhooman.json is judged by the profile it names. Changing the policy is the
 // user's to do, as running aimhooman allow is: the Git add or commit that would
 // stage or commit the file is refused on every profile, staged already, edited on
-// disk, or written by the same line.
-test('an agent may not stage or commit the project policy file', async () => {
-    for (const profile of ['clean', 'strict', 'compliance']) {
-        const dir = makeHookRepo(profile, `aim-hook-policy-file-${profile}-`);
-        try {
-            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
-            const git = (...args) => execFileSync('git', args, { cwd: dir });
-            mkdirSync(join(dir, 'src'));
-            writeFileSync(join(dir, 'src', 'x.js'), 'x\n');
-            writeFileSync(join(dir, 'README.md'), 'y\n');
-            // No policy file, nothing to protect.
-            for (const command of ['git add -A', 'git add -A && git commit -m x']) {
-                assert.equal(await decide(command), null, `${profile}: no policy file: ${command}`);
-            }
-            writeFileSync(join(dir, '.aimhooman.json'), '{"schema_version":1,"profile":"compliance"}\n');
-            for (const command of [
-                'git add .aimhooman.json', 'git add ./.aimhooman.json', 'git add -A', 'git add .', 'git add -u',
-                "git add '*.json'", 'git add :/', 'git commit -am x', 'git commit .aimhooman.json -m x',
-                'git add -A && git commit -m x',
-                "echo '{}' > .aimhooman.json && git add -A && git commit -m x",
-                "printf '{}' | tee .aimhooman.json && git add .",
-                'cp /tmp/p.json .aimhooman.json; git add -A',
-                // Git takes an unambiguous prefix of a long option, and the shell expands words
-                // the guard cannot read: the path of the file may be spelled out later.
-                'git add --al', 'git add --updat', 'git add --no-ignore-rem', 'git add .aimhooman.json -- src/x.js',
-                'git add $(echo .aimhooman.json)', 'git add `echo .aimhooman.json`', 'f=.aimhooman.json; git add $f',
-                'git add {.aimhooman.json,README.md}', 'git commit -m x $(echo .aimhooman.json)',
-                'find . -maxdepth 1 -name .aimhooman.json -exec git add {} \\;',
-            ]) {
-                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
-            }
-            for (const command of [
-                'git add src/x.js', 'git add README.md && git commit -m x', 'git add src && git commit -m x',
-                'git commit -m x', 'cat .aimhooman.json', 'git status',
+// disk, or written by the same line. What a line is refused for is what it would
+// take of the file in the state it is in.
+
+// A repository with the policy file in one state: absent, untracked, ignored,
+// committed (unchanged), edited (a tracked change), staged, or renamed away.
+function policyRepo(state, profile = 'clean') {
+    const dir = makeHookRepo(profile, `aim-policy-${state}-`);
+    const file = join(dir, '.aimhooman.json');
+    const policy = (name) => `${JSON.stringify({ schema_version: 1, profile: name })}\n`;
+    const git = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+    mkdirSync(join(dir, 'src'));
+    writeFileSync(join(dir, 'src', 'x.js'), 'x\n');
+    writeFileSync(join(dir, 'README.md'), 'y\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'files');
+    if (state === 'untracked') writeFileSync(file, policy('compliance'));
+    if (state === 'ignored') {
+        writeFileSync(file, policy('compliance'));
+        appendFileSync(join(dir, '.git', 'info', 'exclude'), '.aimhooman.json\n');
+    }
+    if (['committed', 'edited', 'staged', 'renamed'].includes(state)) {
+        writeFileSync(file, policy('compliance'));
+        git('add', '.aimhooman.json');
+        git('commit', '-q', '--no-verify', '-m', 'policy');
+    }
+    if (state === 'edited' || state === 'staged') writeFileSync(file, policy('clean'));
+    if (state === 'staged') git('add', '.aimhooman.json');
+    if (state === 'renamed') git('mv', '.aimhooman.json', '.aimhooman.json.bak');
+    return dir;
+}
+
+// The rule itself for a line, so that an older refusal cannot stand in for it.
+function policyRule(dir, line, options = {}) {
+    const realCwd = process.cwd();
+    process.chdir(dir);
+    try {
+        const parsed = parseGit(line, dir, options);
+        // What the hook sets for every line of a PowerShell or cmd tool.
+        if (options.posix === false) Object.assign(parsed, { uncertainShell: true, opaqueCommitHiding: true, opaqueSink: true });
+        return policyChangeReason(parsed, line, options);
+    } finally {
+        process.chdir(realCwd);
+    }
+}
+
+const HEREDOC_COMMIT = "git commit -m \"$(cat <<'EOT'\nfeat: x\nEOT\n)\"";
+
+test('the policy rule refuses what takes the file and lets the rest through', () => {
+    const table = {
+        absent: {
+            refused: [
+                "echo '{}' > .aimhooman.json && git add -A && git commit -m x", 'cp /tmp/p.json .aimhooman.json; git add -A',
+                'printf x | tee -a .aimhooman.json && git add .',
+            ],
+            allowed: ['git add -A', 'git add -A && git commit -m x', 'git commit -am x', 'echo hi > notes.txt && git add -A'],
+        },
+        untracked: {
+            refused: [
+                'git add .aimhooman.json', 'git add ./.aimhooman.json', 'git add -A', 'git add .', "git add '*.json'", 'git add :/',
+                'git add --al', 'git add .aimhooman.json -- src/x.js', 'git add $(echo .aimhooman.json)',
+                'git add `echo .aimhooman.json`', 'f=.aimhooman.json; git add $f', 'git add {.aimhooman.json,README.md}',
+                "git add '.aimhoo*'", "git add '.[a]imhooman.json'", 'git add ~/p/.aimhooman.json', 'git add -fA', 'git add --force .',
+                'find . -maxdepth 1 -name .aimhooman.json -exec git add {} \\;', 'find src -name x -execdir git add {} +',
+                'echo $(git add -A) && git commit -m x', 'git commit -m x $(echo .aimhooman.json)', 'git commit -m "$(date)"',
+                HEREDOC_COMMIT, 'cd src && git add $(echo ../.aimhooman.json)', 'cd src && git add ../.aimhooman.json',
+            ],
+            allowed: [
+                // An untracked file is not taken by what only takes tracked changes.
+                'git add -u', 'git add --updat', 'git add -p', 'git commit -am x', 'git commit -a -m x', 'git commit -i README.md -m x',
+                'git commit .aimhooman.json -m x',
+                // The paths decide, not the option beside them, and a dry run takes nothing.
+                'git add -A src/', 'git add -u src/', 'git add -A -n', 'git add --dry-run -A', 'git commit --dry-run -a',
+                'git commit -o src/x.js -m x', 'git add src/x.js', 'git add src', 'git commit -m x src/x.js',
+                // Metacharacters in a path that cannot reach the file, and exclusions of it.
+                "git add 'app/[id]/page.tsx'", "git add 'src/*.js'", "git add 'a*b.txt'", "git add ':(literal)a*b.txt'", 'git add :/src/x.js',
+                'git add src/x.js > "$LOG"', 'git add src/x.js >"$LOG"', 'git add src/x.js 2>&1', 'git add src/x.js &>/dev/null',
+                "git add . ':!.aimhooman.json'", "git add -A ':(exclude).aimhooman.json'", "git add -A ':^.aimhooman.json'",
+                // Something else in the line is out of sight, but the commit is read in full.
+                'if git diff --quiet; then echo clean; fi; git commit -m x', 'git commit -m x --quiet | cat',
+                'git commit -m x && git log -1 --format=%H | pbcopy', 'git commit -m x', 'git commit --amend --no-edit',
+                "find . -name '*.js' -exec git log --oneline -S add {} +", "find . -name '*.js' -exec git grep -n add {} +",
+                'git status', 'cat .aimhooman.json', 'git add README.md && git commit -m x',
                 "git add src/x.js && git commit -m 'docs: explain .aimhooman.json'",
-                // A commit that names other paths takes nothing else.
-                'git commit -m x src/x.js', 'git add --verbose src/x.js',
-            ]) {
-                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            ],
+        },
+        edited: {
+            refused: [
+                'git commit -am x', 'git commit -a -m x', 'git commit --all -m x', 'git commit -p -m x', 'git commit .aimhooman.json -m x',
+                'git commit --only .aimhooman.json -m x', 'git commit -m x -- .aimhooman.json', 'git commit -i .aimhooman.json -m x',
+                'git add -u', 'git add --updat', 'git add -u .aimhooman.json', 'git add .aimhooman.json', 'git add -A', 'git add .',
+                'git add -p', HEREDOC_COMMIT,
+            ],
+            allowed: [
+                'git commit -m x', 'git commit --amend --no-edit', 'git add src/x.js', 'git commit -m x src/x.js', 'git commit -o src/x.js -m x',
+                'git add -A src/', 'git add -u src/', 'git add -A -n', 'git commit --dry-run -a', "git add . ':!.aimhooman.json'", 'git status',
+            ],
+        },
+        ignored: {
+            refused: [
+                'git add -f .aimhooman.json', 'git add --force .', 'git add -fA', 'git add --forc .',
+                'find . -name .aimhooman.json -exec git add -f {} +', 'git add --force .aimhooman.json && git commit -m x',
+            ],
+            allowed: [
+                'git add .aimhooman.json', 'git add -A', 'git add .', 'git add -f src/x.js', 'git commit -m x', 'git commit -am x',
+                'git add -u', HEREDOC_COMMIT,
+            ],
+        },
+        committed: {
+            refused: [
+                // The line writes the file and then takes it.
+                "echo '{}' > .aimhooman.json && git add -A && git commit -m x", 'printf x | tee .aimhooman.json && git add .',
+                'cp /tmp/p.json .aimhooman.json; git add -A', 'sed -i s/a/b/ .aimhooman.json && git add -A', 'rm .aimhooman.json && git add -A',
+                'mv .aimhooman.json x && git commit -am y', 'echo x >> .aimhooman.json; git commit -am y',
+                'dd if=/dev/zero of=.aimhooman.json; git add -A', 'touch .aimhooman.json && git add -A',
+            ],
+            allowed: [
+                'git add -A', 'git add .', 'git commit -am x', HEREDOC_COMMIT,
+                // A message or a read that only names the file does not write it.
+                'git add -A && git commit -m "docs: install steps for .aimhooman.json"', 'sed -n 1,5p .aimhooman.json && git add -A',
+                'cp .aimhooman.json /tmp/backup.json && git add -A', 'git add -A && git commit -m "fix: cp the sample to .aimhooman.json"',
+                'git add -A; echo "tee .aimhooman.json"', 'cat .aimhooman.json | tee x.txt && git add -A',
+            ],
+        },
+        staged: {
+            refused: ['git commit -m x', 'git commit --allow-empty -m x'],
+            allowed: ['git status', 'git diff --cached', 'git log -1', 'git add src/x.js'],
+        },
+        // git mv away from the file is a delete and an add that a rename pairing would hide.
+        renamed: {
+            refused: ['git commit -m x'],
+            allowed: ['git status', 'git add src/x.js'],
+        },
+    };
+    for (const [state, { refused, allowed }] of Object.entries(table)) {
+        const dir = policyRepo(state);
+        try {
+            for (const line of refused) {
+                assert.match(policyRule(dir, line) ?? '', /\.aimhooman\.json/, `${state}: ${line}`);
             }
-            // Staged already, by the user or by something else: committing it is the user's.
-            git('add', '.aimhooman.json');
-            for (const command of ['git commit -m x', 'git commit --allow-empty -m x']) {
-                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: staged: ${command}`);
+            for (const line of allowed) {
+                assert.equal(policyRule(dir, line), null, `${state}: ${line}`);
             }
-            for (const command of ['git status', 'git diff --cached', 'git log -1']) {
-                assert.equal(await decide(command), null, `${profile}: staged: ${command}`);
-            }
-            git('reset', '-q', '.aimhooman.json');
-            rmSync(join(dir, '.aimhooman.json'));
-            // A commit message that names the file is only text.
-            assert.equal(await decide("git add -A && git commit -m 'docs: explain .aimhooman.json'"), null, profile);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
     }
 });
 
+// PowerShell and cmd keep their backslashes in a path, and the hook marks every line
+// of those tools as opaque, which says nothing about the line.
+test('the policy rule reads PowerShell and cmd spellings and does not refuse a commit for the tool', () => {
+    const options = { posix: false };
+    const cases = {
+        untracked: {
+            refused: [String.raw`git add .\.aimhooman.json`, String.raw`git add .\*.json`, 'git add -A'],
+            allowed: [String.raw`git add "src\x.js"`, 'git add src\\', 'git commit -m x', 'git status'],
+        },
+        ignored: { refused: [], allowed: ['git commit -m x', 'git status'] },
+        staged: { refused: ['git commit -m x'], allowed: ['git status', 'ls'] },
+    };
+    for (const [state, { refused, allowed }] of Object.entries(cases)) {
+        const dir = policyRepo(state);
+        try {
+            for (const line of refused) assert.match(policyRule(dir, line, options) ?? '', /\.aimhooman\.json/, `${state}: ${line}`);
+            for (const line of allowed) assert.equal(policyRule(dir, line, options), null, `${state}: ${line}`);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// The same refusals through the hook, on each profile; an alias is read for the
+// words it expands to.
+test('an agent may not stage or commit the project policy file', async () => {
+    for (const profile of ['clean', 'strict', 'compliance']) {
+        const dir = policyRepo('untracked', profile);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of [
+                'git add .aimhooman.json', 'git add -A', 'git add .', 'git add -A && git commit -m x',
+                'find . -maxdepth 1 -name .aimhooman.json -exec git add {} \\;',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git add src/x.js', 'git add README.md && git commit -m x', 'git commit -m x', 'cat .aimhooman.json', 'git status',
+                "git add src/x.js && git commit -m 'docs: explain .aimhooman.json'",
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+    for (const profile of ['clean', 'compliance']) {
+        const dir = policyRepo('edited', profile);
+        try {
+            execFileSync('git', ['config', 'alias.ca', 'commit -a'], { cwd: dir });
+            execFileSync('git', ['config', 'alias.aa', 'add -A'], { cwd: dir });
+            execFileSync('git', ['config', 'alias.cm', 'commit -m'], { cwd: dir });
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            for (const command of ['git commit -am x', 'git ca -m x', 'git aa']) {
+                const decision = await decide(command);
+                assert.equal(decision?.permissionDecision, 'deny', `${profile}: ${command}`);
+                assert.match(decision.permissionDecisionReason, /does not let an agent stage or commit/, `${profile}: ${command}`);
+            }
+            assert.equal(await decide('git cm x'), null, `${profile}: an alias that takes nothing`);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+    // The hook marks a PowerShell line as opaque; a commit there is read as any other.
+    const dir = policyRepo('ignored');
+    try {
+        for (const tool of ['Bash', 'pwsh', 'cmd']) {
+            const decision = await invokePreToolUse(dir, { tool_name: tool, tool_input: { command: 'git commit -m x' } });
+            assert.notEqual(decision?.permissionDecision, 'deny', tool);
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 // Git names the repository in its own spelling (symlinks resolved, Windows 8.3
 // names lengthened), while the shell types whatever the working directory was
 // reached by. The file is found from either.
-test('the project policy file is found from a working directory spelled another way', async (t) => {
-    const dir = makeHookRepo('clean', 'aim-hook-policy-alias-');
+test('the project policy file is found from a working directory spelled another way', (t) => {
+    const dir = policyRepo('edited');
     const alias = `${dir}-alias`;
     try {
         try {
@@ -4593,8 +4758,15 @@ test('the project policy file is found from a working directory spelled another 
             t.skip('cannot create a link to the repository here');
             return;
         }
-        writeFileSync(join(dir, '.aimhooman.json'), '{"schema_version":1,"profile":"compliance"}\n');
-        const reasonFor = (command) => policyChangeReason(parseGit(command, alias), null, command);
+        const reasonFor = (command) => {
+            const realCwd = process.cwd();
+            process.chdir(alias);
+            try {
+                return policyChangeReason(parseGit(command, alias), command);
+            } finally {
+                process.chdir(realCwd);
+            }
+        };
         for (const command of ['git add .aimhooman.json', 'git add .', 'git commit .aimhooman.json -m x']) {
             assert.match(reasonFor(command) ?? '', /\.aimhooman\.json/, command);
         }
@@ -4605,39 +4777,18 @@ test('the project policy file is found from a working directory spelled another 
     }
 });
 
-// An ignored file has no change for add to take, unless the add is forced.
-test('an agent may not force an ignored project policy file into the index', async () => {
-    for (const profile of ['clean', 'compliance']) {
-        const dir = makeHookRepo(profile, `aim-hook-policy-ignored-${profile}-`);
-        try {
-            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
-            writeFileSync(join(dir, '.aimhooman.json'), '{"schema_version":1,"profile":"compliance"}\n');
-            writeFileSync(join(dir, '.gitignore'), '.aimhooman.json\n');
-            for (const command of ['git add .aimhooman.json', 'git add -A', 'git add .', 'git add -f src/x.js']) {
-                assert.equal(await decide(command), null, `${profile}: ${command}`);
-            }
-            for (const command of [
-                'git add -f .aimhooman.json', 'git add --force .aimhooman.json && git commit -m x', 'git add -fA',
-                'git add --forc .', 'find . -name .aimhooman.json -exec git add -f {} +',
-            ]) {
-                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
-            }
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    }
-});
-
 test('commit options tell the pathspec words from the options that read the working tree', () => {
     const read = (...args) => {
-        const { optionIndex, paths } = inspectCommitOptions(args);
-        return { optionIndex, paths };
+        const { optionIndex, dryRun, paths } = inspectCommitOptions(args);
+        return { optionIndex, dryRun, paths };
     };
-    assert.deepEqual(read('-m', 'x'), { optionIndex: false, paths: [] });
-    assert.deepEqual(read('-m', 'x', 'src/a.js'), { optionIndex: false, paths: ['src/a.js'] });
-    assert.deepEqual(read('-am', 'x'), { optionIndex: true, paths: [] });
-    assert.deepEqual(read('--all', '-m', 'x', '--', 'a', 'b'), { optionIndex: true, paths: ['a', 'b'] });
-    assert.deepEqual(read('-F', '-'), { optionIndex: false, paths: [] });
+    assert.deepEqual(read('-m', 'x'), { optionIndex: false, dryRun: false, paths: [] });
+    assert.deepEqual(read('-m', 'x', 'src/a.js'), { optionIndex: false, dryRun: false, paths: ['src/a.js'] });
+    assert.deepEqual(read('-am', 'x'), { optionIndex: true, dryRun: false, paths: [] });
+    assert.deepEqual(read('--all', '-m', 'x', '--', 'a', 'b'), { optionIndex: true, dryRun: false, paths: ['a', 'b'] });
+    assert.deepEqual(read('-F', '-'), { optionIndex: false, dryRun: false, paths: [] });
+    // What only reports, or implies --dry-run, commits nothing.
+    for (const option of ['--dry-run', '--short', '--porcelain', '--long']) assert.equal(read(option).dryRun, true, option);
 });
 
 // The splitters pair quotes without nesting, but a substitution reads its own:
