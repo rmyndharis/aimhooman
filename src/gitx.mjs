@@ -648,19 +648,52 @@ export function fetchedCommit(repo, oid, tips = []) {
     }
 }
 
+// localCommitter is the address Git would commit with here, or '' without an
+// identity, when nothing can be told apart.
+export function localCommitter(repo) {
+    try {
+        return /<([^<>]*)>/.exec(gitStr(['var', 'GIT_COMMITTER_IDENT'], repo.root))?.[1].toLowerCase() ?? '';
+    } catch {
+        return '';
+    }
+}
+
 // committedElsewhere reports whether someone else committed it: the address Git
 // would commit with here differs from the commit's. Without a local identity
 // nothing can be told apart.
 export function committedElsewhere(repo, oid) {
     assertOid(oid);
     try {
-        const local = /<([^<>]*)>/.exec(gitStr(['var', 'GIT_COMMITTER_IDENT'], repo.root))?.[1].toLowerCase();
+        const local = localCommitter(repo);
         // log.showSignature would print the signature check before the address.
         return Boolean(local)
             && gitStr(['log', '-1', '--no-show-signature', '--format=%ce', oid], repo.root).toLowerCase() !== local;
     } catch {
         return false;
     }
+}
+
+// committerAddresses reads the address each commit was committed under, lower
+// case, in one call: an update can bring in hundreds. A commit Git cannot read
+// is left out, and counts as committed here.
+export function committerAddresses(repo, oids) {
+    const addresses = new Map();
+    if (!oids.length) return addresses;
+    oids.forEach(assertOid);
+    try {
+        const listed = gitBuf(
+            ['log', '--no-walk=unsorted', '--no-show-signature', '--format=%H %ce', '--stdin'],
+            repo.root,
+            Buffer.from(`${oids.join('\n')}\n`),
+        ).toString('utf8');
+        for (const line of listed.split('\n')) {
+            const space = line.indexOf(' ');
+            if (space > 0) addresses.set(line.slice(0, space), line.slice(space + 1).toLowerCase());
+        }
+    } catch {
+        return new Map();
+    }
+    return addresses;
 }
 
 // onLocalBranch reports whether a branch already holds the commit. It only keeps

@@ -7,7 +7,9 @@ import { join } from 'node:path';
 import {
     GitRevisionError,
     GitTargetReadError,
+    committerAddresses,
     introducedCommits,
+    localCommitter,
     openRepo,
     readCommitPath,
     readStagedPath,
@@ -621,6 +623,31 @@ test('with no other local branch, a new ref skips only what a remote-tracking re
 
         assert.deepEqual(introducedCommits(openRepo(dir), [update], { firstBranchFromRemotes: true }), [local]);
         assert.deepEqual(introducedCommits(openRepo(dir), [update]), [base, fetched, local]);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('committer addresses are read for many commits at once, lower case', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const by = (email, parent) => execFileSync('git', ['commit-tree', tree, '-p', parent, '-m', email], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { ...process.env, GIT_COMMITTER_NAME: 'N', GIT_COMMITTER_EMAIL: email },
+        }).trim();
+        const mate = by('Mate@Example.com', base);
+        const mine = by('t@t', mate);
+        assert.equal(localCommitter(repo), 't@t');
+        const addresses = committerAddresses(repo, [base, mate, mine]);
+        assert.deepEqual([...addresses], [[base, 't@t'], [mate, 'mate@example.com'], [mine, 't@t']]);
+        assert.equal(committerAddresses(repo, []).size, 0);
+        // A commit Git cannot read leaves the others unread rather than guessed.
+        assert.equal(committerAddresses(repo, [base, 'a'.repeat(40)]).size, 0);
+        assert.throws(() => committerAddresses(repo, ['HEAD']), /full Git object ID/);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

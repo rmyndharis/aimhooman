@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `core.bare = true` in `.git/config` no longer switches off the final ref guard and `pre-push` in a repository that has a worktree; only a repository whose control directory is not named `.git` is taken for bare.
 - On `strict`, a hook whose aimhooman CLI file is missing stops the operation instead of warning and going on; `clean` and `compliance` still warn.
 - An agent can no longer stage or commit `.aimhooman.json`, and a clone that chose `strict` keeps it against a policy file a commit made there adds; the commit is judged by the policy in its own tree, so adding the file used to lower the profile it was judged by.
+- The final ref guard reads the message of every commit made in the clone, whatever moves the branch: several commits in one update, a branch made at a commit, a forced move, `reset --hard` and a fast-forward over commits made with the hooks off were skipped. History a fetch brought in is still not read.
 
 ### Fixed
 

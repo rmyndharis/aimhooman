@@ -633,7 +633,7 @@ function cmdPushcheck(args) {
         // raw oid has no local branch to vouch for its message. Reachability
         // trust stays with refs/heads/*, exactly as in refcheck — remote
         // tracking refs arrive ungated via fetch.
-        commits = resolveIntroduced(repo, updates, { includeStagedContexts: false })
+        commits = resolveIntroduced(repo, updates, { includeStagedContexts: false, authorship: false })
             .map(([revision, reviewContexts]) => [revision, reviewContexts, true]);
     }
     catch (error) {

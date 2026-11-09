@@ -14,7 +14,9 @@ import {
     stagedRenameSources,
     stagedTreeSha,
     committedElsewhere,
+    committerAddresses,
     fetchedCommit,
+    localCommitter,
     onLocalBranch,
     unstagePaths,
 } from './gitx.mjs';
@@ -231,23 +233,22 @@ export function resolveIntroduced(repo, updates, {
     includeStagedContexts = true,
     firstBranchFromRemotes = false,
     fetchedTips = [],
+    authorship = true,
 } = {}) {
     const contextsByCommit = new Map();
     // A commit's message belongs to whoever wrote it. Attribution and marker
     // rules police the text a local developer can edit, so they are scoped
-    // to commits authored here (see authoredHere for the shapes: an initial,
-    // orphan or plain commit, an --amend, a merge made here such as a
-    // local --no-ff merge of an already-gated branch). Anything else — a new
-    // branch pulled in by `gh pr checkout` or `git fetch`, a merge of fetched
-    // history — imports other people's commit text the developer cannot
-    // change, and scanning it only blocks the review.
+    // to commits authored here (see authoredHere for how each is told). A
+    // new branch pulled in by `gh pr checkout` or `git fetch`, a merge of
+    // fetched history, imports other people's commit text the developer cannot
+    // change, and scanning it only blocks the review. authorship off skips the
+    // lookups for a caller that reads every message (pre-push).
     const authored = new Set();
     const refused = refusedCommits(repo);
     for (const update of updates) {
         const introduced = introducedCommits(repo, [update], { firstBranchFromRemotes });
-        // A forced move onto a fetched commit is not a commit made here.
-        if (!update.forced && authoredHere(repo, update, introduced, fetchedTips)) {
-            authored.add(update.newObjectId);
+        if (authorship) {
+            for (const revision of authoredHere(repo, update, introduced, fetchedTips)) authored.add(revision);
         }
         for (const revision of introduced) {
             if (refused.has(revision)) authored.add(revision);
@@ -281,24 +282,27 @@ export function resolveIntroduced(repo, updates, {
     ]);
 }
 
-// authoredHere decides whether an update's new tip was written in this clone.
-// One new commit on top of a non-zero old tip (a plain commit, an --amend) is,
-// unless someone else committed it and a fetch holds it: a commit the final
-// guard refused can be given a local branch or a remote-tracking ref, but it
-// keeps the committer it was made with. A merge on top of the old tip, or a
-// commit with no parent that starts a branch (an initial or orphan commit), is
-// when this identity committed it and no fetch holds it. Fetched history can
-// outlive FETCH_HEAD and need not have a remote-tracking ref, so someone else's
-// is enough there. The commits a merge brings in keep their own standing.
-function authoredHere(repo, { oldObjectId, newObjectId }, introduced, fetchedTips) {
-    if (!introduced.includes(newObjectId)) return false;
-    const created = /^0+$/.test(oldObjectId);
-    if (!created && introduced.length === 1) {
-        return !(committedElsewhere(repo, newObjectId) && fetchedCommit(repo, newObjectId, fetchedTips));
+// authoredHere lists the commits an update introduces that were written in this
+// clone, whatever the shape of the update: one commit, several made in a row by
+// plumbing or with the hooks off, a merge, a root, a branch started at a commit,
+// a forced move. One new commit on top of a non-zero old tip (a plain commit, an
+// --amend) is, unless someone else committed it and a fetch holds it: a commit
+// the final guard refused can be given a local branch or a remote-tracking ref,
+// but it keeps the committer it was made with. Any other commit is when this
+// identity committed it and no fetch holds it. Fetched history can outlive
+// FETCH_HEAD and need not have a remote-tracking ref, so someone else's is
+// enough there.
+function authoredHere(repo, { oldObjectId }, introduced, fetchedTips) {
+    if (!/^0+$/.test(oldObjectId) && introduced.length === 1) {
+        const [only] = introduced;
+        return committedElsewhere(repo, only) && fetchedCommit(repo, only, fetchedTips) ? [] : [only];
     }
-    const { parents } = commitParents(repo, newObjectId);
-    const shaped = created ? !parents.length : parents.length > 1 && parents[0] === oldObjectId;
-    return shaped && !committedElsewhere(repo, newObjectId) && !fetchedCommit(repo, newObjectId, fetchedTips);
+    // A pull can bring in hundreds of commits: read their committers in one call,
+    // and look for a fetch only behind the ones this identity committed.
+    const local = localCommitter(repo);
+    const addresses = local ? committerAddresses(repo, introduced) : new Map();
+    return introduced.filter((revision) => (addresses.get(revision) ?? local) === local
+        && !fetchedCommit(repo, revision, fetchedTips));
 }
 
 // scanProposedCommits scans each introduced commit and returns the first
