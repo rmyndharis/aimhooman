@@ -23,6 +23,13 @@ under `aimhooman/`.
 A committed policy this version cannot read counts as strict until a readable one
 replaces it: the repair commit goes through, and a replacement weaker than strict
 needs the same bound `policy-review` a strict downgrade does.
+A commit is judged by the policy in its own tree, so a commit that adds the file could
+lower the profile it is judged by. A clone that chose `strict` itself (`init --profile
+strict`) keeps it against a policy file that is new in a commit made there: the commit
+is blocked until the user sets the clone's profile with `init --profile`, which only
+the user does. Clean and compliance are not ordered, so a clone on one of them takes
+the policy file's profile (there the file's action is `review`); an agent is refused when
+it stages or commits `.aimhooman.json` at all, because a policy change is the user's to make.
 Under `strict`, policy files and agent instructions are blocking findings (exit 10):
 both rules' strict action is `block`, not review. The product's `review` and
 `policy-review` commands record local, object-bound decisions. An ordinary path or

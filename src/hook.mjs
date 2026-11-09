@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from './git-environment.mjs';
 import { newEngineWithDiagnostics } from './scan.mjs';
 import { openRepo, stagedEntries } from './gitx.mjs';
+import { policyChangeReason } from './policy-change.mjs';
 import { applyExclude, patternsForRules } from './exclude.mjs';
 import { activeGitHook, installedHooks } from './githooks.mjs';
 import { loadConfig } from './state.mjs';
@@ -255,7 +256,12 @@ function hookPreToolUse(input) {
     const { commit, noVerify, addPaths } = parsed;
     const bypassHooks = parsed.bypassHooks;
     const protectedMutation = parsed.commands.some(isProtectedMutation);
-    if (!commit && !protectedMutation && addPaths.length === 0 && !parsed.uncertainShell) return 0;
+    // The project policy is the user's to change, on every profile. It turns an
+    // allow into a refusal where this function would allow, so every older refusal
+    // and its reason stay as they were.
+    const policyChange = policyChangeReason(parsed, null, executorCommand);
+    const allowed = () => (policyChange ? emitDecision('deny', policyChange) : 0);
+    if (!commit && !protectedMutation && addPaths.length === 0 && !parsed.uncertainShell) return allowed();
     // The loop below visits what moves refs and passes over a listing such as
     // git branch, so only those leave nothing hidden unvisited.
     const movesRefs = parsed.commands.some((candidate) => (
@@ -536,7 +542,7 @@ function hookPreToolUse(input) {
         if (profile === 'strict') return emitDecision('deny', reason);
         // Rules that will not load are the least basis there is for granting an
         // allow, and clean/compliance do not deny on them. Say nothing instead.
-        return 0;
+        return allowed();
     }
     // Refreshing the excludes is gitignore hygiene, not part of the verdict:
     // pre-commit never writes them and still answers. Kept out of the block
@@ -718,7 +724,7 @@ function hookPreToolUse(input) {
         // skips them, and neither warning is an opinion about this command: one
         // is about the rule pack, the other about a housekeeping write. Both
         // still reach the notes on the findings path below.
-        return 0;
+        return allowed();
     }
 
     const reason = denyReason(blocks);
@@ -746,6 +752,7 @@ function hookPreToolUse(input) {
     const guarded = repo && !bypassed && installedHooks(repo).includes('pre-commit');
     const advisory = advisoryReason(blocks, guarded, bypassed ? bypassContext : '');
     const notes = [diagnosticWarning, hygieneWarning].filter(Boolean).join('; ');
+    if (policyChange) return emitDecision('deny', policyChange);
     return emitAdvisory(notes ? `${advisory} Warning: ${notes}.` : advisory);
 }
 

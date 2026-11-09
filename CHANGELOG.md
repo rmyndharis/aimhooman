@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Those aimhooman commands, and a script written in the same line, are read behind `find -exec`, `xargs`, `su -c`, `watch`, `parallel` and in `python -c`, `node -e`, `perl -e`, `ruby -e` and `make --eval` code; a subcommand in a variable, as in `aimhooman $SUB`, is refused.
 - `core.bare = true` in `.git/config` no longer switches off the final ref guard and `pre-push` in a repository that has a worktree; only a repository whose control directory is not named `.git` is taken for bare.
 - On `strict`, a hook whose aimhooman CLI file is missing stops the operation instead of warning and going on; `clean` and `compliance` still warn.
+- An agent can no longer stage or commit `.aimhooman.json`, and a clone that chose `strict` keeps it against a policy file a commit made there adds; the commit is judged by the policy in its own tree, so adding the file used to lower the profile it was judged by.
 
 ### Fixed
 

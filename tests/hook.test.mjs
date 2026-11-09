@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-    chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, mkdtempSync, unlinkSync,
+    chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, mkdtempSync, symlinkSync, unlinkSync,
     writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { parseGit, asObject, shellPathIsAmbiguous } from '../src/hook.mjs';
 import { defaultPatterns, inspectExclude } from '../src/exclude.mjs';
+import { policyChangeReason } from '../src/policy-change.mjs';
 import { configuredGitRisk, lineUnits, normalizeAnsiCQuotes, stripShellComments } from '../src/shell-parse.mjs';
 
 const CLI = join(process.cwd(), 'bin/aimhooman.mjs');
@@ -2273,7 +2274,10 @@ test('combined add and commit relies on the installed strict final guard', async
             tool_name: 'Bash',
             tool_input: { command: safeCommand },
         });
-        assert.notEqual(downgradeDecision?.permissionDecision, 'deny');
+        // The agent no longer stages a policy change at all; run directly, the
+        // installed strict Git guards still stop the same commit.
+        assert.equal(downgradeDecision?.permissionDecision, 'deny');
+        assert.match(downgradeDecision?.permissionDecisionReason ?? '', /\.aimhooman\.json/);
         const downgradeCommit = spawnSync(BASH, ['-c', safeCommand], { cwd: dir, encoding: 'utf8' });
         assert.notEqual(downgradeCommit.status, 0);
         assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim(), beforeBlocked);
@@ -4509,6 +4513,85 @@ test('Git inside a substitution is refused only when it skips the hooks', async 
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
+    }
+});
+
+// A commit is judged by the policy in its own tree, so a commit that adds
+// .aimhooman.json is judged by the profile it names. Changing the policy is the
+// user's to do, as running aimhooman allow is: the Git add or commit that would
+// stage or commit the file is refused on every profile, staged already, edited on
+// disk, or written by the same line.
+test('an agent may not stage or commit the project policy file', async () => {
+    for (const profile of ['clean', 'strict', 'compliance']) {
+        const dir = makeHookRepo(profile, `aim-hook-policy-file-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            const git = (...args) => execFileSync('git', args, { cwd: dir });
+            mkdirSync(join(dir, 'src'));
+            writeFileSync(join(dir, 'src', 'x.js'), 'x\n');
+            writeFileSync(join(dir, 'README.md'), 'y\n');
+            // No policy file, nothing to protect.
+            for (const command of ['git add -A', 'git add -A && git commit -m x']) {
+                assert.equal(await decide(command), null, `${profile}: no policy file: ${command}`);
+            }
+            writeFileSync(join(dir, '.aimhooman.json'), '{"schema_version":1,"profile":"compliance"}\n');
+            for (const command of [
+                'git add .aimhooman.json', 'git add ./.aimhooman.json', 'git add -A', 'git add .', 'git add -u',
+                "git add '*.json'", 'git add :/', 'git commit -am x', 'git commit .aimhooman.json -m x',
+                'git add -A && git commit -m x',
+                "echo '{}' > .aimhooman.json && git add -A && git commit -m x",
+                "printf '{}' | tee .aimhooman.json && git add .",
+                'cp /tmp/p.json .aimhooman.json; git add -A',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git add src/x.js', 'git add README.md && git commit -m x', 'git add src && git commit -m x',
+                'git commit -m x', 'cat .aimhooman.json', 'git status',
+                "git add src/x.js && git commit -m 'docs: explain .aimhooman.json'",
+            ]) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            // Staged already, by the user or by something else: committing it is the user's.
+            git('add', '.aimhooman.json');
+            for (const command of ['git commit -m x', 'git commit --allow-empty -m x']) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: staged: ${command}`);
+            }
+            for (const command of ['git status', 'git diff --cached', 'git log -1']) {
+                assert.equal(await decide(command), null, `${profile}: staged: ${command}`);
+            }
+            git('reset', '-q', '.aimhooman.json');
+            rmSync(join(dir, '.aimhooman.json'));
+            // A commit message that names the file is only text.
+            assert.equal(await decide("git add -A && git commit -m 'docs: explain .aimhooman.json'"), null, profile);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+// Git names the repository in its own spelling (symlinks resolved, Windows 8.3
+// names lengthened), while the shell types whatever the working directory was
+// reached by. The file is found from either.
+test('the project policy file is found from a working directory spelled another way', async (t) => {
+    const dir = makeHookRepo('clean', 'aim-hook-policy-alias-');
+    const alias = `${dir}-alias`;
+    try {
+        try {
+            symlinkSync(dir, alias, 'junction');
+        } catch {
+            t.skip('cannot create a link to the repository here');
+            return;
+        }
+        writeFileSync(join(dir, '.aimhooman.json'), '{"schema_version":1,"profile":"compliance"}\n');
+        const reasonFor = (command) => policyChangeReason(parseGit(command, alias), null, command);
+        for (const command of ['git add .aimhooman.json', 'git add .', 'git commit .aimhooman.json -m x']) {
+            assert.match(reasonFor(command) ?? '', /\.aimhooman\.json/, command);
+        }
+        assert.equal(reasonFor('git add README.md'), null);
+    } finally {
+        rmSync(alias, { force: true });
+        rmSync(dir, { recursive: true, force: true });
     }
 });
 

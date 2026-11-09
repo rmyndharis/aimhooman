@@ -942,6 +942,7 @@ function parseGitLine(command, initialCwd, posix = true) {
             const futureIndex = sawAdd || commitOptions.futureIndex || prefixIndexMutationRisk;
             commands.push({
                 verb,
+                args: toks.slice(i + 1),
                 cwd,
                 noVerify: commandNoVerify,
                 bypassHooks: commandBypass,
@@ -971,6 +972,7 @@ function parseGitLine(command, initialCwd, posix = true) {
             for (const path of paths) addPaths.push(path);
             commands.push({
                 verb,
+                args: toks.slice(i + 1),
                 cwd,
                 addPaths: paths,
                 environmentRisk,
