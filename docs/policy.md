@@ -27,7 +27,8 @@ A commit is judged by the policy in its own tree, so a commit that adds the file
 lower the profile it is judged by. A clone that chose `strict` itself (`init --profile
 strict`) keeps it against a policy file that is new in a commit made there: the commit
 is blocked until the user sets the clone's profile with `init --profile`, which only
-the user does. Clean and compliance are not ordered, so a clone on one of them takes
+the user does. A commit a fetch brought in was not made there, whoever committed it, so
+a pull of the user's own commits from another machine still lands. Clean and compliance are not ordered, so a clone on one of them takes
 the policy file's profile (there the file's action is `review`); an agent is refused when
 it stages or commits `.aimhooman.json` at all, because a policy change is the user's to make.
 That refusal reads `git add` and `git commit`, ignored files forced in with `add -f` included.

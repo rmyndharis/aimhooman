@@ -224,8 +224,10 @@ function scanCommit(repo, options) {
         ? 'parent-strict-floor'
         : null;
     // Only for a commit made here: history received from others keeps the policy it carries.
-    const localFloor = !floorParents.length && Boolean(options.localStrictFloor)
-        && lowersChosenStrict(repo, rawPolicy, parentPolicies.map((parent) => parent.policy_object_id).filter(Boolean));
+    // The caller answers last, since it takes a look at the refs.
+    const localFloor = !floorParents.length
+        && lowersChosenStrict(repo, rawPolicy, parentPolicies.map((parent) => parent.policy_object_id).filter(Boolean))
+        && Boolean(options.localStrictFloor?.());
     const floor = parentFloor ?? (localFloor ? 'local-strict-floor' : null);
     const policy = effectivePolicy(
         rawPolicy,

@@ -1743,34 +1743,44 @@ test('a policy file a commit adds cannot lower the strict profile a clone chose'
     } finally { rmSync(clean, { recursive: true, force: true }); }
 });
 
-test('a weaker policy file that history brings in does not wedge a strict clone', () => {
-    const base = mkdtempSync(join(tmpdir(), 'aim-policy-floor-pull-'));
-    try {
-        const run = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
-        const remote = join(base, 'remote.git');
-        mkdirSync(remote);
-        run(remote, ['init', '-q', '--bare']);
-        const mate = join(base, 'mate');
-        run(base, ['clone', '-q', remote, mate]);
-        run(mate, ['config', 'user.email', 'm@m']);
-        run(mate, ['config', 'user.name', 'm']);
-        writeFileSync(join(mate, 'a.txt'), '1\n');
-        run(mate, ['add', 'a.txt']);
-        run(mate, ['commit', '-q', '-m', 'one']);
-        run(mate, ['branch', '-M', 'main']);
-        run(mate, ['push', '-q', 'origin', 'main']);
-        const me = join(base, 'me');
-        run(base, ['clone', '-q', remote, me]);
-        run(me, ['config', 'user.email', 't@t']);
-        run(me, ['config', 'user.name', 't']);
-        assert.equal(result('init', ['--profile', 'strict'], me).status, 0);
-        writeFileSync(join(mate, '.aimhooman.json'), `${JSON.stringify({ schema_version: 1, profile: 'clean' })}\n`);
-        run(mate, ['add', '.aimhooman.json']);
-        run(mate, ['commit', '-q', '-m', 'team policy']);
-        run(mate, ['push', '-q', 'origin', 'main']);
-        const pulled = run(me, ['pull', '-q', '--ff-only', 'origin', 'main']);
-        assert.equal(pulled.status, 0, `${pulled.stdout}${pulled.stderr}`);
-    } finally { rmSync(base, { recursive: true, force: true }); }
+test('a weaker policy file that history brings in does not wedge a strict clone, whoever committed it', () => {
+    // A teammate, and the same user on another machine: both are history the pull receives.
+    for (const email of ['m@m', 't@t']) {
+        const base = mkdtempSync(join(tmpdir(), 'aim-policy-floor-pull-'));
+        try {
+            const run = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+            const remote = join(base, 'remote.git');
+            mkdirSync(remote);
+            // HEAD of the remote names main, so the clone checks it out and the pull fast-forwards.
+            run(remote, ['init', '-q', '--bare', '--initial-branch=main']);
+            const mate = join(base, 'mate');
+            run(base, ['clone', '-q', remote, mate]);
+            run(mate, ['config', 'user.email', email]);
+            run(mate, ['config', 'user.name', 'm']);
+            writeFileSync(join(mate, 'a.txt'), '1\n');
+            run(mate, ['add', 'a.txt']);
+            run(mate, ['commit', '-q', '-m', 'one']);
+            run(mate, ['branch', '-M', 'main']);
+            run(mate, ['push', '-q', 'origin', 'main']);
+            const me = join(base, 'me');
+            run(base, ['clone', '-q', remote, me]);
+            run(me, ['config', 'user.email', 't@t']);
+            run(me, ['config', 'user.name', 't']);
+            assert.equal(result('init', ['--profile', 'strict'], me).status, 0);
+            writeFileSync(join(mate, '.aimhooman.json'), `${JSON.stringify({ schema_version: 1, profile: 'clean' })}\n`);
+            run(mate, ['add', '.aimhooman.json']);
+            run(mate, ['commit', '-q', '-m', 'team policy']);
+            run(mate, ['push', '-q', 'origin', 'main']);
+            const pulled = run(me, ['pull', '-q', '--ff-only', 'origin', 'main']);
+            assert.equal(pulled.status, 0, `${email}: ${pulled.stdout}${pulled.stderr}`);
+            // A commit made here that changes the policy again is still held to the clone's choice.
+            writeFileSync(join(me, '.aimhooman.json'), `${JSON.stringify({ schema_version: 1, profile: 'compliance' })}\n`);
+            run(me, ['add', '.aimhooman.json']);
+            const local = run(me, ['commit', '-q', '-m', 'weaker still']);
+            assert.notEqual(local.status, 0, email);
+            assert.match(`${local.stdout}${local.stderr}`, /strict profile this clone chose/, email);
+        } finally { rmSync(base, { recursive: true, force: true }); }
+    }
 });
 
 // Git canonicalises a path through the OS; Node's realpathSync only follows

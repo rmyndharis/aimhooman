@@ -332,8 +332,11 @@ export function scanProposedCommits(repo, commits, {
                 limits,
                 messageScope: authoredLocally ? 'commit' : 'changes-only',
                 // A policy file that a commit made here adds cannot lower a strict
-                // profile this clone chose.
-                localStrictFloor: Boolean(afterPrecommit && authoredLocally),
+                // profile this clone chose. What a fetch brought in was not made
+                // here, whoever committed it: a pull of the user's own commits from
+                // another machine is history, and it still rules.
+                localStrictFloor: () => Boolean(afterPrecommit && authoredLocally)
+                    && !fetchedCommit(repo, revision, fetchedTips),
                 // This guard runs over history the developer is receiving, not
                 // writing. A policy it cannot parse must not wedge every pull,
                 // merge and reset with no way forward.

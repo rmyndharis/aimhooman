@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A pull of one commit that the same user made on another machine, adding a policy weaker than the strict profile the clone chose, is no longer refused; a commit a fetch brought in rules whoever committed it.
 - The agent guard no longer refuses a command for an output redirect alone; a redirect into the hooks or `.git/config` still is.
 - A nested shell read in full, as in `bash -c 'npm test'`, is judged by what it runs.
 - A word holding a value in a push, as in `git push origin "$BRANCH"`, passes except on strict; a line that spells `--no-verify` stays refused.
