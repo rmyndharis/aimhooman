@@ -1700,6 +1700,79 @@ test('a branch that is a symbolic ref can be made, moved and deleted', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// A commit is judged by the policy in its own tree, so a commit that adds
+// .aimhooman.json could lower the profile it was judged by. A clone that chose
+// strict for itself (init --profile strict) keeps it against a policy file that is
+// new in a commit made there; one that history brings in still rules, so a pull
+// is not wedged. AGENTS.md is a review on clean and a block on strict.
+test('a policy file a commit adds cannot lower the strict profile a clone chose', () => {
+    const policy = (profile) => `${JSON.stringify({ schema_version: 1, profile })}\n`;
+    for (const weaker of ['clean', 'compliance']) {
+        const dir = makeRepo('strict');
+        try {
+            const gitIn = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+            writeFileSync(join(dir, '.aimhooman.json'), policy(weaker));
+            writeFileSync(join(dir, 'AGENTS.md'), '# rules\n');
+            execFileSync('git', ['add', '.aimhooman.json', 'AGENTS.md'], { cwd: dir });
+            const head = gitIn(['rev-parse', 'HEAD']).stdout.trim();
+
+            const refused = gitIn(['commit', '-q', '-m', 'feat: policy']);
+            assert.notEqual(refused.status, 0, `${weaker}: ${refused.stdout}${refused.stderr}`);
+            assert.match(refused.stderr, /cannot replace the strict profile/, weaker);
+            assert.equal(gitIn(['rev-parse', 'HEAD']).stdout.trim(), head, `${weaker}: no commit was made`);
+
+            // Skipping the hooks leaves the final ref guard, which holds the same floor.
+            const skipped = gitIn(['commit', '-q', '--no-verify', '-m', 'feat: policy']);
+            assert.notEqual(skipped.status, 0, `${weaker}: --no-verify: ${skipped.stdout}${skipped.stderr}`);
+            assert.equal(gitIn(['rev-parse', 'HEAD']).stdout.trim(), head, `${weaker}: still no commit`);
+
+            // The user sets the clone's profile; then the policy is the team's to set.
+            assert.equal(result('init', ['--profile', weaker], dir).status, 0);
+            execFileSync('git', ['add', '.aimhooman.json', 'AGENTS.md'], { cwd: dir });
+            const adopted = gitIn(['commit', '-q', '-m', 'feat: policy']);
+            assert.equal(adopted.status, 0, `${weaker}: after init: ${adopted.stderr}`);
+        } finally { rmSync(dir, { recursive: true, force: true }); }
+    }
+    // A clone on clean keeps taking the policy file's profile.
+    const clean = makeRepo('clean');
+    try {
+        writeFileSync(join(clean, '.aimhooman.json'), policy('compliance'));
+        execFileSync('git', ['add', '.aimhooman.json'], { cwd: clean });
+        const commit = spawnSync('git', ['commit', '-q', '-m', 'feat: policy'], { cwd: clean, encoding: 'utf8' });
+        assert.equal(commit.status, 0, commit.stderr);
+    } finally { rmSync(clean, { recursive: true, force: true }); }
+});
+
+test('a weaker policy file that history brings in does not wedge a strict clone', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-policy-floor-pull-'));
+    try {
+        const run = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+        const remote = join(base, 'remote.git');
+        mkdirSync(remote);
+        run(remote, ['init', '-q', '--bare']);
+        const mate = join(base, 'mate');
+        run(base, ['clone', '-q', remote, mate]);
+        run(mate, ['config', 'user.email', 'm@m']);
+        run(mate, ['config', 'user.name', 'm']);
+        writeFileSync(join(mate, 'a.txt'), '1\n');
+        run(mate, ['add', 'a.txt']);
+        run(mate, ['commit', '-q', '-m', 'one']);
+        run(mate, ['branch', '-M', 'main']);
+        run(mate, ['push', '-q', 'origin', 'main']);
+        const me = join(base, 'me');
+        run(base, ['clone', '-q', remote, me]);
+        run(me, ['config', 'user.email', 't@t']);
+        run(me, ['config', 'user.name', 't']);
+        assert.equal(result('init', ['--profile', 'strict'], me).status, 0);
+        writeFileSync(join(mate, '.aimhooman.json'), `${JSON.stringify({ schema_version: 1, profile: 'clean' })}\n`);
+        run(mate, ['add', '.aimhooman.json']);
+        run(mate, ['commit', '-q', '-m', 'team policy']);
+        run(mate, ['push', '-q', 'origin', 'main']);
+        const pulled = run(me, ['pull', '-q', '--ff-only', 'origin', 'main']);
+        assert.equal(pulled.status, 0, `${pulled.stdout}${pulled.stderr}`);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
 // Git canonicalises a path through the OS; Node's realpathSync only follows
 // symlinks and echoes the spelling it was handed. Where the two disagree, the
 // hooks directory Git reports and the one Node builds from homedir() are the

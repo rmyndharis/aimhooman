@@ -327,6 +327,9 @@ export function scanProposedCommits(repo, commits, {
                 policyMigrationContexts: reviewContexts,
                 limits,
                 messageScope: authoredLocally ? 'commit' : 'changes-only',
+                // A policy file that a commit made here adds cannot lower a strict
+                // profile this clone chose.
+                localStrictFloor: Boolean(afterPrecommit && authoredLocally),
                 // This guard runs over history the developer is receiving, not
                 // writing. A policy it cannot parse must not wedge every pull,
                 // merge and reset with no way forward.

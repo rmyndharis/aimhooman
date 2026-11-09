@@ -1,5 +1,5 @@
 import { Engine, newEngineWithDiagnostics } from './scan.mjs';
-import { loadOverrides } from './state.mjs';
+import { loadConfig, loadOverrides } from './state.mjs';
 import { applyExplicitProfile, applyStrictFloor, localFallback, resolvePolicy } from './policy-resolver.mjs';
 import {
     GitRevisionError,
@@ -75,7 +75,7 @@ export function scanMessage(repo, text, options = {}) {
 function scanIndex(repo, options) {
     const kind = options.kind || 'staged';
     const {
-        rawPolicy, floor, policy, head, acknowledged, baselineObjectId, diagnostics: policyDiagnostics,
+        rawPolicy, floor, localFloor, policy, head, acknowledged, baselineObjectId, diagnostics: policyDiagnostics,
     } = resolveStagedPolicy(repo, options.explicitProfile);
     const loaded = engineForPolicy(repo, policy, options.overrideHead || head);
     const accumulator = createAccumulator(options.limits);
@@ -104,6 +104,7 @@ function scanIndex(repo, options) {
         accumulator.add([protectedPolicyFinding(rawPolicy, policy, null, {
             oldObjectId: baselineObjectId,
             transition: 'staged',
+            local: localFloor,
         })]);
     }
     scanEntryGroup(repo, loaded.engine, entries, policy, accumulator, {
@@ -140,12 +141,16 @@ export function resolveStagedPolicy(repo, explicitProfile) {
         newObjectId: rawPolicy.policy_object_id,
         newMode: rawPolicy.policy_mode,
     });
-    const floor = floorPolicy && !acknowledged && !isVersionedStrict(rawPolicy)
+    const headFloor = floorPolicy && !acknowledged && !isVersionedStrict(rawPolicy)
         ? 'head-strict-floor'
         : null;
+    // A versioned strict (or unreadable) policy at HEAD has its own floor and its own bound review.
+    const localFloor = !floorPolicy && lowersChosenStrict(repo, rawPolicy, [baseline?.policy_object_id].filter(Boolean));
+    const floor = headFloor ?? (localFloor ? 'local-strict-floor' : null);
     return {
         rawPolicy,
         floor,
+        localFloor,
         head,
         acknowledged,
         baselineObjectId: floorPolicy ? floorPolicy.policy_object_id : null,
@@ -215,9 +220,13 @@ function scanCommit(repo, options) {
         })
     ));
     const changed = floorParents.some((parent) => parent.policy_object_id !== rawPolicy.policy_object_id);
-    const floor = floorParents.length > 0 && !acknowledged && !isVersionedStrict(rawPolicy)
+    const parentFloor = floorParents.length > 0 && !acknowledged && !isVersionedStrict(rawPolicy)
         ? 'parent-strict-floor'
         : null;
+    // Only for a commit made here: history received from others keeps the policy it carries.
+    const localFloor = !floorParents.length && Boolean(options.localStrictFloor)
+        && lowersChosenStrict(repo, rawPolicy, parentPolicies.map((parent) => parent.policy_object_id).filter(Boolean));
+    const floor = parentFloor ?? (localFloor ? 'local-strict-floor' : null);
     const policy = effectivePolicy(
         rawPolicy,
         options.explicitProfile,
@@ -255,7 +264,9 @@ function scanCommit(repo, options) {
         accumulator.markIncomplete('shallow-repository');
     }
 
-    if (floor && changed) {
+    if (localFloor) {
+        accumulator.add([protectedPolicyFinding(rawPolicy, policy, snapshot, { local: true })]);
+    } else if (floor && changed) {
         accumulator.add([protectedPolicyFinding(rawPolicy, policy, snapshot, {
             oldObjectId: floorParents[0]?.policy_object_id ?? null,
             transition: snapshot.commit,
@@ -599,6 +610,26 @@ function headPolicy(repo, tolerant = false) {
     }
 }
 
+// Whether this clone chose strict for itself (init --profile strict). A policy
+// file that a commit brings in is judged by the profile it names, so without a
+// floor one commit could add the file and lower the profile it is judged by. The
+// floor holds a locally chosen strict against a policy that is new in the commit
+// being made; one already committed was the team's decision and still rules.
+function chosenStrict(repo) {
+    try {
+        const config = loadConfig(repo.stateDir);
+        return config.profile === 'strict' && config.source === 'local';
+    } catch {
+        return false;
+    }
+}
+
+function lowersChosenStrict(repo, rawPolicy, committedObjectIds) {
+    return Boolean(rawPolicy.policy_object_id) && rawPolicy.profile !== 'strict'
+        && !committedObjectIds.includes(rawPolicy.policy_object_id)
+        && chosenStrict(repo);
+}
+
 function isVersionedStrict(policy) {
     return Boolean(policy?.policy_object_id && policy.profile === 'strict' && (
         policy.source === 'commit-policy' || policy.source === 'staged-policy' || policy.source === 'worktree-policy'
@@ -607,15 +638,24 @@ function isVersionedStrict(policy) {
 
 function protectedPolicyFinding(rawPolicy, policy, entry, migration = {}) {
     const removed = !rawPolicy.policy_object_id;
-    const reason = removed
-        ? 'A versioned strict project policy cannot be deleted or renamed away without a bound review acknowledgment.'
-        : 'A versioned strict project policy cannot be downgraded without a bound review acknowledgment.';
+    const reason = migration.local
+        ? 'A project policy that is not strict cannot replace the strict profile this clone chose.'
+        : removed
+            ? 'A versioned strict project policy cannot be deleted or renamed away without a bound review acknowledgment.'
+            : 'A versioned strict project policy cannot be downgraded without a bound review acknowledgment.';
     // Name the exact command, oids included: "use the reviewed migration
     // command" sent developers to the docs for a three-flag incantation they
     // could not guess. The staged form binds to the live
     // index; the transition form binds to the commit that carries the change.
-    const remediation = ['Restore the strict policy, or unstage the change to keep the current baseline.'];
-    if (migration.oldObjectId && migration.transition) {
+    const remediation = migration.local
+        ? [
+            'Unstage .aimhooman.json to keep the strict profile.',
+            'or, to adopt the team policy, set the profile yourself first: aimhooman init --profile <profile named in the policy>.',
+        ]
+        : ['Restore the strict policy, or unstage the change to keep the current baseline.'];
+    // For a locally chosen strict the way out is the profile of the clone, which
+    // only its user sets; there is no policy object to bind a review to.
+    if (!migration.local && migration.oldObjectId && migration.transition) {
         const newOid = rawPolicy.policy_object_id ?? 'missing';
         const form = migration.transition === 'staged'
             ? '--staged'
@@ -623,7 +663,7 @@ function protectedPolicyFinding(rawPolicy, policy, entry, migration = {}) {
         remediation.push(
             `or acknowledge the migration: aimhooman policy-review --head HEAD ${form} --old ${migration.oldObjectId} --new ${newOid} --reason "reviewed policy migration"`
         );
-    } else {
+    } else if (!migration.local) {
         remediation.push('or acknowledge the migration with a reviewed aimhooman policy-review invocation.');
     }
     return decorate({
