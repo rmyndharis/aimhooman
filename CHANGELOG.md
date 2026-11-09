@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A commit the final ref guard refused stays refused under another committer identity, and no branch can be started on it.
 - With `log.showSignature` set, a signed commit made here is no longer read as someone else's.
 - An empty or broken ref file no longer makes the final ref guard refuse an update.
+- An AI co-author or generated-with line is matched in the forms Git reads as a trailer: white space before the colon, text after the address, folded over two lines, and a generated-with line as a bullet, a quote, in italics or with a link.
 - Advisory reviews are named for `git am` and for a message changed with `--amend --no-verify`, and no longer for a commit a fetch brought in.
 - `aimhooman init` after `pre-commit install` keeps both hooks running instead of failing.
 - A hook that mentions pre-commit's header is no longer taken for its script, and a removed `.legacy` hook no longer fails every commit once `aimhooman init` rewrites the shim.
