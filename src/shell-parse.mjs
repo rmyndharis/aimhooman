@@ -1504,7 +1504,8 @@ function blankGroups(text) {
             continue;
         }
         if (char === "'" || char === '"') quote = char;
-        out += char === '(' || char === ')' || char === '{' || char === '}' ? ' ' : char;
+        // A brace inside a word, as in xargs -I{} or {a,b}, is not a group.
+        out += char === '(' || char === ')' || ((char === '{' || char === '}') && isBraceGroupToken(text, i)) ? ' ' : char;
     }
     return out;
 }
@@ -2535,6 +2536,7 @@ function dynamicConfigKey(value) {
 
 function hookAffectingConfig(value) {
     const key = String(value).split('=', 1)[0];
+    if (/^(?:core|sequence)\.editor$/i.test(key) && plainEditor(String(value).slice(key.length + 1))) return false;
     return dynamicConfigKey(value)
         || runsUnseenCommand(key)
         || /^(?:core\.(?:editor|hookspath)|sequence\.editor|include\.path|includeif\..+\.path|remote\..+\.receivepack)$/i.test(key);
@@ -3005,6 +3007,7 @@ const PIPE_INTO_READ_LOOP = new Set(['while', 'until', 'for', 'if', 'case', 'sel
 function textFilterIsData(program, words) {
     const text = words.join(' ');
     if (/(?:^|\s)(?:-f|--file)(?:[=\s]|$)/.test(text)) return false;
+    if (program === 'xargs') return xargsRunsData(words);
     if (['awk', 'gawk', 'mawk', 'nawk'].includes(program)) {
         return !/\b(?:system|getline|popen|ENVIRON)\b|(?:^|[^|])\|(?!\|)/.test(text);
     }
@@ -3012,6 +3015,43 @@ function textFilterIsData(program, words) {
         return !/s(.)(?:(?!\1).)*\1(?:(?!\1).)*\1[a-zA-Z0-9]*e|(?:^|[\s;{}\d$/])e(?:\s|;|}|$)/.test(text);
     }
     return false;
+}
+
+// Programs xargs can run on the words it is fed with nothing to fear: they read,
+// print or measure the names they get and write no file. sort -o, uniq IN OUT and
+// xxd -r IN OUT do, and a Git log or show takes --output=FILE, so none of those is
+// here: the words come from a stream this scan does not see.
+const XARGS_DATA_PROGRAMS = new Set([
+    'basename', 'cat', 'dirname', 'echo', 'egrep', 'fgrep', 'grep', 'head', 'ls', 'readlink',
+    'realpath', 'rg', 'stat', 'tail', 'wc',
+]);
+
+// Whether xargs with these words runs a command that cannot do harm to the hooks or the
+// policy with any words appended: one of the programs above, or Git deleting
+// branches, tags or stashes, as in git branch --merged | xargs git branch -d. A
+// delete is a ref move the final guard sees, and these verbs have no option that
+// writes a file or runs a command. xargs alone runs echo.
+function xargsRunsData(words) {
+    const clean = [];
+    for (const word of words) {
+        const head = word.split(/[;&|)]/)[0];
+        if (head) clean.push(head);
+        if (head !== word) break;
+    }
+    const [command] = wrappedCommands('xargs', clean);
+    if (!command) return clean.every((word) => word.startsWith('-'));
+    const program = shellExecutable(command[0]);
+    if (XARGS_DATA_PROGRAMS.has(program)) return !command.some((word) => /[$`]/.test(word));
+    if (!isGitExecutable(command[0])) return false;
+    const [verb, ...args] = command.slice(1);
+    if (args.some((word) => /[$`]/.test(word))) return false;
+    const flags = args.filter((word) => word.startsWith('-'));
+    if (verb === 'branch') {
+        return flags.some((flag) => ['-d', '-D', '--delete'].includes(flag))
+            && flags.every((flag) => ['-d', '-D', '--delete', '-f', '--force', '-q', '--quiet', '-r', '--remotes'].includes(flag));
+    }
+    if (verb === 'tag') return flags.length === 1 && ['-d', '--delete'].includes(flags[0]);
+    return verb === 'stash' && args[0] === 'drop' && flags.every((flag) => ['-q', '--quiet'].includes(flag));
 }
 
 // BRACE_GROUP_LEAD chars may appear immediately before a brace-group token.
@@ -4390,6 +4430,22 @@ function gitConfigAssignmentsBypass(assignments) {
     });
 }
 
+const EDITOR_VARIABLES = new Set(['EDITOR', 'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'VISUAL']);
+
+// An editor named as a program on the PATH, or the no-ops true and :, with flags
+// such as --wait. It edits a message or a todo list and the hooks run after it,
+// and its value is read as a command line like any other (COMMAND_ENVIRONMENT).
+// A path, a quote, a substitution or a script of its own is not plain.
+const PLAIN_EDITORS = new Set([
+    ':', 'cat', 'code', 'cursor', 'ed', 'emacs', 'emacsclient', 'hx', 'mate', 'nano', 'nvim',
+    'pico', 'subl', 'true', 'vi', 'view', 'vim', 'zed',
+]);
+
+function plainEditor(value) {
+    const [program, ...flags] = String(value).trim().split(/\s+/);
+    return PLAIN_EDITORS.has(program) && flags.every((flag) => /^-{1,2}[A-Za-z][A-Za-z-]*$/.test(flag));
+}
+
 const RUNTIME_ASSIGNMENTS = new Set([
     'BASH_ENV', 'CDPATH', 'ENV', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR',
     'EDITOR', 'GIT_DIR', 'GIT_EDITOR', 'GIT_EXEC_PATH', 'GIT_INDEX_FILE',
@@ -4417,6 +4473,7 @@ function assignmentRiskNames(assignments) {
     for (const assignment of assignments) {
         const separator = assignment.indexOf('=');
         const key = assignment.slice(0, separator).toUpperCase();
+        if (EDITOR_VARIABLES.has(key) && plainEditor(assignment.slice(separator + 1))) continue;
         if (
             RUNTIME_ASSIGNMENTS.has(key)
             || key.startsWith('DYLD_')

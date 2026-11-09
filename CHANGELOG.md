@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Listings with an expanded pattern, `arr[0]=x`, `$GIT status` and `./$SCRIPT` are no longer refused.
 - A substitution that only supplies text to `gh`, `ls`, `cat`, `grep`, `kill`, `docker`, `cd` and the like, as in `gh pr create --body "$(cat <<'EOF' ...)"`, no longer makes the line refused on any profile.
 - Git behind `find -execdir`, `parallel` or `submodule foreach` is refused only when it skips the hooks.
+- A plain editor, as in `GIT_EDITOR=true git rebase --continue` or `-c core.editor=true`, is no longer refused as a skipped hook, in a line or in a script; an editor that is a path, a script or a command that pushes still is.
 - A comment that names `git push --no-verify`, and a `{ }` group of read-only Git commands, are no longer refused.
 - Long chains of `env`, `nice`, `sudo` or assignments are decided quickly, and very large commands no longer crash the parser.
 - A commit the final ref guard refused stays refused under another committer identity, and no branch can be started on it.
