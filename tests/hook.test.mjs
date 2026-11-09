@@ -10,7 +10,9 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { parseGit, asObject, shellPathIsAmbiguous } from '../src/hook.mjs';
 import { defaultPatterns, inspectExclude } from '../src/exclude.mjs';
 import { policyChangeReason } from '../src/policy-change.mjs';
-import { configuredGitRisk, lineUnits, normalizeAnsiCQuotes, stripShellComments } from '../src/shell-parse.mjs';
+import {
+    configuredGitRisk, inspectCommitOptions, lineUnits, normalizeAnsiCQuotes, stripShellComments,
+} from '../src/shell-parse.mjs';
 
 const CLI = join(process.cwd(), 'bin/aimhooman.mjs');
 
@@ -4542,6 +4544,12 @@ test('an agent may not stage or commit the project policy file', async () => {
                 "echo '{}' > .aimhooman.json && git add -A && git commit -m x",
                 "printf '{}' | tee .aimhooman.json && git add .",
                 'cp /tmp/p.json .aimhooman.json; git add -A',
+                // Git takes an unambiguous prefix of a long option, and the shell expands words
+                // the guard cannot read: the path of the file may be spelled out later.
+                'git add --al', 'git add --updat', 'git add --no-ignore-rem', 'git add .aimhooman.json -- src/x.js',
+                'git add $(echo .aimhooman.json)', 'git add `echo .aimhooman.json`', 'f=.aimhooman.json; git add $f',
+                'git add {.aimhooman.json,README.md}', 'git commit -m x $(echo .aimhooman.json)',
+                'find . -maxdepth 1 -name .aimhooman.json -exec git add {} \\;',
             ]) {
                 assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
             }
@@ -4549,6 +4557,8 @@ test('an agent may not stage or commit the project policy file', async () => {
                 'git add src/x.js', 'git add README.md && git commit -m x', 'git add src && git commit -m x',
                 'git commit -m x', 'cat .aimhooman.json', 'git status',
                 "git add src/x.js && git commit -m 'docs: explain .aimhooman.json'",
+                // A commit that names other paths takes nothing else.
+                'git commit -m x src/x.js', 'git add --verbose src/x.js',
             ]) {
                 assert.equal(await decide(command), null, `${profile}: ${command}`);
             }
@@ -4593,6 +4603,41 @@ test('the project policy file is found from a working directory spelled another 
         rmSync(alias, { force: true });
         rmSync(dir, { recursive: true, force: true });
     }
+});
+
+// An ignored file has no change for add to take, unless the add is forced.
+test('an agent may not force an ignored project policy file into the index', async () => {
+    for (const profile of ['clean', 'compliance']) {
+        const dir = makeHookRepo(profile, `aim-hook-policy-ignored-${profile}-`);
+        try {
+            const decide = (command) => invokePreToolUse(dir, { tool_name: 'Bash', tool_input: { command } });
+            writeFileSync(join(dir, '.aimhooman.json'), '{"schema_version":1,"profile":"compliance"}\n');
+            writeFileSync(join(dir, '.gitignore'), '.aimhooman.json\n');
+            for (const command of ['git add .aimhooman.json', 'git add -A', 'git add .', 'git add -f src/x.js']) {
+                assert.equal(await decide(command), null, `${profile}: ${command}`);
+            }
+            for (const command of [
+                'git add -f .aimhooman.json', 'git add --force .aimhooman.json && git commit -m x', 'git add -fA',
+                'git add --forc .', 'find . -name .aimhooman.json -exec git add -f {} +',
+            ]) {
+                assert.equal((await decide(command))?.permissionDecision, 'deny', `${profile}: ${command}`);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test('commit options tell the pathspec words from the options that read the working tree', () => {
+    const read = (...args) => {
+        const { optionIndex, paths } = inspectCommitOptions(args);
+        return { optionIndex, paths };
+    };
+    assert.deepEqual(read('-m', 'x'), { optionIndex: false, paths: [] });
+    assert.deepEqual(read('-m', 'x', 'src/a.js'), { optionIndex: false, paths: ['src/a.js'] });
+    assert.deepEqual(read('-am', 'x'), { optionIndex: true, paths: [] });
+    assert.deepEqual(read('--all', '-m', 'x', '--', 'a', 'b'), { optionIndex: true, paths: ['a', 'b'] });
+    assert.deepEqual(read('-F', '-'), { optionIndex: false, paths: [] });
 });
 
 // The splitters pair quotes without nesting, but a substitution reads its own:

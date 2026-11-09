@@ -30,6 +30,10 @@ is blocked until the user sets the clone's profile with `init --profile`, which 
 the user does. Clean and compliance are not ordered, so a clone on one of them takes
 the policy file's profile (there the file's action is `review`); an agent is refused when
 it stages or commits `.aimhooman.json` at all, because a policy change is the user's to make.
+That refusal reads `git add` and `git commit`, ignored files forced in with `add -f` included.
+Another command that stages the file (`apply --index`, `checkout <rev> -- .aimhooman.json`)
+is refused at the next commit, not within the line that runs it; the floor above for a
+clone that chose `strict` judges the commit, not the command that staged the file.
 Under `strict`, policy files and agent instructions are blocking findings (exit 10):
 both rules' strict action is `block`, not review. The product's `review` and
 `policy-review` commands record local, object-bound decisions. An ordinary path or
