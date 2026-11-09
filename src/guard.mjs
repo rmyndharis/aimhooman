@@ -13,10 +13,10 @@ import {
     stagedPaths,
     stagedRenameSources,
     stagedTreeSha,
-    committedElsewhere,
     committerAddresses,
+    fetchHeld,
     fetchedCommit,
-    localCommitter,
+    localCommitters,
     onLocalBranch,
     unstagePaths,
 } from './gitx.mjs';
@@ -291,18 +291,24 @@ export function resolveIntroduced(repo, updates, {
 // but it keeps the committer it was made with. Any other commit is when this
 // identity committed it and no fetch holds it. Fetched history can outlive
 // FETCH_HEAD and need not have a remote-tracking ref, so someone else's is
-// enough there.
-function authoredHere(repo, { oldObjectId }, introduced, fetchedTips) {
-    if (!/^0+$/.test(oldObjectId) && introduced.length === 1) {
+// enough there. A commit whose committer cannot be read counts as made here, and
+// without an identity here nothing is told apart by committer, so a fetch decides.
+export function authoredHere(repo, { oldObjectId }, introduced, fetchedTips) {
+    if (!introduced.length) return [];
+    const local = localCommitters(repo);
+    const addresses = local.size ? committerAddresses(repo, introduced) : new Map();
+    const elsewhere = (revision) => addresses.has(revision) && !local.has(addresses.get(revision));
+    const old = /^0+$/.test(oldObjectId) ? null : oldObjectId;
+    if (old && introduced.length === 1) {
         const [only] = introduced;
-        return committedElsewhere(repo, only) && fetchedCommit(repo, only, fetchedTips) ? [] : [only];
+        const received = (!local.size || elsewhere(only)) && fetchHeld(repo, [only], fetchedTips, old).has(only);
+        return received ? [] : [only];
     }
-    // A pull can bring in hundreds of commits: read their committers in one call,
-    // and look for a fetch only behind the ones this identity committed.
-    const local = localCommitter(repo);
-    const addresses = local ? committerAddresses(repo, introduced) : new Map();
-    return introduced.filter((revision) => (addresses.get(revision) ?? local) === local
-        && !fetchedCommit(repo, revision, fetchedTips));
+    // A pull can bring in hundreds of commits: the fetch is asked about once, and
+    // only for the ones this identity committed.
+    const mine = introduced.filter((revision) => !elsewhere(revision));
+    const held = fetchHeld(repo, mine, fetchedTips, old);
+    return mine.filter((revision) => !held.has(revision));
 }
 
 // scanProposedCommits scans each introduced commit and returns the first
@@ -359,9 +365,17 @@ export function scanProposedCommits(repo, commits, {
             advisoryReviews: true,
         });
         if (code !== 0) {
-            if (afterPrecommit && authoredLocally) recordRefusedCommit(repo, revision);
+            // A commit a fetch holds was made elsewhere; ledgering it would close every other
+            // route to it, and it can only be reworded where it was made.
+            const fetched = afterPrecommit && authoredLocally && fetchedCommit(repo, revision, fetchedTips);
+            if (afterPrecommit && authoredLocally && !fetched) recordRefusedCommit(repo, revision);
             process.stderr.write(human(scan.findings, tone()));
             if (!scan.complete) process.stderr.write(incompleteMessage(scan));
+            if (fetched) {
+                process.stderr.write(
+                    'aimhooman: this commit came in with a fetch; its message has to be reworded where it was made\n',
+                );
+            }
             if (rejectNote) process.stderr.write(rejectNote(revision));
             return code;
         }

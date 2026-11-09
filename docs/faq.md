@@ -56,7 +56,10 @@ phase and can abort the local ref update. Git 2.54's earlier `preparing` callbac
 accepted for compatibility and checks guard integrity; scanning remains in `prepared`,
 after references are locked. It reads the message of each commit made in this clone,
 however the branch moves (one commit, several, a merge, a forced move), and not the
-messages of history a fetch brought in or that someone else committed.
+messages of history a fetch brought in or that someone else committed. A fetch from this
+repository itself (`git pull . side`) and an address given to the one command
+(`git -c user.email=x merge`) do not make a commit someone else's. A ref made by hand
+in `refs/remotes`, or a committer written into the commit, is still taken at its word.
 CI still scans the exact pushed or PR history:
 local hooks do not govern another clone, server-side updates, or history created before
 the guard was installed.

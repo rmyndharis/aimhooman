@@ -28,7 +28,9 @@ lower the profile it is judged by. A clone that chose `strict` itself (`init --p
 strict`) keeps it against a policy file that is new in a commit made there: the commit
 is blocked until the user sets the clone's profile with `init --profile`, which only
 the user does. A commit a fetch brought in was not made there, whoever committed it, so
-a pull of the user's own commits from another machine still lands. Clean and compliance are not ordered, so a clone on one of them takes
+a pull of the user's own commits from another machine still lands, and so does a merge, a diverged pull
+included, since the commits it merges are history. A plain `init` keeps the strict profile this clone chose
+when the policy file names a weaker one. Clean and compliance are not ordered, so a clone on one of them takes
 the policy file's profile (there the file's action is `review`); an agent is refused when
 it stages or commits `.aimhooman.json`, because a policy change is the user's to make.
 The refusal reads `git add` and `git commit` for what they would take of the file in the

@@ -8,8 +8,10 @@ import {
     GitRevisionError,
     GitTargetReadError,
     committerAddresses,
+    fetchHeadObjects,
+    fetchHeld,
     introducedCommits,
-    localCommitter,
+    localCommitters,
     openRepo,
     readCommitPath,
     readStagedPath,
@@ -641,13 +643,82 @@ test('committer addresses are read for many commits at once, lower case', () => 
         }).trim();
         const mate = by('Mate@Example.com', base);
         const mine = by('t@t', mate);
-        assert.equal(localCommitter(repo), 't@t');
+        assert.deepEqual([...localCommitters(repo)], ['t@t']);
         const addresses = committerAddresses(repo, [base, mate, mine]);
         assert.deepEqual([...addresses], [[base, 't@t'], [mate, 'mate@example.com'], [mine, 't@t']]);
         assert.equal(committerAddresses(repo, []).size, 0);
         // A commit Git cannot read leaves the others unread rather than guessed.
         assert.equal(committerAddresses(repo, [base, 'a'.repeat(40)]).size, 0);
         assert.throws(() => committerAddresses(repo, ['HEAD']), /full Git object ID/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('the addresses Git commits with here are lower case, and an address given to one command is one of them', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        git(dir, ['config', 'user.email', 'T@Example.INVALID']);
+        assert.deepEqual([...localCommitters(repo)], ['t@example.invalid']);
+        const keys = ['GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_NAME'];
+        const before = keys.map((key) => process.env[key]);
+        process.env.GIT_COMMITTER_EMAIL = 'Other@Example.INVALID';
+        process.env.GIT_COMMITTER_NAME = 'Other';
+        try {
+            assert.deepEqual([...localCommitters(repo)].sort(), ['other@example.invalid', 't@example.invalid']);
+        } finally {
+            keys.forEach((key, at) => {
+                if (before[at] === undefined) delete process.env[key];
+                else process.env[key] = before[at];
+            });
+        }
+        // Nothing to commit with: there is none, and nothing can be told apart.
+        git(dir, ['config', 'user.useConfigOnly', 'true']);
+        git(dir, ['config', 'user.email', '']);
+        git(dir, ['config', 'user.name', '']);
+        assert.equal(localCommitters(repo).size, 0);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('FETCH_HEAD lists what another repository sent and leaves out what this one sent itself', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        const sent = (digit, where) => `${digit.repeat(40)}\t\tbranch 'main' of ${where}`;
+        writeFileSync(join(repo.gitDir, 'FETCH_HEAD'), [
+            sent('a', '.'), sent('b', dir), sent('c', `file://${dir}`), sent('d', join(dir, '.git')),
+            sent('1', 'https://example.com/team/repo'),
+            `${'2'.repeat(40)}\tnot-for-merge\tbranch 'dev' of git@example.com:team/repo`,
+            sent('3', tmpdir()),
+            '',
+        ].join('\n'));
+        assert.deepEqual(fetchHeadObjects(repo), ['1'.repeat(40), '2'.repeat(40), '3'.repeat(40)]);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('the commits a fetch holds are told apart in one call, bounded by the old tip', () => {
+    const dir = freshRepo();
+    try {
+        const repo = openRepo(dir);
+        const base = git(dir, ['rev-parse', 'HEAD']);
+        const tree = git(dir, ['rev-parse', 'HEAD^{tree}']);
+        const c1 = git(dir, ['commit-tree', tree, '-p', base, '-m', 'one']);
+        const c2 = git(dir, ['commit-tree', tree, '-p', c1, '-m', 'two']);
+        const c3 = git(dir, ['commit-tree', tree, '-p', c2, '-m', 'three']);
+        git(dir, ['update-ref', 'refs/remotes/origin/main', c2]);
+        const held = (oids, tips = []) => [...fetchHeld(repo, oids, tips, base)].sort();
+        // c2 is on a remote-tracking ref and c1 is its parent; c3 is nobody's.
+        assert.deepEqual(held([c1, c2, c3]), [c1, c2].sort());
+        // A tip of the same transaction counts, one Git cannot walk only narrows.
+        assert.deepEqual(held([c3], [c3]), [c3]);
+        assert.deepEqual(held([c1, c3], ['a'.repeat(40)]), [c1]);
+        assert.equal(fetchHeld(repo, [], [], base).size, 0);
+        assert.equal(fetchHeld(repo, [c3], [], null).size, 0, 'the old tip is optional');
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }

@@ -793,7 +793,11 @@ function cmdRefcheck(args) {
             // so phrase the cleanup as conditional; rotating an exposed secret
             // stays the operator's call either way.
             + 'aimhooman: note: the rejected commit object remains in the local object store; '
-            + "if nothing else references it, 'git gc --prune=now' removes it when you are done inspecting\n",
+            + "if nothing else references it, 'git gc --prune=now' removes it when you are done inspecting\n"
+            // Git writes the work tree and the index before it asks for the ref.
+            + "aimhooman: note: the work tree and index may already show the rejected commit; 'git status' shows what is left, "
+            + "'git merge --abort' ends a merge, and 'git reset --hard HEAD' returns the files to the current commit "
+            + 'and discards uncommitted changes\n',
     });
     if (code !== 0) return code;
     // The reference-transaction hook is the last veto point. If its chained
@@ -978,6 +982,7 @@ function cmdInit(args) {
         return 30;
     }
     const code = withLock(join(repo.commonDir, 'aimhooman-lifecycle.lock'), () => {
+        let kept;
         let projectPolicy;
         try {
             projectPolicy = loadProjectPolicy(repo.root);
@@ -994,6 +999,16 @@ function cmdInit(args) {
                 return 20;
             }
             profile = projectPolicy.profile;
+            // A plain init repairs the hooks. The strict profile this clone chose stays what
+            // it is under a weaker policy file, since the floor against that file reads it.
+            if (!profileExplicit && profile !== 'strict') {
+                try {
+                    const saved = loadConfig(repo.stateDir);
+                    if (saved.source === 'local' && saved.profile === 'strict') kept = 'strict';
+                } catch {
+                    // An unreadable local config is written again below, as a plain init always did.
+                }
+            }
         } else if (!profileExplicit) {
             // Re-running init repairs the hooks, as the refusals that ask for it
             // say. It keeps the profile this clone chose instead of resetting a
@@ -1071,14 +1086,14 @@ function cmdInit(args) {
             const gitignore = gitignoreWanted
                 ? { enabled: true, created: Boolean(previousGitignore?.created) || !existsSync(gitignoreFile) }
                 : undefined;
-            saveConfig(repo.stateDir, gitignore ? { profile, gitignore } : { profile });
+            saveConfig(repo.stateDir, gitignore ? { profile: kept ?? profile, gitignore } : { profile: kept ?? profile });
             // The opt-in worktree file goes first, so every later failure —
             // including the core exclude write — rolls it back with the rest.
             if (gitignore) applyExclude(gitignoreFile, patterns);
             applyExclude(repo.excludeFile, patterns);
             const saved = loadConfig(repo.stateDir);
             const excludes = inspectExclude(repo.excludeFile, patterns);
-            if (saved.profile !== profile || !excludes.current
+            if (saved.profile !== (kept ?? profile) || !excludes.current
                 || (gitignore && !inspectExclude(gitignoreFile, patterns).current)) {
                 throw new Error('post-install state verification failed');
             }
@@ -1112,7 +1127,8 @@ function cmdInit(args) {
             console.error(`aimhooman: initialisation failed and prior files were restored: ${error.message}`);
             return /hook installation incomplete/.test(error.message) ? 20 : expectedErrorCode(error);
         }
-        console.log(`aimhooman: initialised (profile: ${profile})`);
+        console.log(`aimhooman: initialised (profile: ${kept ?? profile})`);
+        if (kept) console.log(`  note:     the project policy file names ${profile}; this clone keeps the ${kept} profile it chose`);
         console.log(`  state:    ${repo.stateDir}`);
         console.log(`  excludes: ${repo.excludeFile}`);
         console.log(`  note:     known AI artifacts are now ignored locally; see them with 'git status --ignored'`);
