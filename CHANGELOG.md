@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hook and config paths count however they are spelled: `.git//hooks`, `.git/./hooks`, `.git/[h]ooks`, the `.git` directory, a global gitconfig, or a path after `cd .git`.
 - An agent can no longer run `aimhooman allow`, `review`, `policy-review`, `uninstall`, `override remove` or `reset`, or `init` to a profile other than strict or the current one, nor change files in `.git/aimhooman`.
 - Those aimhooman commands, and a script written in the same line, are read behind `find -exec`, `xargs`, `su -c`, `watch`, `parallel` and in `python -c`, `node -e`, `perl -e`, `ruby -e` and `make --eval` code; a subcommand in a variable, as in `aimhooman $SUB`, is refused.
+- `core.bare = true` in `.git/config` no longer switches off the final ref guard and `pre-push` in a repository that has a worktree; only a repository whose control directory is not named `.git` is taken for bare.
+- On `strict`, a hook whose aimhooman CLI file is missing stops the operation instead of warning and going on; `clean` and `compliance` still warn.
 
 ### Fixed
 
@@ -40,9 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An empty or broken ref file no longer makes the final ref guard refuse an update.
 - Advisory reviews are named for `git am` and for a message changed with `--amend --no-verify`, and no longer for a commit a fetch brought in.
 - `aimhooman init` after `pre-commit install` keeps both hooks running instead of failing.
+- A commit that adds `.aimhooman.json` as a directory or a submodule no longer makes every pull, reset and checkout that carries it fail at `clean`; it is read like a symlink there.
+- `git symbolic-ref refs/heads/<name> <ref>` and its deletion are no longer stopped as a malformed reference update.
 - A hook that mentions pre-commit's header is no longer taken for its script, and a removed `.legacy` hook no longer fails every commit once `aimhooman init` rewrites the shim.
 - A branch pushed under another name (`git push origin wip:other`, `HEAD:other`, `wip~0:other`) is scanned like the branch itself.
-- A plain `aimhooman init` keeps the profile the clone already uses instead of resetting it to `clean`.
+- A plain `aimhooman init` keeps the profile the clone already uses instead of resetting it to `clean`, and asks for `--profile` when it cannot read it.
 
 ## [0.7.0] - 2026-11-08
 

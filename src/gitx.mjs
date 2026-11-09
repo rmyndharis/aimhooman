@@ -385,7 +385,9 @@ export function readCommitPath(repo, revision, path) {
         throw new GitTargetReadError(target, path, 'unexpected tree entry');
     }
     if (match[2] !== 'blob') {
-        throw new GitTargetReadError(target, path, `expected a blob, found ${match[2]}`);
+        const error = new GitTargetReadError(target, path, `expected a blob, found ${match[2]}`);
+        error.entry = { type: match[2], mode: match[1], oid: match[3] };
+        throw error;
     }
     return presentPath(repo, target, path, { mode: match[1], oid: match[3] });
 }

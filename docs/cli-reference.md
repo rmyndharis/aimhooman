@@ -70,10 +70,15 @@ index change cannot select a weaker policy. The prepared reference transaction i
 last local check for cherry-pick, revert, rebase, `git am`, fetch/worktree branch
 creation, and direct branch-ref updates. The `pre-push` hook scans every commit a push
 would introduce — including one pushed by raw object ID, which moves no local branch
-and therefore never passes the reference-transaction guard. Every profile stops if a
+and therefore never passes the reference-transaction guard. Only `git push` runs
+`pre-push`: `git send-pack` and `git http-push` run no hook, and the message of an
+annotated tag or a note is not scanned, so the CI range check stays the boundary for
+those. Every profile stops if a
 predecessor removes
 a required guard; the first running dispatcher that detects the loss aborts the
-operation.
+operation. If the aimhooman CLI file a dispatcher points at is gone (a cleaned `npx`
+cache, a switched Node version), `clean` and `compliance` warn and let the operation
+through, and `strict` stops it until the guard is reinstalled or removed.
 
 ## Commands
 

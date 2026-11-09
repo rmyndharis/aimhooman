@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { hashBlob, readCommitPath, readStagedPath } from './gitx.mjs';
+import { GitTargetReadError, hashBlob, readCommitPath, readStagedPath } from './gitx.mjs';
 import { loadConfig, parseProjectPolicy, ProjectPolicyError } from './state.mjs';
 
 const POLICY_PATH = '.aimhooman.json';
@@ -53,7 +53,22 @@ export function resolvePolicy(repo, options = {}) {
         if (typeof revision !== 'string' || !revision) {
             throw new PolicyTargetError('commit target needs a revision');
         }
-        const result = readCommitPath(repo, revision, POLICY_PATH);
+        let result;
+        try {
+            result = readCommitPath(repo, revision, POLICY_PATH);
+        } catch (error) {
+            // A directory or a submodule where the policy file should be reads no
+            // better than a symlink: tolerated the same way, loud for a direct ask.
+            if (!tolerant || !(error instanceof GitTargetReadError) || !error.entry) throw error;
+            return {
+                profile: null,
+                source: 'commit-policy',
+                target: error.target,
+                policy_object_id: error.entry.oid,
+                policy_mode: error.entry.mode,
+                unparseable: `project policy "${error.target}:${POLICY_PATH}": must be a regular Git file, not ${error.entry.type === 'commit' ? 'a submodule' : `a ${error.entry.type}`}`,
+            };
+        }
         try {
             resolved = resolveGitPolicy(repo, result, 'commit-policy');
         } catch (error) {

@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, readdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIT_TIMEOUT_MS } from '../src/git-environment.mjs';
 import { newEngineWithDiagnostics } from '../src/scan.mjs';
@@ -64,13 +64,20 @@ function tryRepo() {
     }
 }
 
+// Whether the hook runs in a bare repository, the one place a global dispatcher
+// has nothing to guard. core.bare is a line in .git/config, so a repository with a
+// worktree can be made to say true by one `git config core.bare true`, and with it
+// every ref update and push would pass unscanned. A repository's own control
+// directory is named .git, whatever the setting says, so one that is named so
+// has a worktree beside it and is not bare.
 function currentRepositoryIsBare() {
     try {
-        return execFileSync('git', ['rev-parse', '--is-bare-repository'], {
+        const [bare, gitDir = ''] = execFileSync('git', ['rev-parse', '--is-bare-repository', '--absolute-git-dir'], {
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
             timeout: GIT_TIMEOUT_MS,
-        }).trim() === 'true';
+        }).trim().split('\n');
+        return bare === 'true' && basename(gitDir) !== '.git';
     } catch {
         return false;
     }
@@ -698,7 +705,11 @@ function cmdRefcheck(args) {
             headRef ??= repo ? symbolicHead(repo) : '';
             if (ref !== headRef) continue;
         }
-        if (ref === 'HEAD' && newObjectId.startsWith('ref:')) continue;
+        // A symbolic ref (HEAD, or a branch made with git symbolic-ref) names another
+        // ref and holds no commit of its own: the branch it names was scanned when it
+        // moved. Pointing one elsewhere, or deleting it, introduces nothing; turning
+        // one into a direct ref (update-ref --no-deref) does, and is not skipped.
+        if (newObjectId.startsWith('ref:') || (oldObjectId.startsWith('ref:') && /^0+$/.test(newObjectId))) continue;
         if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oldObjectId)
             || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(newObjectId)) {
             console.error('aimhooman: malformed object ID in reference transaction; update stopped');
@@ -990,7 +1001,14 @@ function cmdInit(args) {
             try {
                 const saved = loadConfig(repo.stateDir).profile;
                 if ([...PROFILES].includes(saved)) profile = saved;
-            } catch { /* no usable saved profile: the default stands */ }
+            } catch (error) {
+                // The hooks refuse while the file cannot be read. Writing the default
+                // over it would turn a strict clone into a clean one without a word, so
+                // the profile is asked for instead.
+                console.error(`aimhooman: ${error.message}`);
+                console.error('aimhooman: the profile this clone chose cannot be read; run init with --profile clean, strict or compliance to set it again');
+                return 20;
+            }
         }
         let eng;
         try {

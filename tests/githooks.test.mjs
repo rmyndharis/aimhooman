@@ -2251,6 +2251,41 @@ test('generated hook allows the operation when its embedded CLI cannot run', () 
     }
 });
 
+// Clean and compliance warn and go on when the CLI file is gone, because a cleaned
+// npx cache or a switched Node version moves it without anyone meaning to switch
+// the guard off. Strict cancels instead of trusting, as it does for a missing
+// interpreter, and says how to put the guard back.
+test('a strict dispatcher stops the operation when its embedded CLI is missing', () => {
+    const base = mkdtempSync(join(tmpdir(), 'aim-hooks-strict-missing-cli-'));
+    try {
+        isolatedGitConfig(base, () => {
+            const root = makeRepo(base);
+            const repo = openRepo(root);
+            const hooks = git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+            installHooks(repo, join(base, 'missing-cli.mjs'));
+            writeFileSync(join(root, 'staged.txt'), 'staged\n');
+            git(root, ['add', 'staged.txt']);
+            const drive = (name) => spawnSync(HOOK_SHELL, [shellArgumentPath(join(hooks, name))], {
+                cwd: root,
+                encoding: 'utf8',
+                env: { ...process.env, PATH: '' },
+            });
+            assert.equal(drive('pre-commit').status, 0, 'clean: the warning and go on, as before');
+            mkdirSync(join(root, '.git', 'aimhooman'), { recursive: true });
+            writeFileSync(join(root, '.git', 'aimhooman', 'config.json'), '{\n  "schema_version": 1,\n  "profile": "strict"\n}\n');
+            const strict = drive('pre-commit');
+            assert.equal(strict.status, 20, strict.stderr);
+            assert.match(strict.stderr, /CLI is missing/);
+            assert.match(strict.stderr, /strict/);
+            assert.doesNotMatch(strict.stderr, /allowing this operation/);
+            writeFileSync(join(root, '.git', 'aimhooman', 'config.json'), '{"schema_version":1,"profile":"compliance"}\n');
+            assert.equal(drive('pre-commit').status, 0, 'compliance goes on with the warning');
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 // A dispatcher whose pinned interpreter has moved: `brew upgrade node`, an nvm
 // switch, an fnm or volta shim all relocate the process.execPath that init pins.
 // The CLI file is still there, but a .mjs file is inert without an interpreter,
