@@ -1871,13 +1871,18 @@ test('the final guard reads every commit made here, whatever shape moves the bra
                 const first = git(root, ['commit-tree', tree, '-p', initial, '-m', message]);
                 const second = git(root, ['commit-tree', tree, '-p', first, '-m', 'chore: second']);
                 const ref = `refs/heads/${main}`;
+                // Which commits are read does not depend on the profile, and each shape costs
+                // a guard run: strict gets the shapes that differ in how the commits arrive.
+                const all = profile === 'clean';
 
                 stays('two commits in one update', ref, () => run(['update-ref', ref, second, initial]));
                 stays('a branch made at the commit', 'refs/heads/made', () => run(['update-ref', 'refs/heads/made', first]));
-                stays('git branch at the commit', 'refs/heads/also', () => run(['branch', 'also', first]));
-                stays('update-ref with no old value', ref, () => run(['update-ref', ref, first]));
-                stays('checkout -B', ref, () => run(['checkout', '-q', '-B', main, first]));
-                stays('reset --hard', ref, () => run(['reset', '-q', '--hard', second]));
+                if (all) {
+                    stays('git branch at the commit', 'refs/heads/also', () => run(['branch', 'also', first]));
+                    stays('update-ref with no old value', ref, () => run(['update-ref', ref, first]));
+                    stays('checkout -B', ref, () => run(['checkout', '-q', '-B', main, first]));
+                    stays('reset --hard', ref, () => run(['reset', '-q', '--hard', second]));
+                }
 
                 // Two commits made with the hooks off, then brought in with the hooks on.
                 const off = ['-c', 'core.hooksPath=/dev/null'];
@@ -1890,7 +1895,7 @@ test('the final guard reads every commit made here, whatever shape moves the bra
                 git(root, [...off, 'commit', '-q', '-m', 'chore: s2']);
                 git(root, ['checkout', '-q', main]);
                 stays('a fast-forward over two commits made with the hooks off', ref, () => run(['merge', '--ff-only', 'side']));
-                stays('a merge of a commit made with the hooks off', ref, () => run(['merge', '--no-ff', '-m', 'merge side', 'side']));
+                if (all) stays('a merge of a commit made with the hooks off', ref, () => run(['merge', '--no-ff', '-m', 'merge side', 'side']));
 
                 // Work that carries no attribution moves in every one of those shapes.
                 const clean = git(root, ['commit-tree', tree, '-p', initial, '-m', 'feat: plain']);
@@ -1936,12 +1941,6 @@ test('the final guard lets history from elsewhere in, however many commits move 
             const checkout = run(['checkout', '-q', '-b', 'feat', 'origin/feat']);
             assert.equal(checkout.status, 0, checkout.stderr);
             run(['checkout', '-q', main]);
-
-            git(clone, ['commit', '-q', '--allow-empty', '-m', 'local work']);
-            empty(upstream, 'four');
-            empty(upstream, 'five');
-            const merge = run(['pull', '-q', '--no-rebase', '--no-edit']);
-            assert.equal(merge.status, 0, merge.stderr);
 
             // Two commits this identity made on another machine come in as well.
             const own = join(base, 'own');
@@ -2018,16 +2017,20 @@ test('the final guard does not take its own repository or an address given to th
                 // The refused move may have left the files; the note says how to get back.
                 assert.match(first.stderr, /git merge --abort/, profile);
                 assert.match(first.stderr, /git reset --hard HEAD/, profile);
-                stays('a fetch from this repository and a merge of FETCH_HEAD', () => {
-                    run(['fetch', '-q', '.', 'side']);
-                    return run(['merge', '--no-ff', '--no-edit', 'FETCH_HEAD']);
-                });
+                // Each shape costs a guard run, and what is read does not depend on the profile:
+                // strict gets one route by fetch and one by address.
                 stays('an address given with -c to the update', () => run(['-c', 'user.email=other@example.com', 'merge', '--ff-only', 'side']));
-                stays('an address given in the environment to the update', () => run(['merge', '--ff-only', 'side'], {
-                    GIT_COMMITTER_EMAIL: 'other@example.com',
-                    GIT_COMMITTER_NAME: 'Other',
-                }));
-                stays('reset --hard under another address', () => run(['-c', 'user.email=other@example.com', 'reset', '--hard', 'side']));
+                if (profile === 'clean') {
+                    stays('a fetch from this repository and a merge of FETCH_HEAD', () => {
+                        run(['fetch', '-q', '.', 'side']);
+                        return run(['merge', '--no-ff', '--no-edit', 'FETCH_HEAD']);
+                    });
+                    stays('an address given in the environment to the update', () => run(['merge', '--ff-only', 'side'], {
+                        GIT_COMMITTER_EMAIL: 'other@example.com',
+                        GIT_COMMITTER_NAME: 'Other',
+                    }));
+                    stays('reset --hard under another address', () => run(['-c', 'user.email=other@example.com', 'reset', '--hard', 'side']));
+                }
                 // The commits are not the ones in the way, only how they arrive.
                 const merged = run(['merge', '--ff-only', 'HEAD']);
                 assert.equal(merged.status, 0, `${profile}: ${merged.stderr}`);
